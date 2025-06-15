@@ -1,32 +1,29 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# Binaries for programs and plugins <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+*.exe <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+*.exe~ <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+*.dll <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+*.so <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+*.dylib <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 
-# Test binary, built with `go test -c`
-*.test
+# Test binary, built with `go test -c` <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+*.test <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 
-# Code coverage profiles and other test artifacts
-*.out
-coverage.*
-*.coverprofile
-profile.cov
+# Code coverage profiles and other test artifacts <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+*.out <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+coverage.* <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+*.coverprofile <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+profile.cov <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Dependency directories <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+# vendor/ <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 
-# Go workspace file
-go.work
-go.work.sum
+# Go workspace file <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+go.work <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+go.work.sum <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 
-# env file
-.env
+# Environment variables <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+.env <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# IDE / Editor specific files <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+.idea/ <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+.vscode/ <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
