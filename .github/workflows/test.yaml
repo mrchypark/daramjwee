@@ -1,4 +1,4 @@
-name: Go Test CI
+name: Go Test and Lint CI
 
 on:
   push:
@@ -10,12 +10,39 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24' # 사용하시는 Go 버전에 맞게 수정해주세요.
+        go-version: '1.24'
 
-    - name: Run tests
-      run: go test -v ./...
+    - name: Run tests with race detector and coverage
+      run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+    # 선택 사항: Codecov와 같은 커버리지 리포팅 툴에 결과 업로드
+    # - name: Upload coverage to Codecov
+    #   uses: codecov/codecov-action@v4
+    #   with:
+    #     token: ${{ secrets.CODECOV_TOKEN }} # 리포지토리 설정에서 토큰 추가 필요
+    #     files: ./coverage.out
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      # .devcontainer.json에 명시된 golangci-lint를 CI에도 적용
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # 사용할 golangci-lint 버전 (최신 버전 권장)
+          version: v1.59
+          args: --timeout=3m
