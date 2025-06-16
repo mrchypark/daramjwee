@@ -28,6 +28,7 @@ type DaramjweeCache struct {
 var _ Cache = (*DaramjweeCache)(nil)
 
 // Get은 요청된 캐싱 전략에 따라 데이터를 가져옵니다.
+// 캐시 확인 및 Origin fetch 로직을 각 헬퍼 메서드로 분리하여 가독성을 높였습니다.
 func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error) {
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
@@ -35,9 +36,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	// 1. Hot 캐시 확인
 	hotStream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
 	if err == nil {
-		level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
-		c.ScheduleRefresh(context.Background(), key, fetcher)
-		return hotStream, nil
+		return c.handleHotHit(ctx, key, fetcher, hotStream)
 	}
 	if err != ErrNotFound {
 		level.Error(c.Logger).Log("msg", "hot store get failed", "key", key, "err", err)
@@ -46,41 +45,66 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	// 2. Cold 캐시 확인
 	coldStream, coldMeta, err := c.getStreamFromStore(ctx, c.ColdStore, key)
 	if err == nil {
-		level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
-		return c.promoteAndTeeStream(ctx, key, coldMeta.ETag, coldStream)
+		return c.handleColdHit(ctx, key, coldStream, coldMeta)
 	}
 	if err != ErrNotFound {
 		level.Error(c.Logger).Log("msg", "cold store get failed", "key", key, "err", err)
 	}
 
 	// 3. Origin에서 Fetch
+	return c.handleMiss(ctx, key, fetcher)
+}
+
+// handleHotHit는 Hot 캐시에서 객체를 찾았을 때의 로직을 처리합니다.
+func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher Fetcher, hotStream io.ReadCloser) (io.ReadCloser, error) {
+	level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
+	// 응답은 즉시 반환하고, 백그라운드에서 캐시 갱신을 시도합니다.
+	c.ScheduleRefresh(context.Background(), key, fetcher)
+	return hotStream, nil
+}
+
+// handleColdHit는 Cold 캐시에서 객체를 찾았을 때의 로직을 처리합니다.
+func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStream io.ReadCloser, coldMeta *Metadata) (io.ReadCloser, error) {
+	level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
+	// Cold 캐시의 데이터를 클라이언트로 스트리밍하면서 동시에 Hot 캐시로 승격시킵니다.
+	return c.promoteAndTeeStream(ctx, key, coldMeta.ETag, coldStream)
+}
+
+// handleMiss는 Hot/Cold 캐시에서 모두 객체를 찾지 못했을 때의 로직을 처리합니다.
+func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "full cache miss, fetching from origin", "key", key)
 
+	// Origin에 요청하기 전에, 만료되었을 수 있는 로컬 캐시의 ETag를 확인합니다.
 	var oldETag string
 	if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil && meta != nil {
 		oldETag = meta.ETag
 	}
 
+	// Origin에서 데이터를 가져옵니다.
 	result, err := fetcher.Fetch(ctx, oldETag)
 	if err != nil {
+		// Origin의 데이터가 변경되지 않은 경우 (HTTP 304 Not Modified)
 		if err == ErrNotModified {
 			level.Debug(c.Logger).Log("msg", "object not modified, serving from hot cache again", "key", key)
 			stream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
 			if err != nil {
+				// 304 응답을 받았지만, 그 사이에 캐시가 삭제되었을 수 있는 엣지 케이스 처리
 				level.Warn(c.Logger).Log("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
 				return nil, ErrNotFound
 			}
 			return stream, nil
 		}
-		return nil, err
+		return nil, err // 그 외의 Fetch 에러
 	}
 
+	// 가져온 데이터를 클라이언트로 스트리밍하면서 동시에 Hot 캐시에 저장합니다.
 	hotTeeStream, err := c.cacheAndTeeStream(ctx, key, result)
 	if err != nil {
+		// 캐싱에 실패하더라도 클라이언트에게는 데이터를 전달해야 합니다.
 		return result.Body, nil
 	}
 
-	// cold에 set 을 worker에 요청
+	// 백그라운드에서 Hot 캐시의 데이터를 Cold 캐시에도 저장하도록 작업을 예약합니다.
 	c.scheduleSetToStore(context.Background(), c.ColdStore, key)
 
 	return hotTeeStream, nil
