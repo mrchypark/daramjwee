@@ -24,15 +24,17 @@ func NewPoolStrategy(logger log.Logger, poolSize int, queueSize int, timeout tim
 		poolSize = 10 // 기본 풀 사이즈
 	}
 
+	// queueSize가 0 이하일 경우 합리적인 기본값으로 설정합니다.
 	if queueSize <= 0 {
-		queueSize = poolSize * 2
+		queueSize = 100
 	}
 	p := &PoolStrategy{
 		logger:   logger,
 		poolSize: poolSize,
 		timeout:  timeout,
-		jobs:     make(chan Job, poolSize), // 작업 큐 버퍼
-		quit:     make(chan struct{}),
+		// [수정] poolSize 대신 queueSize를 사용하여 작업 채널의 버퍼를 설정합니다.
+		jobs: make(chan Job, queueSize),
+		quit: make(chan struct{}),
 	}
 	p.start()
 	return p
