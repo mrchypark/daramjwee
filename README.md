@@ -24,7 +24,7 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
 * ⚙️ **ETag-based Efficiency:** Exchanges ETags with the origin server to check for content changes. If the content is not modified (`ErrNotModified`), it avoids unnecessary data transfer, saving network bandwidth.
 
-* 🧩 **Pluggable Eviction Policies:** Includes LRU (Least Recently Used) and S2-FIFO policies by default. Users can apply custom strategies by implementing the `EvictionPolicy` interface.
+* 🧩 **Pluggable Eviction Policies:** Includes LRU (Least Recently Used) and S3-FIFO policies by default. Users can apply custom strategies by implementing the `EvictionPolicy` interface.
 
 ## Architectural Highlights
 
