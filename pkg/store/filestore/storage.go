@@ -3,12 +3,13 @@ package filestore
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/goccy/go-json"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level" // Added import

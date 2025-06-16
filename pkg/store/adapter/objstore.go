@@ -4,10 +4,11 @@ package adapter
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/goccy/go-json"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"

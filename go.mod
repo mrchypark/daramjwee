@@ -4,6 +4,7 @@ go 1.24.3
 
 require (
 	github.com/go-kit/log v0.2.1
+	github.com/goccy/go-json v0.10.4
 	github.com/samber/go-singleflightx v0.3.2
 	github.com/stretchr/testify v1.10.0
 	github.com/thanos-io/objstore v0.0.0-20250317105316-a0136a6f898d
