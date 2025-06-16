@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-kit/log"
@@ -13,13 +14,15 @@ import (
 
 // setupTestStore는 각 테스트를 위한 임시 디렉토리와 FileStore 인스턴스를 생성합니다.
 // t.Cleanup()을 사용하여 테스트가 끝나면 자동으로 디렉토리를 삭제합니다.
-func setupTestStore(t *testing.T) *FileStore {
+func setupTestStoreWithOptions(t *testing.T, opts ...Option) *FileStore {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "filestore-test-*")
 	if err != nil {
 		t.Fatalf("테스트 디렉토리 생성 실패: %v", err)
 	}
 	t.Cleanup(func() {
+		// 테스트 중 권한이 변경되었을 수 있으므로, 정리 전에 권한을 복구합니다.
+		_ = os.Chmod(dir, 0755)
 		if err := os.RemoveAll(dir); err != nil {
 			t.Logf("Error removing test directory %s: %v", dir, err)
 		}
@@ -27,11 +30,69 @@ func setupTestStore(t *testing.T) *FileStore {
 
 	// 테스트 중에는 로깅을 하지 않도록 No-op 로거를 사용합니다.
 	logger := log.NewNopLogger()
-	fs, err := New(dir, logger)
+	fs, err := New(dir, logger, opts...) // opts 파라미터를 New 함수에 전달
 	if err != nil {
 		t.Fatalf("FileStore 생성 실패: %v", err)
 	}
 	return fs
+}
+
+// 기존 테스트와의 호환성을 위해 setupTestStore는 옵션 없이 호출하는 형태로 남겨둡니다.
+func setupTestStore(t *testing.T) *FileStore {
+	return setupTestStoreWithOptions(t)
+}
+
+// TestFileStore_SetWithCopyAndTruncate_ErrorOnCopy는 복사/잘라내기 전략 사용 중
+// 최종 파일 생성 단계에서 에러가 발생했을 때, 에러가 올바르게 전파되고
+// 임시 파일이 깨끗하게 정리되는지 검증합니다.
+func TestFileStore_SetWithCopyAndTruncate_ErrorOnCopy(t *testing.T) {
+	// 1. WithCopyAndTruncate 옵션으로 FileStore를 설정합니다.
+	fs := setupTestStoreWithOptions(t, WithCopyAndTruncate())
+	ctx := context.Background()
+
+	// 2. 에러 상황을 유도합니다.
+	//    존재하지 않는 디렉토리를 포함하는 키를 사용하여 copyFile 내부의 os.Create(dst)가
+	//    실패하도록 만듭니다. 이 방법은 디렉토리 쓰기 권한에 영향을 주지 않으므로
+	//    임시 파일 삭제는 성공할 수 있습니다.
+	key := "non-existent-dir/copy-error-key"
+
+	writer, err := fs.SetWithWriter(ctx, key, "v1")
+	if err != nil {
+		t.Fatalf("SetWithWriter 초기화 실패: %v", err)
+	}
+	if _, err := writer.Write([]byte("this data should be cleaned up")); err != nil {
+		t.Fatalf("임시 파일에 쓰기 실패: %v", err)
+	}
+
+	// 3. writer.Close()를 호출합니다. 이 때 내부적으로 copyFile이 실패해야 합니다.
+	err = writer.Close()
+	if err == nil {
+		t.Fatal("writer.Close()가 에러를 반환해야 했지만, 성공했습니다.")
+	}
+
+	// 에러 타입을 확인하는 대신, 에러 메시지 내용을 직접 확인하여 안정성을 높입니다.
+	expectedErrStr := "no such file or directory"
+	if !strings.Contains(err.Error(), expectedErrStr) {
+		t.Fatalf("에러 메시지에 '%s'가 포함되어야 하지만, 실제 에러는 다음과 같습니다: %v", expectedErrStr, err)
+	}
+
+	// 4. 의도한 대로 동작했는지 후속 상태를 검증합니다.
+	// 4.1. 최종 목적지 파일이 생성되지 않았는지 확인합니다.
+	finalPath := fs.toDataPath(key)
+	if _, statErr := os.Stat(finalPath); !os.IsNotExist(statErr) {
+		t.Errorf("복사 실패 후 최종 파일(%s)이 남아있습니다.", finalPath)
+	}
+
+	// 4.2. 임시 파일이 깨끗하게 삭제되었는지 확인합니다. (핵심 검증)
+	files, readDirErr := os.ReadDir(fs.baseDir)
+	if readDirErr != nil {
+		t.Fatalf("정리 상태를 확인하기 위해 디렉토리를 읽는 데 실패했습니다: %v", readDirErr)
+	}
+	for _, file := range files {
+		if strings.HasPrefix(file.Name(), "daramjwee-tmp-") {
+			t.Errorf("에러 발생 후 임시 파일(%s)이 삭제되지 않았습니다.", file.Name())
+		}
+	}
 }
 
 // TestFileStore_SetAndGet은 가장 기본적인 Set 후 Get 시나리오를 테스트합니다.

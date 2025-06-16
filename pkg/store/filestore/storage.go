@@ -217,37 +217,38 @@ func (fs *FileStore) writeMetaFile(dataPath string, etag string) error {
 }
 
 // copyFile은 src 경로의 파일을 dst 경로로 복사합니다. dst 파일이 이미 존재하면 덮어씁니다.
+// 에러 처리를 개선하여, io.Copy와 같은 주요 작업의 에러가 defer된 Close() 에러에 의해
+// 덮어써지지 않도록 보장합니다.
 func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return
+		return err
 	}
 	defer func() {
-		if closeErr := in.Close(); closeErr != nil {
-			// 이미 다른 에러가 err 변수에 할당되어 있을 수 있으므로,
-			// 여기서는 로깅만 하거나, 에러를 결합하는 방식을 고려할 수 있습니다.
-			// 우선 로깅만 처리합니다.
-			// level.Warn(fs.logger)와 같이 로거를 사용할 수 없으므로 fmt로 로깅하거나 에러를 반환값에 추가합니다.
-			// 여기서는 기존 함수의 시그니처를 유지하고 fmt.Printf로 간단히 로깅합니다. (실제 프로덕션에서는 로거 주입을 고려)
-			fmt.Fprintf(os.Stderr, "Error closing input file in copyFile: %v\n", closeErr)
-			if err == nil { // err 가 nil 일때만 closeErr을 할당한다.
-				err = closeErr
-			}
+		closeErr := in.Close()
+		// 주 로직에서 이미 에러가 발생한 경우, close 에러가 더 중요한
+		// 원본 에러를 덮어쓰지 않도록 합니다.
+		if err == nil {
+			err = closeErr
 		}
 	}()
 
 	out, err := os.Create(dst)
 	if err != nil {
-		return
+		return err
 	}
 	defer func() {
-		if e := out.Close(); e != nil {
-			err = e
+		closeErr := out.Close()
+		// 마찬가지로, 원본 에러를 보존합니다.
+		if err == nil {
+			err = closeErr
 		}
 	}()
 
+	// 데이터 복사를 수행하고 에러를 반환합니다.
+	// defer 문들은 이 return 이후, 함수가 완전히 종료되기 전에 실행됩니다.
 	_, err = io.Copy(out, in)
-	return
+	return err
 }
 
 // ... (lockedReadCloser, lockedWriteCloser는 변경 없음)
@@ -272,9 +273,23 @@ type lockedWriteCloser struct {
 func newLockedWriteCloser(f *os.File, onClose func() error) io.WriteCloser {
 	return &lockedWriteCloser{File: f, onClose: onClose}
 }
+
+// Close는 임시 파일을 닫고, onClose 콜백을 실행하여
+// 원자적 쓰기(rename 또는 copy)를 완료하고 락을 해제합니다.
+// onClose가 항상 호출되도록 수정하여 락 누수를 방지합니다.
 func (lwc *lockedWriteCloser) Close() error {
-	if err := lwc.File.Close(); err != nil {
-		return err
+	// 먼저 임시 파일을 닫습니다.
+	closeErr := lwc.File.Close()
+
+	// 그 다음, 항상 onClose를 호출하여 원자적 연산과 락 해제를 보장합니다.
+	onCloseErr := lwc.onClose()
+
+	// 두 작업 중 더 중요한 것은 원자적 연산의 성공 여부이므로,
+	// onClose 에러를 우선적으로 반환합니다.
+	if onCloseErr != nil {
+		return onCloseErr
 	}
-	return lwc.onClose()
+
+	// 원자적 연산이 성공했다면, 임시 파일 닫기 에러를 반환합니다.
+	return closeErr
 }
