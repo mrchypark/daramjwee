@@ -4,12 +4,15 @@ package daramjwee
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee/internal/worker"
+	"github.com/samber/go-singleflightx" // 라이브러리 import
 	"golang.org/x/sync/errgroup"
 )
 
@@ -20,6 +23,8 @@ type DaramjweeCache struct {
 	Logger         log.Logger
 	Worker         *worker.Manager
 	DefaultTimeout time.Duration
+
+	sfg singleflightx.Group[string, *inFlightFetch]
 }
 
 // 컴파일 타임에 DaramjweeCache가 Cache 인터페이스를 만족하는지 확인합니다.
@@ -70,44 +75,130 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 	return c.promoteAndTeeStream(ctx, key, coldMeta.ETag, coldStream)
 }
 
-// handleMiss는 Hot/Cold 캐시에서 모두 객체를 찾지 못했을 때의 로직을 처리합니다.
+type inFlightFetch struct {
+	waiters     []*io.PipeWriter
+	mu          sync.Mutex
+	fetchResult *FetchResult
+	fetchErr    error
+	ready       chan struct{}
+}
+
 func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "full cache miss, fetching from origin", "key", key)
+	level.Debug(c.Logger).Log("msg", "full cache miss, looking up via singleflight", "key", key)
 
-	// Origin에 요청하기 전에, 만료되었을 수 있는 로컬 캐시의 ETag를 확인합니다.
-	var oldETag string
-	if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil && meta != nil {
-		oldETag = meta.ETag
-	}
+	myPipeReader, myPipeWriter := io.Pipe()
 
-	// Origin에서 데이터를 가져옵니다.
-	result, err := fetcher.Fetch(ctx, oldETag)
-	if err != nil {
-		// Origin의 데이터가 변경되지 않은 경우 (HTTP 304 Not Modified)
-		if err == ErrNotModified {
-			level.Debug(c.Logger).Log("msg", "object not modified, serving from hot cache again", "key", key)
-			stream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
-			if err != nil {
-				// 304 응답을 받았지만, 그 사이에 캐시가 삭제되었을 수 있는 엣지 케이스 처리
-				level.Warn(c.Logger).Log("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
-				return nil, ErrNotFound
-			}
-			return stream, nil
+	// 1. 제네릭 Do 메소드 호출. 반환값이 바로 *inFlightFetch 타입입니다.
+	//    더 이상 `interface{}`와 타입 단언을 사용할 필요가 없습니다.
+	flight, err, _ := c.sfg.Do(key, func() (*inFlightFetch, error) {
+		// --- 이 부분은 리더만 실행합니다 (이전 답변과 로직 동일) ---
+		level.Debug(c.Logger).Log("msg", "singleflight leader: fetching from origin", "key", key)
+
+		shared := &inFlightFetch{
+			waiters: []*io.PipeWriter{},
+			ready:   make(chan struct{}),
 		}
-		return nil, err // 그 외의 Fetch 에러
-	}
 
-	// 가져온 데이터를 클라이언트로 스트리밍하면서 동시에 Hot 캐시에 저장합니다.
-	hotTeeStream, err := c.cacheAndTeeStream(ctx, key, result)
+		var oldETag string
+		if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil && meta != nil {
+			oldETag = meta.ETag
+		}
+
+		result, fetchErr := fetcher.Fetch(ctx, oldETag)
+		shared.fetchResult = result
+		shared.fetchErr = fetchErr
+
+		if fetchErr == nil {
+			go c.fanOutStream(key, shared) // fanOutStream 헬퍼 함수는 이전 답변과 동일
+		}
+
+		close(shared.ready)
+		return shared, nil
+	})
+
+	// Do 함수 자체의 에러 처리 (예: 패닉 복구)
 	if err != nil {
-		// 캐싱에 실패하더라도 클라이언트에게는 데이터를 전달해야 합니다.
-		return result.Body, nil
+		_ = myPipeWriter.CloseWithError(err)
+		return nil, fmt.Errorf("singleflight execution failed: %w", err)
 	}
 
-	// 백그라운드에서 Hot 캐시의 데이터를 Cold 캐시에도 저장하도록 작업을 예약합니다.
-	c.scheduleSetToStore(context.Background(), c.ColdStore, key)
+	// 2. 모든 고루틴 (리더, 대기자)이 여기서부터 실행됩니다.
+	<-flight.ready
 
-	return hotTeeStream, nil
+	// 3. 리더의 Fetch 결과를 확인하고 에러를 처리합니다.
+	if flight.fetchErr != nil {
+		_ = myPipeWriter.CloseWithError(flight.fetchErr)
+		if flight.fetchErr == ErrNotModified {
+			level.Debug(c.Logger).Log("msg", "object not modified, serving from hot cache again", "key", key)
+			// ErrNotModified 일 경우, 스트림과 메타데이터를 다시 가져옵니다.
+			stream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
+			return stream, err // getStreamFromStore가 반환하는 에러를 그대로 반환
+		}
+		return nil, flight.fetchErr
+	}
+
+	// 4. 자신의 Pipe Writer를 공유 waiter 목록에 추가합니다.
+	flight.mu.Lock()
+	flight.waiters = append(flight.waiters, myPipeWriter)
+	flight.mu.Unlock()
+
+	// 5. 자신만의 Pipe Reader를 반환하여 스트리밍을 시작합니다.
+	return myPipeReader, nil
+}
+
+// fanOutStream is run by the leader goroutine to distribute the origin stream
+// to all waiters and cache it.
+func (c *DaramjweeCache) fanOutStream(key string, flight *inFlightFetch) {
+	defer flight.fetchResult.Body.Close()
+
+	// 캐시 저장을 위한 Writer 준비
+	// 이 writer는 io.MultiWriter에 포함되어 데이터 스트림을 동시에 받습니다.
+	cacheWriter, err := c.setStreamToStore(context.Background(), c.HotStore, key, flight.fetchResult.Metadata.ETag)
+	if err != nil {
+		level.Error(c.Logger).Log("msg", "failed to get cache writer for singleflight", "key", key, "err", err)
+		// 캐싱에 실패하더라도 클라이언트에게 스트리밍은 계속되어야 합니다.
+	}
+
+	// MultiWriter를 생성합니다.
+	// 초반에는 캐시 writer만 있을 수 있습니다. 대기자들은 동적으로 추가됩니다.
+	allWriters := []io.Writer{}
+	if cacheWriter != nil {
+		allWriters = append(allWriters, cacheWriter)
+	}
+
+	// TeeReader를 사용하여 원본 스트림을 읽으면서 동시에 MultiWriter에 씁니다.
+	// MultiWriter는 연결된 모든 클라이언트와 캐시에 데이터를 분배합니다.
+	reader := flight.fetchResult.Body
+	multiWriter := io.MultiWriter(allWriters...)
+	teeReader := io.TeeReader(reader, multiWriter)
+
+	// 데이터를 모두 소진하여 모든 waiter들과 캐시에 데이터를 전송합니다.
+	// io.Copy가 끝나면 원본 스트림은 EOF에 도달합니다.
+	_, copyErr := io.Copy(io.Discard, teeReader)
+
+	// 모든 작업이 끝난 후, 리소스를 정리합니다.
+	if cacheWriter != nil {
+		if err := cacheWriter.Close(); err != nil {
+			level.Warn(c.Logger).Log("msg", "failed to close cache writer in singleflight", "key", key, "err", err)
+		}
+	}
+
+	// 모든 waiter들의 파이프를 닫아주어 스트림의 끝(EOF)을 알립니다.
+	flight.mu.Lock()
+	defer flight.mu.Unlock()
+	for _, writer := range flight.waiters {
+		// writer는 이제 *io.PipeWriter 타입이므로 타입 단언이 필요 없습니다.
+		if copyErr != nil {
+			_ = writer.CloseWithError(copyErr)
+		} else {
+			_ = writer.Close()
+		}
+	}
+
+	// 백그라운드에서 Cold 캐시 저장 작업을 예약할 수 있습니다.
+	if copyErr == nil {
+		c.scheduleSetToStore(context.Background(), c.ColdStore, key)
+	}
 }
 
 // Set returns a WriteCloser for streaming data directly into the Hot Store.
