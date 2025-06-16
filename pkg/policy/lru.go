@@ -1,4 +1,8 @@
 // Package policy provides implementations of the daramjwee.EvictionPolicy interface.
+// NOTE: golangci-lint에서 "could not import container/list (unsupported version: 2)" 와 같은
+// typecheck 오류가 발생할 수 있습니다. 이는 코드 자체의 문제라기보다는
+// Go 환경 또는 golangci-lint 버전과의 호환성 문제일 가능성이 있습니다.
+// 관련 환경 점검 및 golangci-lint 설정 확인이 필요할 수 있습니다.
 package policy
 
 import (

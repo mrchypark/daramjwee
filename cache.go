@@ -39,7 +39,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 		return c.handleHotHit(ctx, key, fetcher, hotStream)
 	}
 	if err != ErrNotFound {
-		level.Error(c.Logger).Log("msg", "hot store get failed", "key", key, "err", err)
+		_ = level.Error(c.Logger).Log("msg", "hot store get failed", "key", key, "err", err)
 	}
 
 	// 2. Cold 캐시 확인
@@ -59,7 +59,9 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher Fetcher, hotStream io.ReadCloser) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
 	// 응답은 즉시 반환하고, 백그라운드에서 캐시 갱신을 시도합니다.
-	c.ScheduleRefresh(context.Background(), key, fetcher)
+	if err := c.ScheduleRefresh(context.Background(), key, fetcher); err != nil {
+		level.Warn(c.Logger).Log("msg", "failed to schedule refresh on hot hit", "key", key, "err", err)
+	}
 	return hotStream, nil
 }
 
@@ -186,7 +188,11 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 			}
 			return
 		}
-		defer result.Body.Close()
+		defer func() {
+			if err := result.Body.Close(); err != nil {
+				level.Warn(c.Logger).Log("msg", "failed to close result body in ScheduleRefresh", "key", key, "err", err)
+			}
+		}()
 
 		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.Metadata.ETag)
 		if err != nil {
@@ -255,7 +261,11 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 			level.Error(c.Logger).Log("msg", "failed to get stream from hot store for background set", "key", key, "err", err)
 			return
 		}
-		defer srcStream.Close()
+		defer func() {
+			if err := srcStream.Close(); err != nil {
+				level.Warn(c.Logger).Log("msg", "failed to close srcStream in scheduleSetToStore", "key", key, "err", err)
+			}
+		}()
 
 		destWriter, err := c.setStreamToStore(jobCtx, destStore, key, meta.ETag)
 		if err != nil {

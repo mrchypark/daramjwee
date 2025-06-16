@@ -38,7 +38,7 @@ func NewManager(strategyType string, logger log.Logger, poolSize int, queueSize 
 	case "pool":
 		strategy = NewPoolStrategy(logger, poolSize, queueSize, jobTimeout)
 	default:
-		level.Info(logger).Log("msg", "unknown strategy, defaulting to 'pool'", "strategy", strategyType)
+		_ = level.Info(logger).Log("msg", "unknown strategy, defaulting to 'pool'", "strategy", strategyType)
 		strategy = NewPoolStrategy(logger, poolSize, queueSize, jobTimeout)
 	}
 
@@ -54,7 +54,7 @@ func (m *Manager) Submit(job Job) {
 }
 
 // Shutdown은 워커 매니저를 안전하게 종료합니다.
-func (m *Manager) Shutdown() {
-	level.Info(m.logger).Log("msg", "shutting down worker manager")
+func (m.Manager) Shutdown() {
+	_ = level.Info(m.logger).Log("msg", "shutting down worker manager")
 	m.strategy.Shutdown()
 }
