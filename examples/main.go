@@ -13,7 +13,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/storage/filestore"
+	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 )
 
 // --- 1. 가상 원본(Origin) 서버 시뮬레이션 ---
