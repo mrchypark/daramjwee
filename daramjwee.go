@@ -39,6 +39,8 @@ type Cache interface {
 	// The cache entry is finalized when the returned writer is closed.
 	// This pattern is ideal for use with io.MultiWriter for simultaneous
 	// response-to-client and writing-to-cache scenarios.
+	// NOTE: The caller is responsible for calling Close() on the returned
+	// io.WriteCloser to ensure the cache entry is committed and resources are released.
 	Set(ctx context.Context, key string, etag string) (io.WriteCloser, error)
 
 	// Delete removes an object from the cache.

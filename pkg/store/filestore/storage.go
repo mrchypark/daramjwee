@@ -83,6 +83,10 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
 }
 
+// SetWithWriter returns a WriteCloser for writing to the FileStore.
+// To ensure atomicity and prevent data corruption from partial writes,
+// data is first written to a temporary file. When the writer is closed,
+// the temporary file is atomically renamed to its final destination.
 func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
@@ -97,8 +101,11 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string)
 	onClose := func() error {
 		defer fs.lockManager.Unlock(path)
 
-		// 변경: useCopyAndTruncate 옵션에 따라 로직 분기
-		if fs.useCopyAndTruncate {
+		// Based on the selected strategy, either use atomic rename or copy.
+		// The copy strategy (WithCopyAndTruncate) is less atomic but provides
+		// better compatibility with some network filesystems (e.g., NFS)
+		// where rename operations across different devices can fail.
+		if fs.useCopyAndTruncate {		if fs.useCopyAndTruncate {
 			// 비원자적 복사 방식
 			// 1. 데이터 파일을 먼저 최종 경로로 복사
 			if err := copyFile(tmpFile.Name(), path); err != nil {

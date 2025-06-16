@@ -26,6 +26,26 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
 * 🧩 **Pluggable Eviction Policies:** Includes LRU (Least Recently Used) and S2-FIFO policies by default. Users can apply custom strategies by implementing the `EvictionPolicy` interface.
 
+## Architectural Highlights
+
+`daramjwee` is engineered with several core principles to ensure high performance and robustness in demanding environments.
+
+* **True Streaming-First API**: At the heart of `daramjwee` is a strict adherence to stream-based I/O (`io.Reader` and `io.Writer`). This design ensures that objects of any size can be proxied without being fully buffered in memory, leading to minimal memory footprint and low latency. Operations like promoting an object from a cold tier to a hot tier happen concurrently while streaming the data to the client, thanks to `io.TeeReader`.
+
+* **Robust and Modular Storage**: The `Store` interface provides a clean abstraction for storage backends.
+    * The built-in `FileStore` is designed for safety, using an atomic "write-to-temp-then-rename" pattern to prevent data corruption from partial writes. It also offers a copy-based alternative for compatibility with network filesystems like NFS.
+    * The `objstore` adapter for `thanos-io/objstore` leverages `io.Pipe` to achieve true streaming uploads to cloud providers, which is highly memory-efficient.
+
+* **High-Concurrency Ready**: Performance under concurrent load is a primary focus.
+    * `FileStore` uses striped locking instead of a single global lock to minimize lock contention for different keys.
+    * Background tasks (like cache refreshes) are managed by a configurable worker pool, preventing unbounded goroutine creation and ensuring stable resource usage.
+
+## Roadmap
+
+* **Cache Stampede Prevention**: Implement a `singleflight` mechanism for origin fetches. This will prevent multiple concurrent requests for the same missing key from overwhelming the origin data source (the "thundering herd" problem).
+* **More Eviction Policies**: Explore and add other modern eviction policies.
+* **Metrics**: Expose Prometheus metrics for cache hits, misses, latency, and stored object counts to improve observability.
+
 ## How It Works
 
 The data retrieval flow in `daramjwee` is as follows:

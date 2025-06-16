@@ -60,6 +60,11 @@ func (a *objstoreAdapter) GetStream(ctx context.Context, key string) (io.ReadClo
 	return r, meta, nil
 }
 
+// SetWithWriter returns a WriteCloser that enables true streaming uploads.
+// It uses an io.Pipe, allowing the caller to write data chunk by chunk,
+// which is concurrently uploaded to the object store in a separate goroutine.
+// This is highly memory-efficient as the entire object does not need to be
+// buffered in memory before the upload begins.
 func (a *objstoreAdapter) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 

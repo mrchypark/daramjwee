@@ -64,6 +64,10 @@ func (p *PoolStrategy) start() {
 }
 
 func (p *PoolStrategy) Submit(job Job) {
+	// NOTE: This is a blocking submission. If the job channel is full, this call
+	// will block until a worker becomes available. This provides back-pressure.
+	// For use cases where dropping jobs is acceptable, a non-blocking select
+	// with a default case could be implemented.
 	select {
 	case p.jobs <- job:
 		// Job 전송 성공

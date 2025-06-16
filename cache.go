@@ -86,7 +86,10 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	return hotTeeStream, nil
 }
 
-// Set은 Hot Store에 스트림으로 데이터를 직접 쓸 수 있는 WriteCloser를 반환합니다.
+// Set returns a WriteCloser for streaming data directly into the Hot Store.
+// The cache entry is finalized only when the returned writer is closed.
+// IMPORTANT: The caller MUST call Close() on the returned io.WriteCloser to finalize
+// the operation and release associated resources, including the context timeout.
 func (c *DaramjweeCache) Set(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	if c.HotStore == nil {
 		return nil, &ConfigError{"hotStore is not configured"}
