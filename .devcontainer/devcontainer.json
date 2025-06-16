@@ -1,0 +1,42 @@
+{
+  "name": "(Go)",
+  // Microsoft에서 제공하는 Go 개발 컨테이너 이미지를 사용합니다.
+  // Go 버전을 프로젝트에 맞게 조정할 수 있습니다. 예: "mcr.microsoft.com/devcontainers/go:1-1.24-bullseye"
+  "image": "mcr.microsoft.com/devcontainers/go:1-1.24-bullseye",
+  // 컨테이너가 생성된 후 실행할 명령입니다.
+  // Go 모듈 의존성을 다운로드합니다.
+  "postCreateCommand": "go mod download",
+  // VS Code에 설치할 확장 프로그램 ID 목록입니다.
+  "customizations": {
+    "vscode": {
+      "settings": {
+        // Go 관련 VS Code 설정 (선택 사항)
+        "go.toolsManagement.autoUpdate": true,
+        "go.useLanguageServer": true,
+        "go.lintTool": "golangci-lint",
+        "go.lintFlags": [
+          "--fast"
+        ],
+        "editor.formatOnSave": true,
+        "[go]": {
+          "editor.defaultFormatter": "golang.go"
+        }
+      },
+      "extensions": [
+        "golang.go",
+        "google.geminicodeassist"
+      ]
+    }
+  },
+  // 포트 포워딩 설정입니다.
+  // daramjwee/examples/main.go 에서 8080 포트를 사용하므로, 해당 포트를 포워딩합니다.
+  "forwardPorts": [
+    8080
+  ],
+  // 컨테이너 작업 공간 및 마운트 설정
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
+  // 컨테이너 실행 시 사용할 사용자입니다.
+  // 'mcr.microsoft.com/devcontainers/go' 이미지의 기본 사용자는 'vscode' (non-root) 입니다.
+  "remoteUser": "vscode"
+}

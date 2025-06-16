@@ -39,29 +39,35 @@ var _ daramjwee.ContextAwareStore = (*FileStore)(nil)
 
 // --- Context-Aware Methods (ContextAwareStore implementation) ---
 
-func (fs *FileStore) GetStreamContext(ctx context.Context, key string) (io.ReadCloser, daramjwee.Metadata, error) {
+// metaFilePayload defines the structure for storing metadata in a .meta.json file.
+// It now only contains the ETag.
+type metaFilePayload struct {
+	ETag string `json:"etag"`
+}
+
+func (fs *FileStore) GetStreamContext(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
 
-	meta, err := fs.readMetaFile(path)
+	etag, err := fs.readMetaFile(path)
 	if err != nil {
 		fs.lockManager.RUnlock(path)
-		return nil, daramjwee.Metadata{}, err
+		return nil, "", err
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
 		fs.lockManager.RUnlock(path)
 		if os.IsNotExist(err) {
-			return nil, daramjwee.Metadata{}, daramjwee.ErrNotFound
+			return nil, "", daramjwee.ErrNotFound
 		}
-		return nil, daramjwee.Metadata{}, err
+		return nil, "", err
 	}
 
-	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
+	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), etag, nil
 }
 
-func (fs *FileStore) SetWithWriterContext(ctx context.Context, key string, meta daramjwee.Metadata) (io.WriteCloser, error) {
+func (fs *FileStore) SetWithWriterContext(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 
@@ -75,7 +81,7 @@ func (fs *FileStore) SetWithWriterContext(ctx context.Context, key string, meta 
 	onClose := func() error {
 		defer fs.lockManager.Unlock(path)
 		// 1. 메타데이터 파일 쓰기
-		if err := fs.writeMetaFile(path, meta); err != nil {
+		if err := fs.writeMetaFile(path, etag); err != nil {
 			os.Remove(tmpFile.Name()) // 임시 데이터 파일 정리
 			return err
 		}
@@ -112,7 +118,7 @@ func (fs *FileStore) DeleteContext(ctx context.Context, key string) error {
 	return nil
 }
 
-func (fs *FileStore) StatContext(ctx context.Context, key string) (daramjwee.Metadata, error) {
+func (fs *FileStore) StatContext(ctx context.Context, key string) (string, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
 	defer fs.lockManager.RUnlock(path)
@@ -121,16 +127,16 @@ func (fs *FileStore) StatContext(ctx context.Context, key string) (daramjwee.Met
 
 // --- Base Interface Methods (for Store interface) ---
 
-func (fs *FileStore) GetStream(key string) (io.ReadCloser, daramjwee.Metadata, error) {
+func (fs *FileStore) GetStream(key string) (io.ReadCloser, string, error) {
 	return fs.GetStreamContext(context.Background(), key)
 }
-func (fs *FileStore) SetWithWriter(key string, meta daramjwee.Metadata) (io.WriteCloser, error) {
-	return fs.SetWithWriterContext(context.Background(), key, meta)
+func (fs *FileStore) SetWithWriter(key string, etag string) (io.WriteCloser, error) {
+	return fs.SetWithWriterContext(context.Background(), key, etag)
 }
 func (fs *FileStore) Delete(key string) error {
 	return fs.DeleteContext(context.Background(), key)
 }
-func (fs *FileStore) Stat(key string) (daramjwee.Metadata, error) {
+func (fs *FileStore) Stat(key string) (string, error) {
 	return fs.StatContext(context.Background(), key)
 }
 
@@ -146,25 +152,26 @@ func (fs *FileStore) toMetaPath(dataPath string) string {
 	return dataPath + ".meta.json"
 }
 
-func (fs *FileStore) readMetaFile(dataPath string) (daramjwee.Metadata, error) {
+func (fs *FileStore) readMetaFile(dataPath string) (string, error) {
 	metaPath := fs.toMetaPath(dataPath)
 	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return daramjwee.Metadata{}, daramjwee.ErrNotFound
+			return "", daramjwee.ErrNotFound
 		}
-		return daramjwee.Metadata{}, err
+		return "", err
 	}
-	var meta daramjwee.Metadata
-	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return daramjwee.Metadata{}, err
+	var payload metaFilePayload
+	if err := json.Unmarshal(metaBytes, &payload); err != nil {
+		return "", err
 	}
-	return meta, nil
+	return payload.ETag, nil
 }
 
-func (fs *FileStore) writeMetaFile(dataPath string, meta daramjwee.Metadata) error {
+func (fs *FileStore) writeMetaFile(dataPath string, etag string) error {
 	metaPath := fs.toMetaPath(dataPath)
-	metaBytes, err := json.Marshal(meta)
+	payload := metaFilePayload{ETag: etag}
+	metaBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
