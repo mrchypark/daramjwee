@@ -105,9 +105,6 @@ func (p *S3FIFOPolicy) Remove(key string) {
 		p.removeElement(elem)
 	}
 }
-
-// Evict는 축출할 아이템의 키를 반환합니다.
-// 먼저 smallQueue가 용량을 초과했는지 확인하고, 그렇지 않으면 mainQueue에서 축출 대상을 찾습니다.
 func (p *S3FIFOPolicy) Evict() []string {
 	// 1. Small 큐가 용량을 초과하면, 가장 오래된 아이템을 축출합니다.
 	if p.smallSize > p.smallCapacity {
@@ -118,9 +115,14 @@ func (p *S3FIFOPolicy) Evict() []string {
 		}
 	}
 
-	// 2. Main 큐에서 축출 대상을 찾습니다.
+	// 2. Main 큐에서 축출 대상을 찾습니다. (수정된 로직)
 	if p.mainQueue.Len() > 0 {
-		for elem := p.mainQueue.Back(); elem != nil; elem = elem.Prev() {
+		// 루프 시작 전에 가장 뒤쪽(가장 오래된) 요소를 가져옵니다.
+		elem := p.mainQueue.Back()
+		for elem != nil {
+			// 현재 요소를 수정하기 전에, 다음 순회할 요소를 미리 저장합니다.
+			prevElem := elem.Prev()
+
 			entry := elem.Value.(*s3fifoEntry)
 			if entry.wasHit {
 				// 두 번째 기회를 줍니다. 히트 플래그를 내리고 큐의 앞으로 보냅니다.
@@ -131,9 +133,10 @@ func (p *S3FIFOPolicy) Evict() []string {
 				victim := p.removeElement(elem)
 				return []string{victim.key}
 			}
+			// 미리 저장해둔 다음 요소로 이동합니다.
+			elem = prevElem
 		}
 		// 루프가 끝났다는 것은 main 큐의 모든 아이템에 기회를 줬다는 의미입니다.
-		// 이 경우, small 큐에서 축출하지 않고 다음 Evict 호출을 기다려야 합니다.
 	}
 
 	// 3. Main 큐가 비어있거나, Small 큐가 용량을 초과했을 때만 Small 큐에서 축출합니다.
