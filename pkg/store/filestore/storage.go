@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/go-kit/log"
+	"github.com/go-kit/log/level" // Added import
 	"github.com/mrchypark/daramjwee"
 )
 
@@ -109,10 +110,14 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string)
 			// 비원자적 복사 방식
 			// 1. 데이터 파일을 먼저 최종 경로로 복사
 			if err := copyFile(tmpFile.Name(), path); err != nil {
-				os.Remove(tmpFile.Name()) // 임시 데이터 파일 정리
+				if errRemove := os.Remove(tmpFile.Name()); errRemove != nil {
+					level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
+				}
 				return fmt.Errorf("임시 파일에서 최종 파일로 복사 실패: %w", err)
 			}
-			os.Remove(tmpFile.Name()) // 성공 시 임시 파일 정리
+			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil {
+				level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
+			}
 
 			// 2. 데이터가 완전히 쓰인 후 메타데이터 파일 쓰기
 			if err := fs.writeMetaFile(path, etag); err != nil {
@@ -123,7 +128,9 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string)
 			// 기존의 원자적 rename 방식
 			// 1. 메타데이터 파일 먼저 쓰기
 			if err := fs.writeMetaFile(path, etag); err != nil {
-				os.Remove(tmpFile.Name()) // 임시 데이터 파일 정리
+				if errRemove := os.Remove(tmpFile.Name()); errRemove != nil {
+					level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
+				}
 				return err
 			}
 			// 2. 임시 데이터 파일을 최종 경로로 변경 (원자적)
@@ -212,7 +219,19 @@ func copyFile(src, dst string) (err error) {
 	if err != nil {
 		return
 	}
-	defer in.Close()
+	defer func() {
+		if closeErr := in.Close(); closeErr != nil {
+			// 이미 다른 에러가 err 변수에 할당되어 있을 수 있으므로,
+			// 여기서는 로깅만 하거나, 에러를 결합하는 방식을 고려할 수 있습니다.
+			// 우선 로깅만 처리합니다.
+			// level.Warn(fs.logger)와 같이 로거를 사용할 수 없으므로 fmt로 로깅하거나 에러를 반환값에 추가합니다.
+			// 여기서는 기존 함수의 시그니처를 유지하고 fmt.Printf로 간단히 로깅합니다. (실제 프로덕션에서는 로거 주입을 고려)
+			fmt.Fprintf(os.Stderr, "Error closing input file in copyFile: %v\n", closeErr)
+			if err == nil { // err 가 nil 일때만 closeErr을 할당한다.
+				err = closeErr
+			}
+		}
+	}()
 
 	out, err := os.Create(dst)
 	if err != nil {
