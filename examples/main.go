@@ -50,7 +50,6 @@ func (f *originFetcher) Fetch(ctx context.Context, oldETag string) (*daramjwee.F
 	return &daramjwee.FetchResult{
 		Body: io.NopCloser(bytes.NewReader([]byte(obj.data))),
 		ETag: obj.etag,
-		TTL:  10 * time.Second, // 이 데이터는 10초간 신선함
 	}, nil
 }
 
@@ -74,7 +73,6 @@ func main() {
 		logger,
 		daramjwee.WithHotStore(hotStore),
 		daramjwee.WithDefaultTimeout(5*time.Second),
-		daramjwee.WithNegativeCaching(1*time.Minute),
 	)
 	if err != nil {
 		panic(err)

@@ -15,12 +15,11 @@ import (
 
 // DaramjweeCache는 Cache 인터페이스의 구체적인 구현체입니다.
 type DaramjweeCache struct {
-	HotStore         Store
-	ColdStore        Store // Optional
-	Logger           log.Logger
-	Worker           *worker.Manager
-	DefaultTimeout   time.Duration
-	NegativeCacheTTL time.Duration
+	HotStore       Store
+	ColdStore      Store // Optional
+	Logger         log.Logger
+	Worker         *worker.Manager
+	DefaultTimeout time.Duration
 	// flightGroup      singleflight.Group
 }
 
@@ -65,7 +64,6 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 			level.Warn(c.Logger).Log("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
 			return nil, ErrNotFound // Or a more specific error if not found after 304
 		}
-		// Removed negative cache logic for ErrNotFound and other errors
 		return nil, err
 	}
 

@@ -23,7 +23,6 @@ type Config struct {
 	WorkerPoolSize   int
 	WorkerJobTimeout time.Duration
 	DefaultTimeout   time.Duration
-	NegativeCacheTTL time.Duration
 }
 
 // Option은 Config를 수정하는 함수 타입입니다.
@@ -77,18 +76,6 @@ func WithDefaultTimeout(timeout time.Duration) Option {
 			return &ConfigError{"default timeout must be positive"}
 		}
 		cfg.DefaultTimeout = timeout
-		return nil
-	}
-}
-
-// WithNegativeCaching은 부정 캐시를 활성화하고, 그 유효 기간(TTL)을 설정합니다.
-// TTL을 0보다 큰 값으로 설정하면 기능이 활성화됩니다.
-func WithNegativeCaching(ttl time.Duration) Option {
-	return func(cfg *Config) error {
-		if ttl < 0 {
-			return &ConfigError{"negative cache TTL cannot be negative"}
-		}
-		cfg.NegativeCacheTTL = ttl
 		return nil
 	}
 }
