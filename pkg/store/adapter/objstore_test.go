@@ -163,6 +163,6 @@ var errSimulatedUpload = errors.New("simulated upload error")
 
 func (b *errorBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
 	// Consume the reader to allow the pipe to close, but return an error.
-	_, io.ReadAll(r)
+	_, _ = io.ReadAll(r)
 	return errSimulatedUpload // 미리 정의한 커스텀 에러를 반환합니다.
 }
