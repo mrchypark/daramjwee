@@ -19,8 +19,8 @@ func newNullStore() Store {
 var _ Store = (*nullStore)(nil)
 
 // GetStream은 항상 ErrNotFound를 반환합니다.
-func (ns *nullStore) GetStream(ctx context.Context, key string) (io.ReadCloser, string, error) {
-	return nil, "", ErrNotFound
+func (ns *nullStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
 }
 
 // SetWithWriter는 모든 데이터를 버리는 io.WriteCloser를 반환합니다.
@@ -34,8 +34,8 @@ func (ns *nullStore) Delete(ctx context.Context, key string) error {
 }
 
 // Stat은 항상 ErrNotFound를 반환합니다.
-func (ns *nullStore) Stat(ctx context.Context, key string) (string, error) {
-	return "", ErrNotFound
+func (ns *nullStore) Stat(ctx context.Context, key string) (*Metadata, error) {
+	return nil, ErrNotFound
 }
 
 // nullWriteCloser는 io.WriteCloser 인터페이스를 만족하며 모든 쓰기 작업을 무시합니다.

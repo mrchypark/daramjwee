@@ -34,21 +34,22 @@ func New() *MemStore {
 var _ daramjwee.Store = (*MemStore)(nil)
 
 // GetStream retrieves an object as a stream from the in-memory map.
-func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, string, error) {
+func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
 	e, ok := ms.data[key]
 	if !ok {
-		return nil, "", daramjwee.ErrNotFound
+		return nil, nil, daramjwee.ErrNotFound
 	}
 
 	// 1. 메모리에 있는 byte 슬라이스를 io.Reader로 변환합니다.
 	reader := bytes.NewReader(e.value)
 	// 2. io.Reader를 io.ReadCloser 인터페이스로 맞추기 위해 닫아도 아무 일도 하지 않는 Closer로 감쌉니다.
 	readCloser := io.NopCloser(reader)
+	meta := &daramjwee.Metadata{ETag: e.etag}
 
-	return readCloser, e.etag, nil
+	return readCloser, meta, nil
 }
 
 // SetWithWriter returns a writer that streams data into an in-memory buffer.
@@ -72,16 +73,17 @@ func (ms *MemStore) Delete(ctx context.Context, key string) error {
 }
 
 // Stat retrieves metadata for an object from the in-memory map.
-func (ms *MemStore) Stat(ctx context.Context, key string) (string, error) {
+func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
 	e, ok := ms.data[key]
 	if !ok {
-		return "", daramjwee.ErrNotFound
+		return nil, daramjwee.ErrNotFound
 	}
 
-	return e.etag, nil
+	meta := &daramjwee.Metadata{ETag: e.etag}
+	return meta, nil
 }
 
 // --- SetWithWriter를 위한 헬퍼 구조체 ---

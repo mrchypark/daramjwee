@@ -36,34 +36,31 @@ func New(dir string, logger log.Logger) (*FileStore, error) {
 // 컴파일 타임에 인터페이스 만족 확인
 var _ daramjwee.Store = (*FileStore)(nil)
 
-// --- Context-Aware Methods (ContextAwareStore implementation) ---
-
 // metaFilePayload defines the structure for storing metadata in a .meta.json file.
-// It now only contains the ETag.
 type metaFilePayload struct {
 	ETag string `json:"etag"`
 }
 
-func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, string, error) {
+func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
 
-	etag, err := fs.readMetaFile(path)
+	meta, err := fs.readMetaFile(path)
 	if err != nil {
 		fs.lockManager.RUnlock(path)
-		return nil, "", err
+		return nil, nil, err
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
 		fs.lockManager.RUnlock(path)
 		if os.IsNotExist(err) {
-			return nil, "", daramjwee.ErrNotFound
+			return nil, nil, daramjwee.ErrNotFound
 		}
-		return nil, "", err
+		return nil, nil, err
 	}
 
-	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), etag, nil
+	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
 }
 
 func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
@@ -117,7 +114,7 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-func (fs *FileStore) Stat(ctx context.Context, key string) (string, error) {
+func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
 	defer fs.lockManager.RUnlock(path)
@@ -136,20 +133,20 @@ func (fs *FileStore) toMetaPath(dataPath string) string {
 	return dataPath + ".meta.json"
 }
 
-func (fs *FileStore) readMetaFile(dataPath string) (string, error) {
+func (fs *FileStore) readMetaFile(dataPath string) (*daramjwee.Metadata, error) {
 	metaPath := fs.toMetaPath(dataPath)
 	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", daramjwee.ErrNotFound
+			return nil, daramjwee.ErrNotFound
 		}
-		return "", err
+		return nil, err
 	}
 	var payload metaFilePayload
 	if err := json.Unmarshal(metaBytes, &payload); err != nil {
-		return "", err
+		return nil, err
 	}
-	return payload.ETag, nil
+	return &daramjwee.Metadata{ETag: payload.ETag}, nil
 }
 
 func (fs *FileStore) writeMetaFile(dataPath string, etag string) error {
@@ -162,6 +159,7 @@ func (fs *FileStore) writeMetaFile(dataPath string, etag string) error {
 	return os.WriteFile(metaPath, metaBytes, 0644)
 }
 
+// ... (lockedReadCloser, lockedWriteCloser는 변경 없음)
 type lockedReadCloser struct {
 	*os.File
 	unlockFunc func()
@@ -185,7 +183,6 @@ func newLockedWriteCloser(f *os.File, onClose func() error) io.WriteCloser {
 }
 func (lwc *lockedWriteCloser) Close() error {
 	if err := lwc.File.Close(); err != nil {
-		// onClose 콜백(rename 등)을 실행하기 전에 파일 닫기 실패 시, 여기서 반환
 		return err
 	}
 	return lwc.onClose()

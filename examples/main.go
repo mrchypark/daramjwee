@@ -48,8 +48,8 @@ func (f *originFetcher) Fetch(ctx context.Context, oldETag string) (*daramjwee.F
 
 	// 새로운 데이터와 메타데이터를 반환합니다.
 	return &daramjwee.FetchResult{
-		Body: io.NopCloser(bytes.NewReader([]byte(obj.data))),
-		ETag: obj.etag,
+		Body:     io.NopCloser(bytes.NewReader([]byte(obj.data))),
+		Metadata: &daramjwee.Metadata{ETag: obj.etag},
 	}, nil
 }
 
@@ -61,7 +61,7 @@ func main() {
 	// --- 3. daramjwee 캐시 설정 ---
 
 	// Hot Tier: 현재 디렉토리에 filestore 생성
-	hotStoreDir := "./daramjwee-hot-store" // Using a specific directory in the current location
+	hotStoreDir := "./daramjwee-hot-store"
 
 	// Create the directory if it doesn't exist
 	if err := os.MkdirAll(hotStoreDir, 0755); err != nil {

@@ -54,15 +54,15 @@ type Cache interface {
 // --- Fetcher and Metadata Types ---
 
 // Metadata holds essential metadata about a cached item.
+// It is designed to be extensible for future needs (e.g., LastModified, Size).
 type Metadata struct {
 	ETag string
 }
 
 // FetchResult holds the data and metadata returned from a successful fetch operation.
 type FetchResult struct {
-	Body io.ReadCloser
-	ETag string
-	// NOTE: The []byte Data field is removed to enforce a stream-only workflow.
+	Body     io.ReadCloser
+	Metadata *Metadata
 }
 
 // Fetcher defines the contract for fetching an object from an origin.
@@ -70,13 +70,19 @@ type Fetcher interface {
 	Fetch(ctx context.Context, oldETag string) (*FetchResult, error)
 }
 
+// Store defines the interface for a single cache storage tier (e.g., memory, disk).
 type Store interface {
-	GetStream(ctx context.Context, key string) (io.ReadCloser, string, error)
+	// GetStream retrieves an object and its metadata as a stream.
+	GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error)
+	// SetWithWriter returns a writer that streams data into the store.
 	SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error)
+	// Delete removes an object from the store.
 	Delete(ctx context.Context, key string) error
-	Stat(ctx context.Context, key string) (string, error)
+	// Stat retrieves metadata for an object without its data.
+	Stat(ctx context.Context, key string) (*Metadata, error)
 }
 
+// New creates and configures a new DaramjweeCache instance.
 func New(logger log.Logger, opts ...Option) (Cache, error) {
 	if logger == nil {
 		logger = log.NewNopLogger()
@@ -109,8 +115,6 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	// 4. Config를 바탕으로 내부 구현체를 생성합니다.
-	// 이 로직은 worker와 같은 내부 패키지를 알 필요가 있어, 별도 함수로 분리할 수 있습니다.
-	// 여기서는 설명을 위해 New 함수 안에 직접 작성합니다.
 	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.WorkerPoolSize, cfg.WorkerQueueSize, cfg.WorkerJobTimeout)
 	if err != nil {
 		return nil, err

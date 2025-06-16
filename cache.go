@@ -1,4 +1,4 @@
-// Package cache contains the core implementation of the Cache interface.
+// Package daramjwee contains the core implementation of the Cache interface.
 package daramjwee
 
 import (
@@ -44,10 +44,10 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	}
 
 	// 2. Cold 캐시 확인
-	coldStream, coldEtag, err := c.getStreamFromStore(ctx, c.ColdStore, key)
+	coldStream, coldMeta, err := c.getStreamFromStore(ctx, c.ColdStore, key)
 	if err == nil {
 		level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
-		return c.promoteAndTeeStream(ctx, key, coldEtag, coldStream)
+		return c.promoteAndTeeStream(ctx, key, coldMeta.ETag, coldStream)
 	}
 	if err != ErrNotFound {
 		level.Error(c.Logger).Log("msg", "cold store get failed", "key", key, "err", err)
@@ -57,8 +57,8 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	level.Debug(c.Logger).Log("msg", "full cache miss, fetching from origin", "key", key)
 
 	var oldETag string
-	if etag, err := c.statFromStore(ctx, c.HotStore, key); err == nil {
-		oldETag = etag
+	if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil && meta != nil {
+		oldETag = meta.ETag
 	}
 
 	result, err := fetcher.Fetch(ctx, oldETag)
@@ -146,8 +146,8 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key)
 
 		var oldETag string
-		if etag, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil {
-			oldETag = etag
+		if meta, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil && meta != nil {
+			oldETag = meta.ETag
 		}
 
 		result, err := fetcher.Fetch(jobCtx, oldETag)
@@ -161,7 +161,7 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		}
 		defer result.Body.Close()
 
-		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.ETag)
+		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.Metadata.ETag)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get cache writer for refresh", "key", key, "err", err)
 			return
@@ -198,8 +198,7 @@ func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context
 	return context.WithTimeout(ctx, c.DefaultTimeout)
 }
 
-// 타입 단언이 필요 없어지고 코드가 매우 간결해졌습니다.
-func (c *DaramjweeCache) getStreamFromStore(ctx context.Context, store Store, key string) (io.ReadCloser, string, error) {
+func (c *DaramjweeCache) getStreamFromStore(ctx context.Context, store Store, key string) (io.ReadCloser, *Metadata, error) {
 	return store.GetStream(ctx, key)
 }
 
@@ -211,7 +210,7 @@ func (c *DaramjweeCache) deleteFromStore(ctx context.Context, store Store, key s
 	return store.Delete(ctx, key)
 }
 
-func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key string) (string, error) {
+func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key string) (*Metadata, error) {
 	return store.Stat(ctx, key)
 }
 
@@ -224,14 +223,14 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 	job := func(jobCtx context.Context) {
 		level.Info(c.Logger).Log("msg", "starting background set", "key", key, "dest", "cold")
 
-		srcStream, etag, err := c.getStreamFromStore(jobCtx, c.HotStore, key)
+		srcStream, meta, err := c.getStreamFromStore(jobCtx, c.HotStore, key)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get stream from hot store for background set", "key", key, "err", err)
 			return
 		}
 		defer srcStream.Close()
 
-		destWriter, err := c.setStreamToStore(jobCtx, destStore, key, etag)
+		destWriter, err := c.setStreamToStore(jobCtx, destStore, key, meta.ETag)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get writer for dest store for background set", "key", key, "err", err)
 			return
@@ -262,8 +261,8 @@ func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key, etag stri
 }
 
 func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, result *FetchResult) (io.ReadCloser, error) {
-	if c.HotStore != nil {
-		cacheWriter, err := c.setStreamToStore(ctx, c.HotStore, key, result.ETag)
+	if c.HotStore != nil && result.Metadata != nil {
+		cacheWriter, err := c.setStreamToStore(ctx, c.HotStore, key, result.Metadata.ETag)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
 			return result.Body, nil
