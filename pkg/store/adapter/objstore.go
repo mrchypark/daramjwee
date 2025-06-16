@@ -128,7 +128,11 @@ func (a *objstoreAdapter) Stat(ctx context.Context, key string) (*daramjwee.Meta
 		}
 		return nil, fmt.Errorf("failed to get metadata object for key '%s': %w", key, err)
 	}
-	defer r.Close()
+	defer func() {
+		if err := r.Close(); err != nil {
+			level.Warn(a.logger).Log("msg", "failed to close reader in Stat", "key", key, "err", err)
+		}
+	}()
 
 	metaBytes, err := io.ReadAll(r)
 	if err != nil {

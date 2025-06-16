@@ -110,12 +110,19 @@ func main() {
 			}
 			return
 		}
-		defer stream.Close()
+		defer func() {
+			if err := stream.Close(); err != nil {
+				fmt.Printf("[Handler] Error closing stream: %v\n", err)
+			}
+		}()
 
 		// 받은 스트림을 사용자에게 그대로 전달합니다.
 		fmt.Println("[Handler] Streaming response to client...")
 		w.Header().Set("Content-Type", "text/plain")
-		io.Copy(w, stream)
+		if _, err := io.Copy(w, stream); err != nil {
+			fmt.Printf("[Handler] Error copying stream to response: %v\n", err)
+			// 이미 헤더가 전송되었을 수 있으므로 http.Error를 사용하지 않고 로깅만 합니다.
+		}
 		fmt.Println("[Handler] Done.")
 	})
 
@@ -124,5 +131,8 @@ func main() {
 	fmt.Println("  http://localhost:8080/objects/hello")
 	fmt.Println("  http://localhost:8080/objects/world")
 	fmt.Println("  http://localhost:8080/objects/not-exist")
-	http.ListenAndServe(":8080", nil)
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Printf("Failed to start server: %v\n", err)
+		os.Exit(1)
+	}
 }

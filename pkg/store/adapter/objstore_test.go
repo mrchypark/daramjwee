@@ -53,7 +53,11 @@ func TestObjstoreAdapter_SetAndGetStream(t *testing.T) {
 	require.NoError(t, err, "GetStream should not return an error after setting data")
 	require.NotNil(t, rc, "reader should not be nil")
 	require.NotNil(t, meta, "metadata should not be nil")
-	defer rc.Close()
+	defer func() {
+		if err := rc.Close(); err != nil {
+			t.Errorf("Error closing reader: %v", err)
+		}
+	}()
 
 	// 4. 내용과 메타데이터를 검증합니다.
 	readBytes, err := io.ReadAll(rc)

@@ -20,7 +20,9 @@ func setupTestStore(t *testing.T) *FileStore {
 		t.Fatalf("테스트 디렉토리 생성 실패: %v", err)
 	}
 	t.Cleanup(func() {
-		os.RemoveAll(dir)
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("Error removing test directory %s: %v", dir, err)
+		}
 	})
 
 	// 테스트 중에는 로깅을 하지 않도록 No-op 로거를 사용합니다.
@@ -58,7 +60,11 @@ func TestFileStore_SetAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStream 실패: %v", err)
 	}
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("Error closing reader: %v", err)
+		}
+	}()
 
 	// 3. 메타데이터 및 콘텐츠 검증
 	if meta.ETag != etag {
@@ -94,8 +100,12 @@ func TestFileStore_Stat(t *testing.T) {
 
 	// 테스트 데이터 설정
 	writer, _ := fs.SetWithWriter(ctx, key, etag)
-	writer.Write([]byte("some data"))
-	writer.Close()
+	if _, err := writer.Write([]byte("some data")); err != nil {
+		t.Fatalf("Error writing data for stat test: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Error closing writer for stat test: %v", err)
+	}
 
 	// Stat 호출 및 검증
 	meta, err := fs.Stat(ctx, key)
@@ -121,8 +131,12 @@ func TestFileStore_Delete(t *testing.T) {
 
 	// 테스트 데이터 설정
 	writer, _ := fs.SetWithWriter(ctx, key, "v1")
-	writer.Write([]byte("to be deleted"))
-	writer.Close()
+	if _, err := writer.Write([]byte("to be deleted")); err != nil {
+		t.Fatalf("Error writing data for delete test: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Error closing writer for delete test: %v", err)
+	}
 
 	// 삭제 실행
 	if err := fs.Delete(ctx, key); err != nil {
@@ -153,20 +167,32 @@ func TestFileStore_Overwrite(t *testing.T) {
 
 	// Version 1 쓰기
 	writer1, _ := fs.SetWithWriter(ctx, key, "v1")
-	writer1.Write([]byte("version 1"))
-	writer1.Close()
+	if _, err := writer1.Write([]byte("version 1")); err != nil {
+		t.Fatalf("Error writing data for overwrite test (initial): %v", err)
+	}
+	if err := writer1.Close(); err != nil {
+		t.Fatalf("Error closing writer for overwrite test (initial): %v", err)
+	}
 
 	// Version 2 쓰기 (덮어쓰기)
 	writer2, _ := fs.SetWithWriter(ctx, key, "v2")
-	writer2.Write([]byte("version 2"))
-	writer2.Close()
+	if _, err := writer2.Write([]byte("version 2")); err != nil {
+		t.Fatalf("Error writing data for overwrite test (new): %v", err)
+	}
+	if err := writer2.Close(); err != nil {
+		t.Fatalf("Error closing writer for overwrite test (new): %v", err)
+	}
 
 	// 최종 버전(v2)이 올바르게 저장되었는지 확인
 	reader, meta, err := fs.GetStream(ctx, key)
 	if err != nil {
 		t.Fatalf("GetStream 실패: %v", err)
 	}
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("Error closing reader: %v", err)
+		}
+	}()
 
 	if meta.ETag != "v2" {
 		t.Errorf("ETag가 v2로 덮어써지지 않았습니다. 실제값: %s", meta.ETag)
@@ -188,7 +214,9 @@ func TestFileStore_PathTraversal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetWithWriter 실패: %v", err)
 	}
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Error closing writer for path traversal test: %v", err)
+	}
 
 	// 파일이 baseDir 바깥이 아닌 내부에 생성되었는지 확인
 	// toDataPath는 "../"를 제거하므로 "malicious-file" 이라는 파일이 생성되어야 함
