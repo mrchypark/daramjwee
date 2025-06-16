@@ -21,6 +21,7 @@ type Config struct {
 	ColdStore        Store
 	WorkerStrategy   string
 	WorkerPoolSize   int
+	WorkerQueueSize  int
 	WorkerJobTimeout time.Duration
 	DefaultTimeout   time.Duration
 }
@@ -51,7 +52,7 @@ func WithColdStore(store Store) Option {
 
 // WithWorker는 백그라운드 작업을 위한 워커의 전략과 상세 설정을 지정합니다.
 // 설정하지 않으면 합리적인 기본값("pool", size 10)이 사용됩니다.
-func WithWorker(strategyType string, poolSize int, jobTimeout time.Duration) Option {
+func WithWorker(strategyType string, poolSize int, queueSize int, jobTimeout time.Duration) Option {
 	return func(cfg *Config) error {
 		if strategyType == "" {
 			return &ConfigError{"worker strategy type cannot be empty"}
@@ -64,6 +65,7 @@ func WithWorker(strategyType string, poolSize int, jobTimeout time.Duration) Opt
 		}
 		cfg.WorkerStrategy = strategyType
 		cfg.WorkerPoolSize = poolSize
+		cfg.WorkerQueueSize = queueSize
 		cfg.WorkerJobTimeout = jobTimeout
 		return nil
 	}

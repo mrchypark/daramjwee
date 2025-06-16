@@ -19,15 +19,19 @@ type PoolStrategy struct {
 	quit     chan struct{}
 }
 
-func NewPoolStrategy(logger log.Logger, poolSize int, timeout time.Duration) *PoolStrategy {
+func NewPoolStrategy(logger log.Logger, poolSize int, queueSize int, timeout time.Duration) *PoolStrategy {
 	if poolSize <= 0 {
 		poolSize = 10 // 기본 풀 사이즈
+	}
+
+	if queueSize <= 0 {
+		queueSize = poolSize * 2
 	}
 	p := &PoolStrategy{
 		logger:   logger,
 		poolSize: poolSize,
 		timeout:  timeout,
-		jobs:     make(chan Job, poolSize*2), // 작업 큐 버퍼
+		jobs:     make(chan Job, poolSize), // 작업 큐 버퍼
 		quit:     make(chan struct{}),
 	}
 	p.start()

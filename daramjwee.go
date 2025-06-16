@@ -94,6 +94,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		DefaultTimeout:   30 * time.Second,
 		WorkerStrategy:   "pool", // 기본 워커 전략
 		WorkerPoolSize:   10,     // 기본 워커 풀 사이즈
+		WorkerQueueSize:  100,    // 기본 워커 큐 사이즈,
 		WorkerJobTimeout: 30 * time.Second,
 	}
 
@@ -117,7 +118,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	// 4. Config를 바탕으로 내부 구현체를 생성합니다.
 	// 이 로직은 worker와 같은 내부 패키지를 알 필요가 있어, 별도 함수로 분리할 수 있습니다.
 	// 여기서는 설명을 위해 New 함수 안에 직접 작성합니다.
-	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.WorkerPoolSize, cfg.WorkerJobTimeout)
+	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.WorkerPoolSize, cfg.WorkerQueueSize, cfg.WorkerJobTimeout)
 	if err != nil {
 		return nil, err
 	}

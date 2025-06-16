@@ -26,7 +26,7 @@ type Manager struct {
 
 // NewManager는 주어진 전략으로 새 워커 매니저를 생성합니다.
 // jobTimeout은 각 백그라운드 작업에 적용될 최대 실행 시간입니다.
-func NewManager(strategyType string, logger log.Logger, poolSize int, jobTimeout time.Duration) (*Manager, error) {
+func NewManager(strategyType string, logger log.Logger, poolSize int, queueSize int, jobTimeout time.Duration) (*Manager, error) {
 	if jobTimeout <= 0 {
 		jobTimeout = 30 * time.Second // 기본 타임아웃
 	}
@@ -36,10 +36,10 @@ func NewManager(strategyType string, logger log.Logger, poolSize int, jobTimeout
 	case "all":
 		strategy = NewAllStrategy(logger, jobTimeout)
 	case "pool":
-		strategy = NewPoolStrategy(logger, poolSize, jobTimeout)
+		strategy = NewPoolStrategy(logger, poolSize, queueSize, jobTimeout)
 	default:
 		level.Info(logger).Log("msg", "unknown strategy, defaulting to 'pool'", "strategy", strategyType)
-		strategy = NewPoolStrategy(logger, poolSize, jobTimeout)
+		strategy = NewPoolStrategy(logger, poolSize, queueSize, jobTimeout)
 	}
 
 	return &Manager{
