@@ -1,0 +1,7 @@
+GET http://localhost:8080/objects/hello
+
+###
+GET http://localhost:8080/objects/world
+
+###
+GET http://localhost:8080/objects/not-exist
