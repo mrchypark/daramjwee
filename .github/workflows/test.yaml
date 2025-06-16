@@ -41,8 +41,8 @@ jobs:
 
       # .devcontainer.json에 명시된 golangci-lint를 CI에도 적용
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
           # 사용할 golangci-lint 버전 (최신 버전 권장)
-          version: v1.59
+          version: v2.1.6
           args: --timeout=3m
