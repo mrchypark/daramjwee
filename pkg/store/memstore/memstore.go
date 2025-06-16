@@ -19,16 +19,17 @@ type entry struct {
 
 // MemStore is a thread-safe, in-memory implementation of the daramjwee.Store interface.
 type MemStore struct {
-	mu       sync.RWMutex
-	data     map[string]entry
-	capacity int
-	policy   daramjwee.EvictionPolicy
+	mu          sync.RWMutex
+	data        map[string]entry
+	capacity    int64 // 변경: int -> int64, 바이트 단위 용량
+	currentSize int64 // 추가: 현재 저장된 총 바이트 크기
+	policy      daramjwee.EvictionPolicy
 }
 
 // New creates a new, empty in-memory store with a given capacity and eviction policy.
 // If capacity is 0 or less, the store has no limit.
 // If policy is nil, a no-op policy is used (no eviction).
-func New(capacity int, policy daramjwee.EvictionPolicy) *MemStore {
+func New(capacity int64, policy daramjwee.EvictionPolicy) *MemStore { // 변경: capacity 타입을 int64로
 	if policy == nil {
 		policy = daramjwee.NewNullEvictionPolicy()
 	}
@@ -36,6 +37,7 @@ func New(capacity int, policy daramjwee.EvictionPolicy) *MemStore {
 		data:     make(map[string]entry),
 		capacity: capacity,
 		policy:   policy,
+		// currentSize는 자동으로 0으로 초기화됩니다.
 	}
 }
 
@@ -78,7 +80,11 @@ func (ms *MemStore) Delete(ctx context.Context, key string) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
-	if _, ok := ms.data[key]; ok {
+	if e, ok := ms.data[key]; ok {
+		// 변경: 삭제 전에 크기를 구해서 currentSize를 업데이트합니다.
+		size := int64(len(e.value))
+		ms.currentSize -= size
+
 		delete(ms.data, key)
 		// Notify the policy that this key was removed.
 		ms.policy.Remove(key)
@@ -125,22 +131,39 @@ func (w *memStoreWriter) Close() error {
 	defer w.ms.mu.Unlock()
 
 	finalData := w.buf.Bytes()
+	newItemSize := int64(len(finalData))
+
+	// 변경: 기존에 아이템이 있었다면, 기존 크기만큼 currentSize에서 뺍니다.
+	if oldEntry, ok := w.ms.data[w.key]; ok {
+		w.ms.currentSize -= int64(len(oldEntry.value))
+	}
+
 	newEntry := entry{
 		value: finalData,
 		etag:  w.etag,
 	}
 
 	w.ms.data[w.key] = newEntry
-	// Notify the policy that this key was added, providing its size.
-	w.ms.policy.Add(w.key, int64(len(finalData)))
+	// 변경: 새로 추가된 아이템의 크기만큼 currentSize를 더합니다.
+	w.ms.currentSize += newItemSize
+	w.ms.policy.Add(w.key, newItemSize)
 
-	// Check if eviction is needed.
-	if w.ms.capacity > 0 && len(w.ms.data) > w.ms.capacity {
-		keysToEvict := w.ms.policy.Evict()
-		for _, keyToEvict := range keysToEvict {
-			// Eviction is different from explicit deletion,
-			// so we don't call policy.Remove here. The policy itself handles its state.
-			delete(w.ms.data, keyToEvict)
+	// 변경: 용량 기반 축출 로직
+	// capacity가 0보다 크고, 현재 크기가 용량을 초과하면 반복적으로 축출을 수행합니다.
+	if w.ms.capacity > 0 {
+		for w.ms.currentSize > w.ms.capacity {
+			keysToEvict := w.ms.policy.Evict()
+			// 더 이상 축출할 아이템이 없으면 무한 루프 방지를 위해 중단합니다.
+			if len(keysToEvict) == 0 {
+				break
+			}
+			for _, keyToEvict := range keysToEvict {
+				if entryToEvict, ok := w.ms.data[keyToEvict]; ok {
+					// 축출되는 아이템의 크기만큼 currentSize를 줄입니다.
+					w.ms.currentSize -= int64(len(entryToEvict.value))
+					delete(w.ms.data, keyToEvict)
+				}
+			}
 		}
 	}
 
