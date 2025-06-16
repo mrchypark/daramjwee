@@ -37,36 +37,26 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	hotStream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
 	if err == nil {
 		level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
-		// 있으면 응답 > worker에게 refresh 요청
-		// 응답은 즉시 반환하고, 백그라운드에서 캐시 갱신을 시도합니다.
-		// context.Background()를 사용하여 부모 요청이 취소되어도 갱신은 계속되도록 합니다.
 		c.ScheduleRefresh(context.Background(), key, fetcher)
 		return hotStream, nil
 	}
 	if err != ErrNotFound {
 		level.Error(c.Logger).Log("msg", "hot store get failed", "key", key, "err", err)
-		// Hot 스토어 자체의 오류일 수 있으므로 바로 Fetcher로 넘어가지 않고 오류를 반환할 수 있습니다.
-		// 여기서는 일단 로깅만 하고 다음 단계로 진행합니다.
 	}
 
-	// 2. Cold 캐시 확인 (Cold 스토어가 설정된 경우)
-	if c.ColdStore != nil {
-		coldStream, coldEtag, err := c.getStreamFromStore(ctx, c.ColdStore, key)
-		if err == nil {
-			level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
-			// cold가 있으면 hot에 set 하면서 응답
-			// Cold -> Hot으로 데이터를 스트리밍하면서 동시에 클라이언트에게 응답합니다.
-			return c.promoteAndTeeStream(ctx, key, coldEtag, coldStream)
-		}
-		if err != ErrNotFound {
-			level.Error(c.Logger).Log("msg", "cold store get failed", "key", key, "err", err)
-		}
+	// 2. Cold 캐시 확인 (이제 nil 체크가 필요 없습니다)
+	coldStream, coldEtag, err := c.getStreamFromStore(ctx, c.ColdStore, key)
+	if err == nil {
+		level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
+		return c.promoteAndTeeStream(ctx, key, coldEtag, coldStream)
+	}
+	if err != ErrNotFound {
+		level.Error(c.Logger).Log("msg", "cold store get failed", "key", key, "err", err)
 	}
 
-	// 3. Origin에서 Fetch (Hot/Cold 모두 miss)
+	// 3. Origin에서 Fetch
 	level.Debug(c.Logger).Log("msg", "full cache miss, fetching from origin", "key", key)
 
-	// ETag가 있으면 활용하여 304 Not Modified 응답을 받을 수 있습니다.
 	var oldETag string
 	if etag, err := c.statFromStore(ctx, c.HotStore, key); err == nil {
 		oldETag = etag
@@ -76,8 +66,6 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	if err != nil {
 		if err == ErrNotModified {
 			level.Debug(c.Logger).Log("msg", "object not modified, serving from hot cache again", "key", key)
-			// 304 응답을 받으면 데이터가 변경되지 않았다는 의미이므로, 다시 Hot 캐시에서 가져옵니다.
-			// (그 사이에 다른 요청에 의해 캐시에 저장되었을 수 있습니다)
 			stream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
 			if err != nil {
 				level.Warn(c.Logger).Log("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
@@ -88,19 +76,14 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 		return nil, err
 	}
 
-	// fetch 하고 hot에 set하면서 응답
 	hotTeeStream, err := c.cacheAndTeeStream(ctx, key, result)
 	if err != nil {
-		// Tee 스트림 생성에 실패하면 원본 스트림만 반환합니다.
 		return result.Body, nil
 	}
 
-	// cold에 set 을 worker에 요청 (Cold 스토어가 설정된 경우)
-	if c.ColdStore != nil {
-		// 새로 fetch된 데이터가 Hot 캐시에 저장되면,
-		// 백그라운드에서 Hot -> Cold로 복사하는 작업을 예약합니다.
-		c.scheduleSetToStore(context.Background(), c.ColdStore, key)
-	}
+	// cold에 set 을 worker에 요청 (이제 nil 체크가 필요 없습니다)
+	// ColdStore가 nullStore인 경우 이 작업은 아무것도 하지 않고 빠르게 종료됩니다.
+	c.scheduleSetToStore(context.Background(), c.ColdStore, key)
 
 	return hotTeeStream, nil
 }
@@ -129,7 +112,8 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 
 	g, gCtx := errgroup.WithContext(ctx)
 
-	if c.HotStore != nil {
+	// HotStore 삭제
+	if c.HotStore != nil { // HotStore는 필수이므로 이 체크는 유지합니다.
 		g.Go(func() error {
 			err := c.deleteFromStore(gCtx, c.HotStore, key)
 			if err != nil {
@@ -140,16 +124,16 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 		})
 	}
 
-	if c.ColdStore != nil {
-		g.Go(func() error {
-			err := c.deleteFromStore(gCtx, c.ColdStore, key)
-			if err != nil {
-				level.Error(c.Logger).Log("msg", "failed to delete from cold store", "key", key, "err", err)
-				return err
-			}
-			return nil
-		})
-	}
+	// ColdStore 삭제 (이제 nil 체크가 필요 없습니다)
+	g.Go(func() error {
+		err := c.deleteFromStore(gCtx, c.ColdStore, key)
+		if err != nil {
+			// nullStore의 Delete는 에러를 반환하지 않으므로, 이 로그는 실제 ColdStore가 있을 때만 의미가 있습니다.
+			level.Error(c.Logger).Log("msg", "failed to delete from cold store", "key", key, "err", err)
+			return err
+		}
+		return nil
+	})
 
 	return g.Wait()
 }
