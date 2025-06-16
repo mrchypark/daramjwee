@@ -11,7 +11,6 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee/internal/worker"
 	"golang.org/x/sync/errgroup"
-	// "golang.org/x/sync/singleflight" // TODO: 추후 singleflight.Group 추가
 )
 
 // DaramjweeCache는 Cache 인터페이스의 구체적인 구현체입니다.
@@ -21,7 +20,6 @@ type DaramjweeCache struct {
 	Logger         log.Logger
 	Worker         *worker.Manager
 	DefaultTimeout time.Duration
-	// flightGroup      singleflight.Group
 }
 
 // 컴파일 타임에 DaramjweeCache가 Cache 인터페이스를 만족하는지 확인합니다.
