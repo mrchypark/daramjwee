@@ -1,0 +1,10 @@
+linters-settings:
+  errcheck:
+    # 다음 함수의 error 반환 값은 검사하지 않습니다.
+    # go-kit/log의 Log 함수는 거의 항상 무시되므로 여기에 추가하기에 적합합니다.
+    exclude-functions:
+      - github.com/go-kit/log.Logger.Log
+
+run:
+  # 기본 타임아웃을 늘려 큰 프로젝트에서도 안정적으로 실행되도록 합니다.
+  timeout: 3m

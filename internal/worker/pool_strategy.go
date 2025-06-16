@@ -46,7 +46,7 @@ func (p *PoolStrategy) start() {
 		go func(workerID int) {
 			defer p.wg.Done()
 			logger := log.With(p.logger, "worker_id", workerID)
-			_ = level.Info(logger).Log("msg", "worker started")
+			level.Info(logger).Log("msg", "worker started")
 
 			for {
 				select {
@@ -55,7 +55,7 @@ func (p *PoolStrategy) start() {
 					job(ctx)
 					cancel() // 루프 내에서는 defer를 사용할 수 없으므로 명시적으로 호출
 				case <-p.quit:
-					_ = level.Info(logger).Log("msg", "worker stopped")
+					level.Info(logger).Log("msg", "worker stopped")
 					return
 				}
 			}
@@ -72,7 +72,7 @@ func (p *PoolStrategy) Submit(job Job) {
 	case p.jobs <- job:
 		// Job 전송 성공
 	case <-p.quit:
-		_ = level.Warn(p.logger).Log("msg", "worker is shutting down, job submission ignored")
+		level.Warn(p.logger).Log("msg", "worker is shutting down, job submission ignored")
 	}
 }
 

@@ -136,7 +136,10 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string)
 			// 2. 임시 데이터 파일을 최종 경로로 변경 (원자적)
 			if err := os.Rename(tmpFile.Name(), path); err != nil {
 				// 실패 시 롤백: 방금 쓴 메타 파일 정리
-				os.Remove(fs.toMetaPath(path))
+				// 롤백 중 발생하는 에러는 로그로 남기되, 원래의 에러를 반환합니다.
+				if removeErr := os.Remove(fs.toMetaPath(path)); removeErr != nil {
+					level.Warn(fs.logger).Log("msg", "failed to remove meta file during rollback", "path", fs.toMetaPath(path), "err", removeErr)
+				}
 				return err
 			}
 		}
