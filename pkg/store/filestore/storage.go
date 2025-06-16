@@ -16,21 +16,41 @@ import (
 
 // FileStore is a disk-based implementation of the daramjwee.Store.
 type FileStore struct {
-	baseDir     string
-	logger      log.Logger
-	lockManager *FileLockManager
+	baseDir            string
+	logger             log.Logger
+	lockManager        *FileLockManager
+	useCopyAndTruncate bool // 추가: rename 대신 copy를 사용할지 여부
+}
+
+// Option은 FileStore의 동작을 변경하는 함수 타입입니다.
+type Option func(*FileStore)
+
+// WithCopyAndTruncate는 원자적인 os.Rename 대신,
+// 파일을 복사하는 방식을 사용하도록 설정합니다.
+// 일부 네트워크 파일 시스템과의 호환성을 위해 필요할 수 있습니다.
+func WithCopyAndTruncate() Option {
+	return func(fs *FileStore) {
+		fs.useCopyAndTruncate = true
+	}
 }
 
 // New creates a new FileStore.
-func New(dir string, logger log.Logger) (*FileStore, error) {
+func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) { // 변경: opts 파라미터 추가
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
 	}
-	return &FileStore{
+	fs := &FileStore{
 		baseDir:     dir,
 		logger:      logger,
 		lockManager: NewFileLockManager(2048),
-	}, nil
+	}
+
+	// 사용자가 제공한 옵션들을 적용합니다.
+	for _, opt := range opts {
+		opt(fs)
+	}
+
+	return fs, nil
 }
 
 // 컴파일 타임에 인터페이스 만족 확인
@@ -76,16 +96,35 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string)
 
 	onClose := func() error {
 		defer fs.lockManager.Unlock(path)
-		// 1. 메타데이터 파일 쓰기
-		if err := fs.writeMetaFile(path, etag); err != nil {
-			os.Remove(tmpFile.Name()) // 임시 데이터 파일 정리
-			return err
-		}
-		// 2. 임시 데이터 파일을 최종 경로로 변경 (원자적)
-		if err := os.Rename(tmpFile.Name(), path); err != nil {
-			// 실패 시 롤백: 방금 쓴 메타 파일 정리
-			os.Remove(fs.toMetaPath(path))
-			return err
+
+		// 변경: useCopyAndTruncate 옵션에 따라 로직 분기
+		if fs.useCopyAndTruncate {
+			// 비원자적 복사 방식
+			// 1. 데이터 파일을 먼저 최종 경로로 복사
+			if err := copyFile(tmpFile.Name(), path); err != nil {
+				os.Remove(tmpFile.Name()) // 임시 데이터 파일 정리
+				return fmt.Errorf("임시 파일에서 최종 파일로 복사 실패: %w", err)
+			}
+			os.Remove(tmpFile.Name()) // 성공 시 임시 파일 정리
+
+			// 2. 데이터가 완전히 쓰인 후 메타데이터 파일 쓰기
+			if err := fs.writeMetaFile(path, etag); err != nil {
+				// 데이터는 쓰였지만 메타데이터 쓰기에 실패한 경우
+				return fmt.Errorf("데이터 복사 후 메타데이터 쓰기 실패: %w", err)
+			}
+		} else {
+			// 기존의 원자적 rename 방식
+			// 1. 메타데이터 파일 먼저 쓰기
+			if err := fs.writeMetaFile(path, etag); err != nil {
+				os.Remove(tmpFile.Name()) // 임시 데이터 파일 정리
+				return err
+			}
+			// 2. 임시 데이터 파일을 최종 경로로 변경 (원자적)
+			if err := os.Rename(tmpFile.Name(), path); err != nil {
+				// 실패 시 롤백: 방금 쓴 메타 파일 정리
+				os.Remove(fs.toMetaPath(path))
+				return err
+			}
 		}
 		return nil
 	}
@@ -157,6 +196,28 @@ func (fs *FileStore) writeMetaFile(dataPath string, etag string) error {
 		return err
 	}
 	return os.WriteFile(metaPath, metaBytes, 0644)
+}
+
+// copyFile은 src 경로의 파일을 dst 경로로 복사합니다. dst 파일이 이미 존재하면 덮어씁니다.
+func copyFile(src, dst string) (err error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if e := out.Close(); e != nil {
+			err = e
+		}
+	}()
+
+	_, err = io.Copy(out, in)
+	return
 }
 
 // ... (lockedReadCloser, lockedWriteCloser는 변경 없음)

@@ -68,6 +68,9 @@ func main() {
 		panic(err)
 	}
 
+	// 변경: filestore.New 호출 시그니처 변경에 맞게 수정
+	// 기본값(rename 사용)으로 생성하려면 추가 옵션 없이 호출하면 됩니다.
+	// copy 방식을 사용하려면 filestore.WithCopyAndTruncate()를 추가합니다.
 	hotStore, err := filestore.New(hotStoreDir, log.With(logger, "tier", "hot"))
 	if err != nil {
 		panic(err)

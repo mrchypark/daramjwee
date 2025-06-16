@@ -1,0 +1,21 @@
+name: Go Test CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24' # 사용하시는 Go 버전에 맞게 수정해주세요.
+
+    - name: Run tests
+      run: go test -v ./...
