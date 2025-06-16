@@ -105,7 +105,7 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string)
 		// The copy strategy (WithCopyAndTruncate) is less atomic but provides
 		// better compatibility with some network filesystems (e.g., NFS)
 		// where rename operations across different devices can fail.
-		if fs.useCopyAndTruncate {		if fs.useCopyAndTruncate {
+		if fs.useCopyAndTruncate {
 			// 비원자적 복사 방식
 			// 1. 데이터 파일을 먼저 최종 경로로 복사
 			if err := copyFile(tmpFile.Name(), path); err != nil {
@@ -148,8 +148,9 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	errMeta := os.Remove(fs.toMetaPath(path))
 
 	if os.IsNotExist(errData) {
+		// 이미 없으면 성공으로 처리
 		return nil
-	} // 이미 없으면 성공으로 처리
+	}
 	if errData != nil {
 		return errData
 	}
