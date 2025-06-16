@@ -10,10 +10,10 @@ import (
 	"github.com/mrchypark/daramjwee" // 자신의 모듈 경로로 수정
 )
 
-// entry holds the data and metadata for a single cache item.
+// entry holds the value and etag for a single cache item.
 type entry struct {
-	data []byte
-	meta daramjwee.Metadata
+	value []byte
+	etag  string
 }
 
 // MemStore is a thread-safe, in-memory implementation of the daramjwee.Store interface.
@@ -33,30 +33,30 @@ func New() *MemStore {
 var _ daramjwee.Store = (*MemStore)(nil)
 
 // GetStream retrieves an object as a stream from the in-memory map.
-func (ms *MemStore) GetStream(key string) (io.ReadCloser, daramjwee.Metadata, error) {
+func (ms *MemStore) GetStream(key string) (io.ReadCloser, string, error) {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
 	e, ok := ms.data[key]
 	if !ok {
-		return nil, daramjwee.Metadata{}, daramjwee.ErrNotFound
+		return nil, "", daramjwee.ErrNotFound
 	}
 
 	// 1. 메모리에 있는 byte 슬라이스를 io.Reader로 변환합니다.
-	reader := bytes.NewReader(e.data)
+	reader := bytes.NewReader(e.value)
 	// 2. io.Reader를 io.ReadCloser 인터페이스로 맞추기 위해 닫아도 아무 일도 하지 않는 Closer로 감쌉니다.
 	readCloser := io.NopCloser(reader)
 
-	return readCloser, e.meta, nil
+	return readCloser, e.etag, nil
 }
 
 // SetWithWriter returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
-func (ms *MemStore) SetWithWriter(key string, meta daramjwee.Metadata) (io.WriteCloser, error) {
+func (ms *MemStore) SetWithWriter(key string, etag string) (io.WriteCloser, error) {
 	return &memStoreWriter{
 		ms:   ms,
 		key:  key,
-		meta: meta,
+		etag: etag,
 		buf:  &bytes.Buffer{}, // 데이터를 임시로 담아둘 버퍼
 	}, nil
 }
@@ -71,16 +71,16 @@ func (ms *MemStore) Delete(key string) error {
 }
 
 // Stat retrieves metadata for an object from the in-memory map.
-func (ms *MemStore) Stat(key string) (daramjwee.Metadata, error) {
+func (ms *MemStore) Stat(key string) (string, error) {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
 	e, ok := ms.data[key]
 	if !ok {
-		return daramjwee.Metadata{}, daramjwee.ErrNotFound
+		return "", daramjwee.ErrNotFound
 	}
 
-	return e.meta, nil
+	return e.etag, nil
 }
 
 // --- SetWithWriter를 위한 헬퍼 구조체 ---
@@ -89,7 +89,7 @@ func (ms *MemStore) Stat(key string) (daramjwee.Metadata, error) {
 type memStoreWriter struct {
 	ms   *MemStore
 	key  string
-	meta daramjwee.Metadata
+	etag string
 	buf  *bytes.Buffer
 }
 
@@ -107,8 +107,8 @@ func (w *memStoreWriter) Close() error {
 	// 버퍼의 데이터를 byte 슬라이스로 가져와서 entry를 만듭니다.
 	finalData := w.buf.Bytes()
 	newEntry := entry{
-		data: finalData,
-		meta: w.meta,
+		value: finalData,
+		etag:  w.etag,
 	}
 
 	// 맵에 최종 저장합니다.

@@ -33,18 +33,9 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	defer cancel()
 
 	if c.HotStore != nil {
-		stream, meta, err := c.getStreamFromStore(ctx, c.HotStore, key)
+		stream, _, err := c.getStreamFromStore(ctx, c.HotStore, key) // meta (etag) is not used here directly
 		if err == nil {
-			if meta.IsNegative {
-				level.Debug(c.Logger).Log("msg", "negative cache hit", "key", key)
-				return nil, ErrNotFound
-			}
-			if c.isStale(meta) {
-				level.Debug(c.Logger).Log("msg", "hot cache hit (stale)", "key", key)
-				_ = c.ScheduleRefresh(context.Background(), key, fetcher)
-			} else {
-				level.Debug(c.Logger).Log("msg", "hot cache hit (fresh)", "key", key)
-			}
+			level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
 			return stream, nil
 		}
 		if err != ErrNotFound {
@@ -56,8 +47,8 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 
 	var oldETag string
 	if c.HotStore != nil {
-		if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil {
-			oldETag = meta.ETag
+		if etag, err := c.statFromStore(ctx, c.HotStore, key); err == nil {
+			oldETag = etag
 		}
 	}
 
@@ -65,13 +56,16 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	if err != nil {
 		if err == ErrNotModified {
 			level.Debug(c.Logger).Log("msg", "object not modified, serving from cache", "key", key)
-			stream, _, _ := c.getStreamFromStore(ctx, c.HotStore, key)
-			return stream, nil
+			// Attempt to serve from hot cache again, assuming it might still be there.
+			// This happens if the origin says 304 Not Modified.
+			stream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
+			if err == nil {
+				return stream, nil
+			}
+			level.Warn(c.Logger).Log("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
+			return nil, ErrNotFound // Or a more specific error if not found after 304
 		}
-
-		if c.NegativeCacheTTL > 0 {
-			go c.setNegativeCache(key)
-		}
+		// Removed negative cache logic for ErrNotFound and other errors
 		return nil, err
 	}
 
@@ -79,7 +73,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 }
 
 // Set은 Hot Store에 스트림으로 데이터를 직접 쓸 수 있는 WriteCloser를 반환합니다.
-func (c *DaramjweeCache) Set(ctx context.Context, key string, meta Metadata) (io.WriteCloser, error) {
+func (c *DaramjweeCache) Set(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	if c.HotStore == nil {
 		return nil, &ConfigError{"hotStore is not configured"}
 	}
@@ -94,9 +88,9 @@ func (c *DaramjweeCache) Set(ctx context.Context, key string, meta Metadata) (io
 	var err error
 
 	if caStore, ok := streamingStore.(ContextAwareStore); ok {
-		wc, err = caStore.SetWithWriterContext(ctx, key, meta)
+		wc, err = caStore.SetWithWriterContext(ctx, key, etag)
 	} else {
-		wc, err = streamingStore.SetWithWriter(key, meta)
+		wc, err = streamingStore.SetWithWriter(key, etag)
 	}
 
 	if err != nil {
@@ -150,8 +144,8 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 
 		var oldETag string
 		if c.HotStore != nil {
-			if meta, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil {
-				oldETag = meta.ETag
+			if etag, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil {
+				oldETag = etag
 			}
 		}
 
@@ -166,8 +160,7 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 
 		if c.HotStore != nil {
 			if streamingStore, ok := c.HotStore.(Store); ok {
-				meta := Metadata{Key: key, ETag: result.ETag, CreatedAt: time.Now(), TTL: result.TTL}
-				writer, err := streamingStore.SetWithWriter(key, meta)
+				writer, err := streamingStore.SetWithWriter(key, result.ETag)
 				if err != nil {
 					level.Error(c.Logger).Log("msg", "failed to get cache writer for refresh", "key", key, "err", err)
 					return
@@ -201,14 +194,7 @@ func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context
 	return context.WithTimeout(ctx, c.DefaultTimeout)
 }
 
-func (c *DaramjweeCache) isStale(meta Metadata) bool {
-	if meta.TTL <= 0 {
-		return false
-	}
-	return time.Now().After(meta.CreatedAt.Add(meta.TTL))
-}
-
-func (c *DaramjweeCache) getStreamFromStore(ctx context.Context, store Store, key string) (io.ReadCloser, Metadata, error) {
+func (c *DaramjweeCache) getStreamFromStore(ctx context.Context, store Store, key string) (io.ReadCloser, string, error) {
 	if caStore, ok := store.(ContextAwareStore); ok {
 		return caStore.GetStreamContext(ctx, key)
 	}
@@ -222,7 +208,7 @@ func (c *DaramjweeCache) deleteFromStore(ctx context.Context, store Store, key s
 	return store.Delete(key)
 }
 
-func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key string) (Metadata, error) {
+func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key string) (string, error) {
 	if caStore, ok := store.(ContextAwareStore); ok {
 		return caStore.StatContext(ctx, key)
 	}
@@ -232,14 +218,12 @@ func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key str
 func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, result *FetchResult) (io.ReadCloser, error) {
 	if c.HotStore != nil {
 		if streamingStore, ok := c.HotStore.(Store); ok {
-			meta := Metadata{Key: key, ETag: result.ETag, CreatedAt: time.Now(), TTL: result.TTL}
-
 			var cacheWriter io.WriteCloser
 			var err error
 			if caStore, ok := streamingStore.(ContextAwareStore); ok {
-				cacheWriter, err = caStore.SetWithWriterContext(ctx, key, meta)
+				cacheWriter, err = caStore.SetWithWriterContext(ctx, key, result.ETag)
 			} else {
-				cacheWriter, err = streamingStore.SetWithWriter(key, meta)
+				cacheWriter, err = streamingStore.SetWithWriter(key, result.ETag)
 			}
 			if err != nil {
 				level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
@@ -250,36 +234,6 @@ func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, resu
 		}
 	}
 	return result.Body, nil
-}
-
-// setNegativeCache는 별도 고루틴에서 부정 캐시를 설정합니다.
-func (c *DaramjweeCache) setNegativeCache(key string) {
-	if c.HotStore == nil {
-		return
-	}
-	streamingStore, ok := c.HotStore.(Store)
-	if !ok {
-		return
-	}
-
-	level.Debug(c.Logger).Log("msg", "setting negative cache entry", "key", key, "ttl", c.NegativeCacheTTL)
-
-	meta := Metadata{
-		Key:        key,
-		CreatedAt:  time.Now(),
-		TTL:        c.NegativeCacheTTL,
-		IsNegative: true,
-	}
-
-	// 스트림-온리 인터페이스를 만족시키기 위해, Writer를 받아 즉시 닫는 방식으로 0바이트 파일을 저장합니다.
-	writer, err := streamingStore.SetWithWriter(key, meta)
-	if err != nil {
-		level.Warn(c.Logger).Log("msg", "failed to get writer for negative cache", "key", key, "err", err)
-		return
-	}
-	if err := writer.Close(); err != nil {
-		level.Warn(c.Logger).Log("msg", "failed to close writer for negative cache", "key", key, "err", err)
-	}
 }
 
 // multiCloser는 여러 io.Closer를 순서대로 닫아주는 헬퍼입니다.

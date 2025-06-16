@@ -55,18 +55,13 @@ type Cache interface {
 
 // Metadata holds essential metadata about a cached item.
 type Metadata struct {
-	Key        string
 	ETag       string
-	CreatedAt  time.Time
-	TTL        time.Duration
-	IsNegative bool
 }
 
 // FetchResult holds the data and metadata returned from a successful fetch operation.
 type FetchResult struct {
 	Body io.ReadCloser
 	ETag string
-	TTL  time.Duration
 	// NOTE: The []byte Data field is removed to enforce a stream-only workflow.
 }
 
@@ -76,17 +71,17 @@ type Fetcher interface {
 }
 
 type Store interface {
-	GetStream(key string) (io.ReadCloser, Metadata, error)
-	SetWithWriter(key string, meta Metadata) (io.WriteCloser, error)
+	GetStream(key string) (io.ReadCloser, string, error)
+	SetWithWriter(key string, etag string) (io.WriteCloser, error)
 	Delete(key string) error
-	Stat(key string) (Metadata, error)
+	Stat(key string) (string, error)
 }
 
 type ContextAwareStore interface {
-	GetStreamContext(ctx context.Context, key string) (io.ReadCloser, Metadata, error)
-	SetWithWriterContext(ctx context.Context, key string, meta Metadata) (io.WriteCloser, error)
+	GetStreamContext(ctx context.Context, key string) (io.ReadCloser, string, error)
+	SetWithWriterContext(ctx context.Context, key string, etag string) (io.WriteCloser, error)
 	DeleteContext(ctx context.Context, key string) error
-	StatContext(ctx context.Context, key string) (Metadata, error)
+	StatContext(ctx context.Context, key string) (string, error)
 }
 
 func New(logger log.Logger, opts ...Option) (Cache, error) {
