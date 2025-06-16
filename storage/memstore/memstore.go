@@ -8,7 +8,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/mrchypark/daramjwee" // 자신의 모듈 경로로 수정
+	"github.com/mrchypark/daramjwee"
 )
 
 // entry holds the value and etag for a single cache item.
@@ -19,14 +19,23 @@ type entry struct {
 
 // MemStore is a thread-safe, in-memory implementation of the daramjwee.Store interface.
 type MemStore struct {
-	mu   sync.RWMutex
-	data map[string]entry
+	mu       sync.RWMutex
+	data     map[string]entry
+	capacity int
+	policy   daramjwee.EvictionPolicy
 }
 
-// New creates a new, empty in-memory store.
-func New() *MemStore {
+// New creates a new, empty in-memory store with a given capacity and eviction policy.
+// If capacity is 0 or less, the store has no limit.
+// If policy is nil, a no-op policy is used (no eviction).
+func New(capacity int, policy daramjwee.EvictionPolicy) *MemStore {
+	if policy == nil {
+		policy = daramjwee.NewNullEvictionPolicy()
+	}
 	return &MemStore{
-		data: make(map[string]entry),
+		data:     make(map[string]entry),
+		capacity: capacity,
+		policy:   policy,
 	}
 }
 
@@ -35,17 +44,18 @@ var _ daramjwee.Store = (*MemStore)(nil)
 
 // GetStream retrieves an object as a stream from the in-memory map.
 func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
+	ms.mu.Lock() // RLock -> Lock. policy.Touch might modify internal state.
+	defer ms.mu.Unlock()
 
 	e, ok := ms.data[key]
 	if !ok {
 		return nil, nil, daramjwee.ErrNotFound
 	}
 
-	// 1. 메모리에 있는 byte 슬라이스를 io.Reader로 변환합니다.
+	// Notify the policy that this key was accessed.
+	ms.policy.Touch(key)
+
 	reader := bytes.NewReader(e.value)
-	// 2. io.Reader를 io.ReadCloser 인터페이스로 맞추기 위해 닫아도 아무 일도 하지 않는 Closer로 감쌉니다.
 	readCloser := io.NopCloser(reader)
 	meta := &daramjwee.Metadata{ETag: e.etag}
 
@@ -59,7 +69,7 @@ func (ms *MemStore) SetWithWriter(ctx context.Context, key string, etag string) 
 		ms:   ms,
 		key:  key,
 		etag: etag,
-		buf:  &bytes.Buffer{}, // 데이터를 임시로 담아둘 버퍼
+		buf:  &bytes.Buffer{},
 	}, nil
 }
 
@@ -68,19 +78,27 @@ func (ms *MemStore) Delete(ctx context.Context, key string) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
-	delete(ms.data, key)
+	if _, ok := ms.data[key]; ok {
+		delete(ms.data, key)
+		// Notify the policy that this key was removed.
+		ms.policy.Remove(key)
+	}
+
 	return nil
 }
 
 // Stat retrieves metadata for an object from the in-memory map.
 func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
+	ms.mu.Lock() // RLock -> Lock for policy.Touch
+	defer ms.mu.Unlock()
 
 	e, ok := ms.data[key]
 	if !ok {
 		return nil, daramjwee.ErrNotFound
 	}
+
+	// Access via Stat should also be considered a "touch".
+	ms.policy.Touch(key)
 
 	meta := &daramjwee.Metadata{ETag: e.etag}
 	return meta, nil
@@ -102,20 +120,29 @@ func (w *memStoreWriter) Write(p []byte) (n int, err error) {
 }
 
 // Close는 쓰기 작업이 완료되었을 때 호출됩니다.
-// 이때 버퍼에 담긴 최종 데이터를 MemStore의 맵에 저장합니다.
 func (w *memStoreWriter) Close() error {
 	w.ms.mu.Lock()
 	defer w.ms.mu.Unlock()
 
-	// 버퍼의 데이터를 byte 슬라이스로 가져와서 entry를 만듭니다.
 	finalData := w.buf.Bytes()
 	newEntry := entry{
 		value: finalData,
 		etag:  w.etag,
 	}
 
-	// 맵에 최종 저장합니다.
 	w.ms.data[w.key] = newEntry
+	// Notify the policy that this key was added, providing its size.
+	w.ms.policy.Add(w.key, int64(len(finalData)))
+
+	// Check if eviction is needed.
+	if w.ms.capacity > 0 && len(w.ms.data) > w.ms.capacity {
+		keysToEvict := w.ms.policy.Evict()
+		for _, keyToEvict := range keysToEvict {
+			// Eviction is different from explicit deletion,
+			// so we don't call policy.Remove here. The policy itself handles its state.
+			delete(w.ms.data, keyToEvict)
+		}
+	}
 
 	return nil
 }

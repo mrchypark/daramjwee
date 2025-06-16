@@ -82,6 +82,40 @@ type Store interface {
 	Stat(ctx context.Context, key string) (*Metadata, error)
 }
 
+// EvictionPolicy defines the contract for a cache eviction strategy.
+type EvictionPolicy interface {
+	// Touch is called when an item is accessed.
+	Touch(key string)
+	// Add is called when a new item is added, along with its size in bytes.
+	Add(key string, size int64)
+	// Remove is called when an item is explicitly deleted.
+	Remove(key string)
+	// Evict is called to determine which item(s) should be evicted.
+	// It should return one or more keys to be removed.
+	Evict() []string
+}
+
+// nullEvictionPolicy is a Null Object implementation of EvictionPolicy.
+// It performs no operations, effectively disabling eviction.
+type nullEvictionPolicy struct{}
+
+// Touch does nothing.
+func (p *nullEvictionPolicy) Touch(key string) {}
+
+// Add does nothing.
+func (p *nullEvictionPolicy) Add(key string, size int64) {}
+
+// Remove does nothing.
+func (p *nullEvictionPolicy) Remove(key string) {}
+
+// Evict returns no keys.
+func (p *nullEvictionPolicy) Evict() []string { return nil }
+
+// NewNullEvictionPolicy creates a new no-op eviction policy.
+func NewNullEvictionPolicy() EvictionPolicy {
+	return &nullEvictionPolicy{}
+}
+
 // New creates and configures a new DaramjweeCache instance.
 func New(logger log.Logger, opts ...Option) (Cache, error) {
 	if logger == nil {
