@@ -5,21 +5,21 @@ import (
 )
 
 // helper function to check if a key exists in the policy's internal cache
-func isInCache(p *S2FIFOPolicy, key string) bool {
+func isInCache(p *S3FIFOPolicy, key string) bool {
 	_, ok := p.cache[key]
 	return ok
 }
 
-// TestS2FIFO_AddAndPromotion tests basic adding and promotion from small to main queue.
-func TestS2FIFO_AddAndPromotion(t *testing.T) {
-	p := NewS2FIFOPolicy(100, 0.5).(*S2FIFOPolicy) // 100 bytes total, 50 for small queue
+// TestS3FIFO_AddAndPromotion tests basic adding and promotion from small to main queue.
+func TestS3FIFO_AddAndPromotion(t *testing.T) {
+	p := NewS3FIFOPolicy(100, 0.5).(*S3FIFOPolicy) // 100 bytes total, 50 for small queue
 
 	// 1. Add a new key. It should be in the small queue.
 	p.Add("key1", 10)
 	if !isInCache(p, "key1") {
 		t.Fatal("key1 should be in cache after Add")
 	}
-	if p.cache["key1"].Value.(*s2fifoEntry).isMain {
+	if p.cache["key1"].Value.(*s3fifoEntry).isMain {
 		t.Error("key1 should be in small queue, not main, after initial Add")
 	}
 	if p.smallSize != 10 || p.mainSize != 0 {
@@ -28,7 +28,7 @@ func TestS2FIFO_AddAndPromotion(t *testing.T) {
 
 	// 2. Touch the key. It should be promoted to the main queue.
 	p.Touch("key1")
-	if !p.cache["key1"].Value.(*s2fifoEntry).isMain {
+	if !p.cache["key1"].Value.(*s3fifoEntry).isMain {
 		t.Error("key1 should be promoted to main queue after Touch")
 	}
 	if p.smallSize != 0 || p.mainSize != 10 {
@@ -36,30 +36,30 @@ func TestS2FIFO_AddAndPromotion(t *testing.T) {
 	}
 }
 
-// TestS2FIFO_SecondChance tests the "second chance" mechanism in the main queue.
-func TestS2FIFO_SecondChance(t *testing.T) {
-	p := NewS2FIFOPolicy(100, 0.5).(*S2FIFOPolicy)
+// TestS3FIFO_SecondChance tests the "second chance" mechanism in the main queue.
+func TestS3FIFO_SecondChance(t *testing.T) {
+	p := NewS3FIFOPolicy(100, 0.5).(*S3FIFOPolicy)
 
 	// Add and promote key1 to main queue
 	p.Add("key1", 10)
 	p.Touch("key1")
 
 	// At this point, wasHit should be false
-	if p.cache["key1"].Value.(*s2fifoEntry).wasHit {
+	if p.cache["key1"].Value.(*s3fifoEntry).wasHit {
 		t.Fatal("wasHit should be false after promotion")
 	}
 
 	// 2. Touch it again. Now wasHit should be true.
 	p.Touch("key1")
-	if !p.cache["key1"].Value.(*s2fifoEntry).wasHit {
+	if !p.cache["key1"].Value.(*s3fifoEntry).wasHit {
 		t.Error("wasHit should become true after a second touch in main queue")
 	}
 }
 
-// TestS2FIFO_EvictFromSmallQueue tests eviction from the small queue when it exceeds its capacity.
-func TestS2FIFO_EvictFromSmallQueue(t *testing.T) {
+// TestS3FIFO_EvictFromSmallQueue tests eviction from the small queue when it exceeds its capacity.
+func TestS3FIFO_EvictFromSmallQueue(t *testing.T) {
 	// Small queue capacity is 20 bytes.
-	p := NewS2FIFOPolicy(100, 0.2).(*S2FIFOPolicy)
+	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
 
 	p.Add("key1", 10) // Oldest
 	p.Add("key2", 10)
@@ -79,10 +79,10 @@ func TestS2FIFO_EvictFromSmallQueue(t *testing.T) {
 	}
 }
 
-// TestS2FIFO_EvictFromMainQueue tests eviction logic from the main queue.
-func TestS2FIFO_EvictFromMainQueue(t *testing.T) {
+// TestS3FIFO_EvictFromMainQueue tests eviction logic from the main queue.
+func TestS3FIFO_EvictFromMainQueue(t *testing.T) {
 	// Total capacity 100, small capacity 20.
-	p := NewS2FIFOPolicy(100, 0.2).(*S2FIFOPolicy)
+	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
 
 	// 1. Add items and promote them to main queue
 	p.Add("main1", 30) // Oldest in main
@@ -107,9 +107,9 @@ func TestS2FIFO_EvictFromMainQueue(t *testing.T) {
 	}
 }
 
-// TestS2FIFO_EvictFromMainWithSecondChance tests that wasHit items are spared from eviction.
-func TestS2FIFO_EvictFromMainWithSecondChance(t *testing.T) {
-	p := NewS2FIFOPolicy(100, 0.2).(*S2FIFOPolicy)
+// TestS3FIFO_EvictFromMainWithSecondChance tests that wasHit items are spared from eviction.
+func TestS3FIFO_EvictFromMainWithSecondChance(t *testing.T) {
+	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
 
 	// 1. Add items and promote them.
 	p.Add("main1", 30) // Oldest
@@ -135,14 +135,14 @@ func TestS2FIFO_EvictFromMainWithSecondChance(t *testing.T) {
 	if !isInCache(p, "main1") {
 		t.Error("main1 should still be in cache")
 	}
-	if p.cache["main1"].Value.(*s2fifoEntry).wasHit {
+	if p.cache["main1"].Value.(*s3fifoEntry).wasHit {
 		t.Error("main1's wasHit flag should be reset to false after being spared")
 	}
 }
 
-// TestS2FIFO_Remove tests explicit removal of items.
-func TestS2FIFO_Remove(t *testing.T) {
-	p := NewS2FIFOPolicy(100, 0.5).(*S2FIFOPolicy)
+// TestS3FIFO_Remove tests explicit removal of items.
+func TestS3FIFO_Remove(t *testing.T) {
+	p := NewS3FIFOPolicy(100, 0.5).(*S3FIFOPolicy)
 	p.Add("key1", 10) // In small
 	p.Add("key2", 10) // In small, will be promoted
 	p.Touch("key2")   // Now in main
@@ -169,10 +169,10 @@ func TestS2FIFO_Remove(t *testing.T) {
 	p.Remove("non-existent-key")
 }
 
-// TestS2FIFO_EdgeCases tests various edge cases.
-func TestS2FIFO_EdgeCases(t *testing.T) {
+// TestS3FIFO_EdgeCases tests various edge cases.
+func TestS3FIFO_EdgeCases(t *testing.T) {
 	// 1. Evict from an empty policy
-	p := NewS2FIFOPolicy(100, 0.5).(*S2FIFOPolicy)
+	p := NewS3FIFOPolicy(100, 0.5).(*S3FIFOPolicy)
 	evicted := p.Evict()
 	if evicted != nil {
 		t.Errorf("Evict on empty policy should return nil, got %v", evicted)
