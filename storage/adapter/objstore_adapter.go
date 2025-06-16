@@ -32,30 +32,30 @@ var _ daramjwee.ContextAwareStore = (*objstoreAdapter)(nil)
 
 // --- Context-Aware Methods ---
 
-func (a *objstoreAdapter) GetStreamContext(ctx context.Context, key string) (io.ReadCloser, daramjwee.Metadata, error) {
+func (a *objstoreAdapter) GetStreamContext(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	// 1. 먼저 Exists를 호출하여 객체 존재 여부만 확인합니다.
 	// 이 방식은 특정 에러 타입이나 헬퍼 함수에 의존하지 않아 매우 안정적입니다.
 	exists, err := a.bucket.Exists(ctx, key)
 	if err != nil {
 		// Exists 호출 자체에서 에러가 발생한 경우 (네트워크 문제, 권한 문제 등)
-		return nil, daramjwee.Metadata{}, fmt.Errorf("failed to check existence in objstore for key '%s': %w", key, err)
+		return nil, "", fmt.Errorf("failed to check existence in objstore for key '%s': %w", key, err)
 	}
 	if !exists {
 		// 객체가 존재하지 않는 것이 명확하게 확인되면, daramjwee의 표준 에러를 반환합니다.
-		return nil, daramjwee.Metadata{}, daramjwee.ErrNotFound
+		return nil, "", daramjwee.ErrNotFound
 	}
 
 	// 2. 존재가 확인된 후에만 Get을 호출합니다.
 	// 이제 Get에서 발생하는 에러는 'Not Found'가 아닌 다른 문제(예: 다운로드 중 연결 끊김)일 가능성이 높습니다.
 	r, err := a.bucket.Get(ctx, key)
 	if err != nil {
-		return nil, daramjwee.Metadata{}, fmt.Errorf("failed to get object for key '%s' after existence check: %w", err)
+		return nil, "", fmt.Errorf("failed to get object for key '%s' after existence check: %w", err)
 	}
 
-	return r, daramjwee.Metadata{Key: key}, nil
+	return r, "", nil
 }
 
-func (a *objstoreAdapter) SetWithWriterContext(ctx context.Context, key string, meta daramjwee.Metadata) (io.WriteCloser, error) {
+func (a *objstoreAdapter) SetWithWriterContext(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	// io.Pipe를 사용하여 Writer와 Reader를 연결하는 파이프를 생성합니다.
 	// WriteCloser(pw)에 쓴 내용이 Reader(pr)로 전달됩니다.
 	pr, pw := io.Pipe()
@@ -81,29 +81,29 @@ func (a *objstoreAdapter) DeleteContext(ctx context.Context, key string) error {
 	return a.bucket.Delete(ctx, key)
 }
 
-func (a *objstoreAdapter) StatContext(ctx context.Context, key string) (daramjwee.Metadata, error) {
+func (a *objstoreAdapter) StatContext(ctx context.Context, key string) (string, error) {
 	exists, err := a.bucket.Exists(ctx, key)
 	if err != nil {
-		return daramjwee.Metadata{}, err
+		return "", err
 	}
 	if !exists {
-		return daramjwee.Metadata{}, daramjwee.ErrNotFound
+		return "", daramjwee.ErrNotFound
 	}
 	// Exists만으로는 상세 메타데이터를 알 수 없으므로, 키 정보만 반환합니다.
-	return daramjwee.Metadata{Key: key}, nil
+	return "", nil
 }
 
 // --- Base Interface Methods ---
 
-func (a *objstoreAdapter) GetStream(key string) (io.ReadCloser, daramjwee.Metadata, error) {
+func (a *objstoreAdapter) GetStream(key string) (io.ReadCloser, string, error) {
 	return a.GetStreamContext(context.Background(), key)
 }
-func (a *objstoreAdapter) SetWithWriter(key string, meta daramjwee.Metadata) (io.WriteCloser, error) {
-	return a.SetWithWriterContext(context.Background(), key, meta)
+func (a *objstoreAdapter) SetWithWriter(key string, etag string) (io.WriteCloser, error) {
+	return a.SetWithWriterContext(context.Background(), key, etag)
 }
 func (a *objstoreAdapter) Delete(key string) error {
 	return a.DeleteContext(context.Background(), key)
 }
-func (a *objstoreAdapter) Stat(key string) (daramjwee.Metadata, error) {
+func (a *objstoreAdapter) Stat(key string) (string, error) {
 	return a.StatContext(context.Background(), key)
 }

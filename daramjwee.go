@@ -39,7 +39,7 @@ type Cache interface {
 	// The cache entry is finalized when the returned writer is closed.
 	// This pattern is ideal for use with io.MultiWriter for simultaneous
 	// response-to-client and writing-to-cache scenarios.
-	Set(ctx context.Context, key string, meta Metadata) (io.WriteCloser, error)
+	Set(ctx context.Context, key string, etag string) (io.WriteCloser, error)
 
 	// Delete removes an object from the cache.
 	Delete(ctx context.Context, key string) error
@@ -55,7 +55,7 @@ type Cache interface {
 
 // Metadata holds essential metadata about a cached item.
 type Metadata struct {
-	ETag       string
+	ETag string
 }
 
 // FetchResult holds the data and metadata returned from a successful fetch operation.
@@ -118,12 +118,11 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	c := &DaramjweeCache{
-		Logger:           logger,
-		HotStore:         cfg.HotStore,
-		ColdStore:        cfg.ColdStore,
-		Worker:           workerManager,
-		DefaultTimeout:   cfg.DefaultTimeout,
-		NegativeCacheTTL: cfg.NegativeCacheTTL,
+		Logger:         logger,
+		HotStore:       cfg.HotStore,
+		ColdStore:      cfg.ColdStore,
+		Worker:         workerManager,
+		DefaultTimeout: cfg.DefaultTimeout,
 	}
 
 	level.Info(logger).Log("msg", "daramjwee cache initialized", "default_timeout", c.DefaultTimeout)
