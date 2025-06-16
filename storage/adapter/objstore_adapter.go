@@ -28,11 +28,10 @@ func NewObjstoreAdapter(bucket objstore.Bucket, logger log.Logger) daramjwee.Sto
 
 // 컴파일 타임에 인터페이스 만족 확인
 var _ daramjwee.Store = (*objstoreAdapter)(nil)
-var _ daramjwee.ContextAwareStore = (*objstoreAdapter)(nil)
 
 // --- Context-Aware Methods ---
 
-func (a *objstoreAdapter) GetStreamContext(ctx context.Context, key string) (io.ReadCloser, string, error) {
+func (a *objstoreAdapter) GetStream(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	// 1. 먼저 Exists를 호출하여 객체 존재 여부만 확인합니다.
 	// 이 방식은 특정 에러 타입이나 헬퍼 함수에 의존하지 않아 매우 안정적입니다.
 	exists, err := a.bucket.Exists(ctx, key)
@@ -55,7 +54,7 @@ func (a *objstoreAdapter) GetStreamContext(ctx context.Context, key string) (io.
 	return r, "", nil
 }
 
-func (a *objstoreAdapter) SetWithWriterContext(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (a *objstoreAdapter) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	// io.Pipe를 사용하여 Writer와 Reader를 연결하는 파이프를 생성합니다.
 	// WriteCloser(pw)에 쓴 내용이 Reader(pr)로 전달됩니다.
 	pr, pw := io.Pipe()
@@ -77,11 +76,11 @@ func (a *objstoreAdapter) SetWithWriterContext(ctx context.Context, key string, 
 	return pw, nil
 }
 
-func (a *objstoreAdapter) DeleteContext(ctx context.Context, key string) error {
+func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
 	return a.bucket.Delete(ctx, key)
 }
 
-func (a *objstoreAdapter) StatContext(ctx context.Context, key string) (string, error) {
+func (a *objstoreAdapter) Stat(ctx context.Context, key string) (string, error) {
 	exists, err := a.bucket.Exists(ctx, key)
 	if err != nil {
 		return "", err
@@ -91,19 +90,4 @@ func (a *objstoreAdapter) StatContext(ctx context.Context, key string) (string, 
 	}
 	// Exists만으로는 상세 메타데이터를 알 수 없으므로, 키 정보만 반환합니다.
 	return "", nil
-}
-
-// --- Base Interface Methods ---
-
-func (a *objstoreAdapter) GetStream(key string) (io.ReadCloser, string, error) {
-	return a.GetStreamContext(context.Background(), key)
-}
-func (a *objstoreAdapter) SetWithWriter(key string, etag string) (io.WriteCloser, error) {
-	return a.SetWithWriterContext(context.Background(), key, etag)
-}
-func (a *objstoreAdapter) Delete(key string) error {
-	return a.DeleteContext(context.Background(), key)
-}
-func (a *objstoreAdapter) Stat(key string) (string, error) {
-	return a.StatContext(context.Background(), key)
 }

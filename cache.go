@@ -28,7 +28,6 @@ type DaramjweeCache struct {
 var _ Cache = (*DaramjweeCache)(nil)
 
 // Get은 요청된 캐싱 전략에 따라 데이터를 가져옵니다.
-// CHANGED: 요청하신 새로운 Get 로직 전체를 여기에 구현했습니다.
 func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error) {
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
@@ -44,7 +43,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 		level.Error(c.Logger).Log("msg", "hot store get failed", "key", key, "err", err)
 	}
 
-	// 2. Cold 캐시 확인 (이제 nil 체크가 필요 없습니다)
+	// 2. Cold 캐시 확인
 	coldStream, coldEtag, err := c.getStreamFromStore(ctx, c.ColdStore, key)
 	if err == nil {
 		level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
@@ -81,8 +80,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 		return result.Body, nil
 	}
 
-	// cold에 set 을 worker에 요청 (이제 nil 체크가 필요 없습니다)
-	// ColdStore가 nullStore인 경우 이 작업은 아무것도 하지 않고 빠르게 종료됩니다.
+	// cold에 set 을 worker에 요청
 	c.scheduleSetToStore(context.Background(), c.ColdStore, key)
 
 	return hotTeeStream, nil
@@ -113,7 +111,7 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	g, gCtx := errgroup.WithContext(ctx)
 
 	// HotStore 삭제
-	if c.HotStore != nil { // HotStore는 필수이므로 이 체크는 유지합니다.
+	if c.HotStore != nil {
 		g.Go(func() error {
 			err := c.deleteFromStore(gCtx, c.HotStore, key)
 			if err != nil {
@@ -124,11 +122,10 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 		})
 	}
 
-	// ColdStore 삭제 (이제 nil 체크가 필요 없습니다)
+	// ColdStore 삭제
 	g.Go(func() error {
 		err := c.deleteFromStore(gCtx, c.ColdStore, key)
 		if err != nil {
-			// nullStore의 Delete는 에러를 반환하지 않으므로, 이 로그는 실제 ColdStore가 있을 때만 의미가 있습니다.
 			level.Error(c.Logger).Log("msg", "failed to delete from cold store", "key", key, "err", err)
 			return err
 		}
@@ -139,7 +136,6 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 }
 
 // ScheduleRefresh는 백그라운드 캐시 갱신 작업을 워커에게 제출합니다.
-// 요청하신 'refresh' 로직 (check -> fetch)은 이 함수가 이미 수행하고 있습니다.
 func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetcher Fetcher) error {
 	if c.Worker == nil {
 		level.Warn(c.Logger).Log("msg", "worker is not configured, cannot schedule refresh", "key", key)
@@ -149,13 +145,11 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 	job := func(jobCtx context.Context) {
 		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key)
 
-		// 1. Check: 현재 캐시의 ETag를 가져와 fetcher에게 전달
 		var oldETag string
 		if etag, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil {
 			oldETag = etag
 		}
 
-		// 2. Fetch: fetcher는 ETag를 보고 원본이 변경되었는지 확인 (ErrNotModified 반환 가능)
 		result, err := fetcher.Fetch(jobCtx, oldETag)
 		if err != nil {
 			if err == ErrNotModified {
@@ -167,7 +161,6 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		}
 		defer result.Body.Close()
 
-		// 3. Hot 스토어에 새로운 내용 저장
 		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.ETag)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get cache writer for refresh", "key", key, "err", err)
@@ -200,41 +193,28 @@ func (c *DaramjweeCache) Close() {
 
 func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {} // 이미 타임아웃이 설정된 경우 그대로 사용
+		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, c.DefaultTimeout)
 }
 
+// 타입 단언이 필요 없어지고 코드가 매우 간결해졌습니다.
 func (c *DaramjweeCache) getStreamFromStore(ctx context.Context, store Store, key string) (io.ReadCloser, string, error) {
-	if caStore, ok := store.(ContextAwareStore); ok {
-		return caStore.GetStreamContext(ctx, key)
-	}
-	return store.GetStream(key)
+	return store.GetStream(ctx, key)
 }
 
-// ADDED: SetWithWriter를 컨텍스트와 함께 호출하는 헬퍼
 func (c *DaramjweeCache) setStreamToStore(ctx context.Context, store Store, key string, etag string) (io.WriteCloser, error) {
-	if caStore, ok := store.(ContextAwareStore); ok {
-		return caStore.SetWithWriterContext(ctx, key, etag)
-	}
-	return store.SetWithWriter(key, etag)
+	return store.SetWithWriter(ctx, key, etag)
 }
 
 func (c *DaramjweeCache) deleteFromStore(ctx context.Context, store Store, key string) error {
-	if caStore, ok := store.(ContextAwareStore); ok {
-		return caStore.DeleteContext(ctx, key)
-	}
-	return store.Delete(key)
+	return store.Delete(ctx, key)
 }
 
 func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key string) (string, error) {
-	if caStore, ok := store.(ContextAwareStore); ok {
-		return caStore.StatContext(ctx, key)
-	}
-	return store.Stat(key)
+	return store.Stat(ctx, key)
 }
 
-// ADDED: 백그라운드에서 특정 저장소로 데이터를 복사하는 작업을 스케줄링합니다.
 func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store, key string) {
 	if c.Worker == nil {
 		level.Warn(c.Logger).Log("msg", "worker is not configured, cannot schedule set", "key", key)
@@ -244,7 +224,6 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 	job := func(jobCtx context.Context) {
 		level.Info(c.Logger).Log("msg", "starting background set", "key", key, "dest", "cold")
 
-		// Hot 스토어에서 데이터를 읽어옵니다.
 		srcStream, etag, err := c.getStreamFromStore(jobCtx, c.HotStore, key)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get stream from hot store for background set", "key", key, "err", err)
@@ -252,7 +231,6 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 		}
 		defer srcStream.Close()
 
-		// 대상 스토어(Cold)에 데이터를 씁니다.
 		destWriter, err := c.setStreamToStore(jobCtx, destStore, key, etag)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get writer for dest store for background set", "key", key, "err", err)
@@ -272,20 +250,14 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 	c.Worker.Submit(job)
 }
 
-// ADDED: Cold -> Hot으로 승격시키면서 클라이언트에게 스트리밍하는 헬퍼
 func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key, etag string, coldStream io.ReadCloser) (io.ReadCloser, error) {
-	// Hot 스토어에 쓸 writer를 가져옵니다.
 	hotWriter, err := c.setStreamToStore(ctx, c.HotStore, key, etag)
 	if err != nil {
 		level.Error(c.Logger).Log("msg", "failed to get hot store writer for promotion", "key", key, "err", err)
-		// 승격에 실패하더라도 Cold 스트림은 그대로 반환하여 응답은 성공시킵니다.
 		return coldStream, nil
 	}
 
-	// Cold 스트림을 읽어서 클라이언트와 Hot 캐시에 동시에 보냅니다.
 	teeReader := io.TeeReader(coldStream, hotWriter)
-
-	// coldStream과 hotWriter를 모두 닫아주는 multiCloser를 반환합니다.
 	return newMultiCloser(teeReader, coldStream, hotWriter), nil
 }
 
@@ -302,7 +274,6 @@ func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, resu
 	return result.Body, nil
 }
 
-// multiCloser는 여러 io.Closer를 순서대로 닫아주는 헬퍼입니다.
 type multiCloser struct {
 	reader  io.Reader
 	closers []io.Closer
@@ -322,7 +293,6 @@ func (mc *multiCloser) Close() error {
 	return firstErr
 }
 
-// cancelWriteCloser는 쓰기 작업이 완료(Close)될 때 context를 cancel 해주는 헬퍼입니다.
 type cancelWriteCloser struct {
 	io.WriteCloser
 	cancel context.CancelFunc

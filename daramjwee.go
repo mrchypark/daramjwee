@@ -71,17 +71,10 @@ type Fetcher interface {
 }
 
 type Store interface {
-	GetStream(key string) (io.ReadCloser, string, error)
-	SetWithWriter(key string, etag string) (io.WriteCloser, error)
-	Delete(key string) error
-	Stat(key string) (string, error)
-}
-
-type ContextAwareStore interface {
-	GetStreamContext(ctx context.Context, key string) (io.ReadCloser, string, error)
-	SetWithWriterContext(ctx context.Context, key string, etag string) (io.WriteCloser, error)
-	DeleteContext(ctx context.Context, key string) error
-	StatContext(ctx context.Context, key string) (string, error)
+	GetStream(ctx context.Context, key string) (io.ReadCloser, string, error)
+	SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error)
+	Delete(ctx context.Context, key string) error
+	Stat(ctx context.Context, key string) (string, error)
 }
 
 func New(logger log.Logger, opts ...Option) (Cache, error) {

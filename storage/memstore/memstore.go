@@ -4,6 +4,7 @@ package memstore
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"sync"
 
@@ -33,7 +34,7 @@ func New() *MemStore {
 var _ daramjwee.Store = (*MemStore)(nil)
 
 // GetStream retrieves an object as a stream from the in-memory map.
-func (ms *MemStore) GetStream(key string) (io.ReadCloser, string, error) {
+func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
@@ -52,7 +53,7 @@ func (ms *MemStore) GetStream(key string) (io.ReadCloser, string, error) {
 
 // SetWithWriter returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
-func (ms *MemStore) SetWithWriter(key string, etag string) (io.WriteCloser, error) {
+func (ms *MemStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	return &memStoreWriter{
 		ms:   ms,
 		key:  key,
@@ -62,7 +63,7 @@ func (ms *MemStore) SetWithWriter(key string, etag string) (io.WriteCloser, erro
 }
 
 // Delete removes an object from the in-memory map.
-func (ms *MemStore) Delete(key string) error {
+func (ms *MemStore) Delete(ctx context.Context, key string) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
@@ -71,7 +72,7 @@ func (ms *MemStore) Delete(key string) error {
 }
 
 // Stat retrieves metadata for an object from the in-memory map.
-func (ms *MemStore) Stat(key string) (string, error) {
+func (ms *MemStore) Stat(ctx context.Context, key string) (string, error) {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 

@@ -35,7 +35,6 @@ func New(dir string, logger log.Logger) (*FileStore, error) {
 
 // 컴파일 타임에 인터페이스 만족 확인
 var _ daramjwee.Store = (*FileStore)(nil)
-var _ daramjwee.ContextAwareStore = (*FileStore)(nil)
 
 // --- Context-Aware Methods (ContextAwareStore implementation) ---
 
@@ -45,7 +44,7 @@ type metaFilePayload struct {
 	ETag string `json:"etag"`
 }
 
-func (fs *FileStore) GetStreamContext(ctx context.Context, key string) (io.ReadCloser, string, error) {
+func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
 
@@ -67,7 +66,7 @@ func (fs *FileStore) GetStreamContext(ctx context.Context, key string) (io.ReadC
 	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), etag, nil
 }
 
-func (fs *FileStore) SetWithWriterContext(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 
@@ -97,7 +96,7 @@ func (fs *FileStore) SetWithWriterContext(ctx context.Context, key string, etag 
 	return newLockedWriteCloser(tmpFile, onClose), nil
 }
 
-func (fs *FileStore) DeleteContext(ctx context.Context, key string) error {
+func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 	defer fs.lockManager.Unlock(path)
@@ -118,26 +117,11 @@ func (fs *FileStore) DeleteContext(ctx context.Context, key string) error {
 	return nil
 }
 
-func (fs *FileStore) StatContext(ctx context.Context, key string) (string, error) {
+func (fs *FileStore) Stat(ctx context.Context, key string) (string, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
 	defer fs.lockManager.RUnlock(path)
 	return fs.readMetaFile(path)
-}
-
-// --- Base Interface Methods (for Store interface) ---
-
-func (fs *FileStore) GetStream(key string) (io.ReadCloser, string, error) {
-	return fs.GetStreamContext(context.Background(), key)
-}
-func (fs *FileStore) SetWithWriter(key string, etag string) (io.WriteCloser, error) {
-	return fs.SetWithWriterContext(context.Background(), key, etag)
-}
-func (fs *FileStore) Delete(key string) error {
-	return fs.DeleteContext(context.Background(), key)
-}
-func (fs *FileStore) Stat(key string) (string, error) {
-	return fs.StatContext(context.Background(), key)
 }
 
 // --- 내부 헬퍼 및 타입 ---

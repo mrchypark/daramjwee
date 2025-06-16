@@ -17,37 +17,24 @@ func newNullStore() Store {
 
 // 컴파일 타임에 인터페이스 만족 확인
 var _ Store = (*nullStore)(nil)
-var _ ContextAwareStore = (*nullStore)(nil)
 
 // GetStream은 항상 ErrNotFound를 반환합니다.
-func (ns *nullStore) GetStream(key string) (io.ReadCloser, string, error) {
-	return nil, "", ErrNotFound
-}
-func (ns *nullStore) GetStreamContext(ctx context.Context, key string) (io.ReadCloser, string, error) {
+func (ns *nullStore) GetStream(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	return nil, "", ErrNotFound
 }
 
 // SetWithWriter는 모든 데이터를 버리는 io.WriteCloser를 반환합니다.
-func (ns *nullStore) SetWithWriter(key string, etag string) (io.WriteCloser, error) {
-	return &nullWriteCloser{}, nil
-}
-func (ns *nullStore) SetWithWriterContext(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (ns *nullStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
 	return &nullWriteCloser{}, nil
 }
 
 // Delete는 아무것도 하지 않고 성공을 반환합니다.
-func (ns *nullStore) Delete(key string) error {
-	return nil
-}
-func (ns *nullStore) DeleteContext(ctx context.Context, key string) error {
+func (ns *nullStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
 // Stat은 항상 ErrNotFound를 반환합니다.
-func (ns *nullStore) Stat(key string) (string, error) {
-	return "", ErrNotFound
-}
-func (ns *nullStore) StatContext(ctx context.Context, key string) (string, error) {
+func (ns *nullStore) Stat(ctx context.Context, key string) (string, error) {
 	return "", ErrNotFound
 }
 
