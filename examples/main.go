@@ -60,9 +60,14 @@ func main() {
 
 	// --- 3. daramjwee 캐시 설정 ---
 
-	// Hot Tier: 임시 디렉터리에 filestore 생성
-	hotStoreDir, _ := os.MkdirTemp("", "daramjwee-hot-")
-	defer os.RemoveAll(hotStoreDir)
+	// Hot Tier: 현재 디렉토리에 filestore 생성
+	hotStoreDir := "./daramjwee-hot-store" // Using a specific directory in the current location
+
+	// Create the directory if it doesn't exist
+	if err := os.MkdirAll(hotStoreDir, 0755); err != nil {
+		panic(err)
+	}
+
 	hotStore, err := filestore.New(hotStoreDir, log.With(logger, "tier", "hot"))
 	if err != nil {
 		panic(err)
