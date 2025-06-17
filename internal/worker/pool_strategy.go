@@ -11,12 +11,13 @@ import (
 
 // PoolStrategy는 정해진 개수의 워커 풀을 사용하여 작업을 처리합니다.
 type PoolStrategy struct {
-	logger   log.Logger
-	timeout  time.Duration
-	poolSize int
-	jobs     chan Job
-	wg       sync.WaitGroup
-	quit     chan struct{}
+	logger       log.Logger
+	timeout      time.Duration
+	poolSize     int
+	jobs         chan Job
+	wg           sync.WaitGroup
+	quit         chan struct{}
+	shutdownOnce sync.Once // Shutdown이 한 번만 실행되도록 보장합니다.
 }
 
 func NewPoolStrategy(logger log.Logger, poolSize int, queueSize int, timeout time.Duration) *PoolStrategy {
@@ -77,6 +78,8 @@ func (p *PoolStrategy) Submit(job Job) {
 }
 
 func (p *PoolStrategy) Shutdown() {
-	close(p.quit) // 모든 워커에게 종료 신호 전송
-	p.wg.Wait()   // 모든 워커가 종료될 때까지 대기
+	p.shutdownOnce.Do(func() {
+		close(p.quit) // 모든 워커에게 종료 신호 전송
+	})
+	p.wg.Wait() // 모든 워커가 종료될 때까지 대기
 }
