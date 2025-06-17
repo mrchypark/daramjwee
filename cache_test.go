@@ -73,6 +73,8 @@ type mockStore struct {
 	statErr      error
 	setCallCount int
 	metaOnlyKeys map[string]bool
+	// 쓰기 완료를 알리기 위한 채널 추가
+	writeCompleted chan string
 }
 
 func newMockStore() *mockStore {
@@ -80,6 +82,8 @@ func newMockStore() *mockStore {
 		data:         make(map[string][]byte),
 		meta:         make(map[string]*Metadata),
 		metaOnlyKeys: make(map[string]bool),
+		// 버퍼를 주어 비동기 쓰기에도 블로킹되지 않도록 함
+		writeCompleted: make(chan string, 100),
 	}
 }
 
@@ -116,9 +120,12 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, etag string) 
 	return &mockWriteCloser{
 		onClose: func() error {
 			s.mu.Lock()
-			defer s.mu.Unlock()
 			s.data[key] = buf.Bytes()
 			s.meta[key] = &Metadata{ETag: etag}
+			s.mu.Unlock() // Unlock 후 채널에 신호 전송
+
+			// 쓰기 작업이 완료되었음을 알림
+			s.writeCompleted <- key
 			return nil
 		},
 		buf: &buf,
@@ -540,14 +547,24 @@ func TestCache_Get_HotHit_Deterministic(t *testing.T) {
 	readBytes, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "hot content", string(readBytes))
+	// 동기적 호출에서는 fetcher가 호출되지 않아야 함 (이 검증은 유효)
 	assert.Equal(t, 0, fetcher.getFetchCount())
 
-	// 백그라운드 갱신이 완료될 때까지 대기
+	// 백그라운드 Fetch 시작 대기
 	<-fetcher.fetchStarted
 	<-fetcher.fetchEnd
 
+	// **핵심: 실제 mockStore에 쓰기가 완료될 때까지 대기**
+	select {
+	case completedKey := <-hot.writeCompleted:
+		assert.Equal(t, key, completedKey)
+	case <-time.After(1 * time.Second):
+		t.Fatal("Did not receive write completion signal in time")
+	}
+
 	assert.Equal(t, 1, fetcher.getFetchCount(), "Fetcher는 핫 히트 시 백그라운드에서 호출되어야 합니다.")
 	hot.mu.RLock()
+	// 이제 이 검증은 항상 성공해야 함
 	assert.Equal(t, "v2", hot.meta[key].ETag, "핫 캐시는 백그라운드 갱신 후 업데이트되어야 합니다.")
 	hot.mu.RUnlock()
 }
