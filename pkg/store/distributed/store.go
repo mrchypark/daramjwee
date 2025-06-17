@@ -22,7 +22,6 @@ type Picker interface {
 type DistributedStore struct {
 	localStore daramjwee.Store // 로컬 저장소 (e.g., FileStore) - "Hot Tier의 Shard"
 	picker     Picker
-	request    transport.Request
 	client     transport.Client
 
 	logger log.Logger
@@ -32,7 +31,6 @@ type DistributedStore struct {
 func New(
 	localStore daramjwee.Store,
 	picker Picker,
-	request transport.Request,
 	client transport.Client,
 	logger log.Logger,
 ) (*DistributedStore, error) {
@@ -45,20 +43,29 @@ func New(
 	}, nil
 }
 
-// 컴파일 타임에 daramjwee.Store 인터페이스 만족 확인
 var _ daramjwee.Store = (*DistributedStore)(nil)
 
 func (d *DistributedStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	peer, err := d.picker.GetPeer(key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if peer.IsSelf {
+		return d.localStore.GetStream(ctx, key)
+	}
+
+	d.client.Do(ctx, key)
 	return nil, nil, nil
 }
 
 func (d *DistributedStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
-	return nil, nil
+	return d.localStore.SetWithWriter(ctx, key, etag)
 }
 
 func (d *DistributedStore) Delete(ctx context.Context, key string) error {
-	return nil
+	return d.localStore.Delete(ctx, key)
 }
 func (d *DistributedStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	return nil, nil
+	return d.localStore.Stat(ctx, key)
 }
