@@ -386,19 +386,6 @@ func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key, etag stri
 	return newMultiCloser(teeReader, coldStream, hotWriter), nil
 }
 
-func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, result *FetchResult) (io.ReadCloser, error) {
-	if c.HotStore != nil && result.Metadata != nil {
-		cacheWriter, err := c.setStreamToStore(ctx, c.HotStore, key, result.Metadata.ETag)
-		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
-			return result.Body, nil
-		}
-		teeReader := io.TeeReader(result.Body, cacheWriter)
-		return newMultiCloser(teeReader, result.Body, cacheWriter), nil
-	}
-	return result.Body, nil
-}
-
 type multiCloser struct {
 	reader  io.Reader
 	closers []io.Closer

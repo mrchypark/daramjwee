@@ -5,6 +5,10 @@ github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XL
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/dgryski/go-jump v0.0.0-20211018200510-ba001c3ffce0 h1:0wH6nO9QEa02Qx8sIQGw6ieKdz+BXjpccSOo9vXNl4U=
+github.com/dgryski/go-jump v0.0.0-20211018200510-ba001c3ffce0/go.mod h1:4hKCXuwrJoYvHZxJ86+bRVTOMyJ0Ej+RqfSm8mHi6KA=
+github.com/edwingeng/doublejump/v2 v2.0.0 h1:PGAVSffTiIORFOB7834zOZguAtbBOfuDvR8s0lOsBiI=
+github.com/edwingeng/doublejump/v2 v2.0.0/go.mod h1:YxSKY3z+VhXWBZNqeiEDHF6ZEWKhrxKFoJ+SrGnyoF4=
 github.com/efficientgo/core v1.0.0-rc.0.0.20221201130417-ba593f67d2a4 h1:rydBwnBoywKQMjWF0z8SriYtQ+uUcaFsxuijMjJr5PI=
 github.com/efficientgo/core v1.0.0-rc.0.0.20221201130417-ba593f67d2a4/go.mod h1:kQa0V74HNYMfuJH6jiPiwNdpWXl4xd/K4tzlrcvYDQI=
 github.com/go-kit/log v0.2.1 h1:MRVx0/zhvdseW+Gza6N9rVzU/IVzaeE1SFI4raAhmBU=

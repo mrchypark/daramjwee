@@ -3,6 +3,7 @@ module github.com/mrchypark/daramjwee
 go 1.24.3
 
 require (
+	github.com/edwingeng/doublejump/v2 v2.0.0
 	github.com/go-kit/log v0.2.1
 	github.com/goccy/go-json v0.10.4
 	github.com/samber/go-singleflightx v0.3.2
@@ -16,6 +17,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dgryski/go-jump v0.0.0-20211018200510-ba001c3ffce0 // indirect
 	github.com/efficientgo/core v1.0.0-rc.0.0.20221201130417-ba593f67d2a4 // indirect
 	github.com/go-logfmt/logfmt v0.5.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
