@@ -10,6 +10,8 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // setupTestStore는 각 테스트를 위한 임시 디렉토리와 FileStore 인스턴스를 생성합니다.
@@ -291,4 +293,68 @@ func TestFileStore_PathTraversal(t *testing.T) {
 	if _, err := os.Stat(outsidePath); !os.IsNotExist(err) {
 		t.Error("경로 조작에 성공하여 상위 디렉토리에 파일이 생성되었습니다.")
 	}
+}
+
+// 기존 파일의 맨 아래에 다음 테스트 함수들을 추가합니다.
+
+// TestFileStore_Set_ErrorOnWriteMeta는 메타데이터 파일 쓰기에 실패했을 때
+// 모든 변경사항이 롤백되고 임시 파일이 정리되는지 검증합니다.
+func TestFileStore_Set_ErrorOnWriteMeta(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "meta-write-fail-key"
+	metaPath := fs.toMetaPath(fs.toDataPath(key))
+
+	// 1. 메타 파일 쓰기 실패를 유도하기 위해, 메타 파일 경로에 디렉토리를 생성합니다.
+	//    이렇게 하면 os.WriteFile이 해당 경로에 파일을 쓰려고 할 때 "is a directory" 에러가 발생합니다.
+	err := os.Mkdir(metaPath, 0755)
+	require.NoError(t, err)
+
+	writer, err := fs.SetWithWriter(ctx, key, "v1")
+	require.NoError(t, err)
+
+	_, err = writer.Write([]byte("this should be cleaned up"))
+	require.NoError(t, err)
+
+	// 2. Close() 호출 시 내부적으로 writeMetaFile에서 에러가 발생해야 합니다.
+	err = writer.Close()
+	require.Error(t, err, "Close() should fail due to meta write error")
+
+	// 3. 디렉토리 권한은 변경되지 않았으므로, 임시 파일은 정상적으로 삭제되어야 합니다.
+	files, _ := os.ReadDir(fs.baseDir)
+	for _, file := range files {
+		// 생성했던 metaPath 디렉토리는 남아있을 수 있으므로, 임시 파일만 없는지 확인합니다.
+		if file.Name() == filepath.Base(metaPath) {
+			continue
+		}
+		assert.False(t, strings.HasPrefix(file.Name(), "daramjwee-tmp-"), "Temporary file should be cleaned up")
+	}
+}
+
+// TestFileStore_SetWithRename_ErrorOnRename은 최종 rename 단계에서 실패했을 때
+// 롤백 로직(메타 파일 삭제)이 올바르게 동작하는지 검증합니다.
+func TestFileStore_SetWithRename_ErrorOnRename(t *testing.T) {
+	fs := setupTestStore(t) // 기본 전략: rename
+	ctx := context.Background()
+	key := "rename-fail-key"
+	dataPath := fs.toDataPath(key)
+
+	// 1. rename 실패를 유도하기 위해 최종 경로에 파일이 아닌 디렉토리를 생성
+	err := os.Mkdir(dataPath, 0755)
+	require.NoError(t, err)
+
+	writer, err := fs.SetWithWriter(ctx, key, "v1")
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("some data"))
+	require.NoError(t, err)
+
+	// 2. Close() 호출 시 내부적으로 os.Rename에서 에러 발생
+	// (파일을 디렉토리로 덮어쓸 수 없기 때문)
+	err = writer.Close()
+	require.Error(t, err, "Close() should return an error on rename failure")
+
+	// 3. 롤백 로직 검증: rename 전에 생성된 메타 파일이 삭제되었는지 확인
+	metaPath := fs.toMetaPath(dataPath)
+	_, err = os.Stat(metaPath)
+	assert.True(t, os.IsNotExist(err), "Meta file should be removed during rollback after rename failure")
 }

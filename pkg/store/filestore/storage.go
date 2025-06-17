@@ -100,7 +100,18 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string)
 		return nil, err
 	}
 
-	onClose := func() error {
+	onClose := func() (err error) {
+		defer func() {
+			// 임시 파일이 이미 rename 등으로 존재하지 않을 수 있으므로 IsNotExist 에러는 무시합니다.
+			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil && !os.IsNotExist(errRemove) {
+				level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
+				// 만약 주 로직이 성공했는데 정리 작업만 실패했다면, 이 에러를 반환해야 합니다.
+				if err == nil {
+					err = errRemove
+				}
+			}
+		}()
+
 		defer fs.lockManager.Unlock(path)
 
 		// Based on the selected strategy, either use atomic rename or copy.
