@@ -1,4 +1,4 @@
-package router
+package pickter
 
 import (
 	"fmt"
@@ -14,7 +14,7 @@ type StaticKeyRouter struct {
 	hasher *doublejump.Hash[string]
 }
 
-var _ distributed.KeyRouter = (*StaticKeyRouter)(nil)
+var _ distributed.Picker = (*StaticKeyRouter)(nil)
 
 func NewStaticKeyRouter(self string, peers []string) (*StaticKeyRouter, error) {
 	if len(peers) == 0 {
