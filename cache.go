@@ -69,7 +69,6 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, fetcher 
 	level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
 	cc, _ := context.WithTimeout(context.Background(), c.DefaultTimeout)
 
-	// [SUGGESTION] Cold Hit도 캐시 히트이므로, 백그라운드 갱신을 시도할 수 있습니다.
 	if err := c.ScheduleRefresh(cc, key, fetcher); err != nil {
 		level.Warn(c.Logger).Log("msg", "failed to schedule refresh on cold hit", "key", key, "err", err)
 	}

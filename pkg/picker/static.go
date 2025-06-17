@@ -1,4 +1,4 @@
-package pickter
+package picker
 
 import (
 	"fmt"
