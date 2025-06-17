@@ -43,7 +43,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	// 2. Cold 캐시 확인
 	coldStream, coldMeta, err := c.getStreamFromStore(ctx, c.ColdStore, key)
 	if err == nil {
-		return c.handleColdHit(ctx, key, coldStream, coldMeta)
+		return c.handleColdHit(ctx, key, fetcher, coldStream, coldMeta)
 	}
 	if err != ErrNotFound {
 		level.Error(c.Logger).Log("msg", "cold store get failed", "key", key, "err", err)
@@ -56,16 +56,24 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 // handleHotHit는 Hot 캐시에서 객체를 찾았을 때의 로직을 처리합니다.
 func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher Fetcher, hotStream io.ReadCloser) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
+	cc, _ := context.WithTimeout(context.Background(), c.DefaultTimeout)
 	// 응답은 즉시 반환하고, 백그라운드에서 캐시 갱신을 시도합니다.
-	if err := c.ScheduleRefresh(context.Background(), key, fetcher); err != nil {
+	if err := c.ScheduleRefresh(cc, key, fetcher); err != nil {
 		level.Warn(c.Logger).Log("msg", "failed to schedule refresh on hot hit", "key", key, "err", err)
 	}
 	return hotStream, nil
 }
 
 // handleColdHit는 Cold 캐시에서 객체를 찾았을 때의 로직을 처리합니다.
-func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStream io.ReadCloser, coldMeta *Metadata) (io.ReadCloser, error) {
+func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, fetcher Fetcher, coldStream io.ReadCloser, coldMeta *Metadata) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
+	cc, _ := context.WithTimeout(context.Background(), c.DefaultTimeout)
+
+	// [SUGGESTION] Cold Hit도 캐시 히트이므로, 백그라운드 갱신을 시도할 수 있습니다.
+	if err := c.ScheduleRefresh(cc, key, fetcher); err != nil {
+		level.Warn(c.Logger).Log("msg", "failed to schedule refresh on cold hit", "key", key, "err", err)
+	}
+
 	// Cold 캐시의 데이터를 클라이언트로 스트리밍하면서 동시에 Hot 캐시로 승격시킵니다.
 	return c.promoteAndTeeStream(ctx, key, coldMeta.ETag, coldStream)
 }
@@ -300,7 +308,7 @@ func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, resu
 		cacheWriter, err := c.setStreamToStore(ctx, c.HotStore, key, result.Metadata.ETag)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
-			return result.Body, nil
+			return result.Body, err
 		}
 		teeReader := io.TeeReader(result.Body, cacheWriter)
 		return newMultiCloser(teeReader, result.Body, cacheWriter), nil

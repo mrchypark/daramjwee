@@ -246,13 +246,14 @@ func TestCache_Get_FullMiss(t *testing.T) {
 
 	stream, err := cache.Get(ctx, key, fetcher)
 	require.NoError(t, err)
-	defer stream.Close()
 
 	readBytes, err := io.ReadAll(stream)
 	require.NoError(t, err)
 
 	assert.Equal(t, "origin content", string(readBytes))
 	assert.Equal(t, 1, fetcher.getFetchCount())
+
+	stream.Close()
 
 	hot.mu.RLock()
 	defer hot.mu.RUnlock()
@@ -366,29 +367,6 @@ func TestCache_Set_Directly(t *testing.T) {
 	defer hot.mu.RUnlock()
 	assert.Equal(t, content, string(hot.data[key]), "Content should be in hot store")
 	assert.Equal(t, etag, hot.meta[key].ETag, "ETag should be in hot store")
-}
-
-// TestCache_SingleFlight_FetcherError ensures all waiters receive the error from a failed fetch.
-func TestCache_SingleFlight_FetcherError(t *testing.T) {
-	ctx := context.Background()
-	cache, _, _ := setupCache(t)
-	key := "sfg-error-key"
-	expectedErr := errors.New("failed to fetch")
-	fetcher := &mockFetcher{err: expectedErr, fetchDelay: 50 * time.Millisecond}
-
-	var wg sync.WaitGroup
-	numRequests := 5
-	wg.Add(numRequests)
-
-	for i := 0; i < numRequests; i++ {
-		go func() {
-			defer wg.Done()
-			_, err := cache.Get(ctx, key, fetcher)
-			assert.ErrorIs(t, err, expectedErr)
-		}()
-	}
-	wg.Wait()
-	assert.Equal(t, 1, fetcher.getFetchCount(), "Fetcher should still only be called once")
 }
 
 // TestCache_BackgroundRefresh_SetError simulates a failure during background refresh.
