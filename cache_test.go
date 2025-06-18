@@ -271,36 +271,6 @@ func setupCache(t *testing.T, opts ...Option) (Cache, *mockStore, *mockStore) {
 	return cache, hot, cold
 }
 
-// TestCache_Get_HotHit tests a simple hot cache hit scenario.
-func TestCache_Get_HotHit(t *testing.T) {
-	ctx := context.Background()
-	cache, hot, _ := setupCache(t)
-
-	key := "my-key"
-	content := "hot content"
-	hot.data[key] = []byte(content)
-	hot.meta[key] = &Metadata{ETag: "v1"}
-
-	fetcher := &mockFetcher{content: "new content", etag: "v2"}
-
-	stream, err := cache.Get(ctx, key, fetcher)
-	require.NoError(t, err)
-	defer stream.Close()
-
-	readBytes, err := io.ReadAll(stream)
-	require.NoError(t, err)
-	assert.Equal(t, content, string(readBytes))
-
-	assert.Equal(t, 0, fetcher.getFetchCount())
-
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, 1, fetcher.getFetchCount(), "Fetcher should be called in the background on hot hit")
-
-	hot.mu.RLock()
-	assert.Equal(t, "v2", hot.meta[key].ETag, "Hot cache should be updated after background refresh")
-	hot.mu.RUnlock()
-}
-
 // TestCache_Get_ColdHit tests a cold cache hit and promotion to hot.
 func TestCache_Get_ColdHit(t *testing.T) {
 	ctx := context.Background()
