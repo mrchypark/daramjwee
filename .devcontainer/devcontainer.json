@@ -24,6 +24,7 @@
       },
       "extensions": [
         "golang.go",
+        "humao.rest-client",
         "google.geminicodeassist"
       ]
     }
