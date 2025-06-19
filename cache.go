@@ -67,14 +67,15 @@ func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher F
 // handleColdHit는 Cold 캐시에서 객체를 찾았을 때의 로직을 처리합니다.
 func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, fetcher Fetcher, coldStream io.ReadCloser, coldMeta *Metadata) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
-	cc, _ := context.WithTimeout(context.Background(), c.DefaultTimeout)
+	// cc, _ := context.WithTimeout(context.Background(), c.DefaultTimeout) // This line can also be removed if cc is no longer used
 
-	if err := c.ScheduleRefresh(cc, key, fetcher); err != nil {
-		level.Warn(c.Logger).Log("msg", "failed to schedule refresh on cold hit", "key", key, "err", err)
-	}
+	// // ScheduleRefresh call removed/commented
+	// if err := c.ScheduleRefresh(cc, key, fetcher); err != nil {
+	// 	level.Warn(c.Logger).Log("msg", "failed to schedule refresh on cold hit", "key", key, "err", err)
+	// }
 
 	// Cold 캐시의 데이터를 클라이언트로 스트리밍하면서 동시에 Hot 캐시로 승격시킵니다.
-	return c.promoteAndTeeStream(ctx, key, coldMeta.ETag, coldStream)
+	return c.promoteAndTeeStream(ctx, key, coldMeta, coldStream)
 }
 
 // handleMiss는 Hot/Cold 캐시에서 모두 객체를 찾지 못했을 때의 로직을 처리합니다.
@@ -82,13 +83,13 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 	level.Debug(c.Logger).Log("msg", "full cache miss, fetching from origin", "key", key)
 
 	// Origin에 요청하기 전에, 만료되었을 수 있는 로컬 캐시의 ETag를 확인합니다.
-	var oldETag string
-	if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil && meta != nil {
-		oldETag = meta.ETag
+	var oldMetadata *Metadata
+	if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil {
+		oldMetadata = meta
 	}
 
 	// Origin에서 데이터를 가져옵니다.
-	result, err := fetcher.Fetch(ctx, oldETag)
+	result, err := fetcher.Fetch(ctx, oldMetadata)
 	if err != nil {
 		// Origin의 데이터가 변경되지 않은 경우 (HTTP 304 Not Modified)
 		if err == ErrNotModified {
@@ -121,14 +122,14 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 // The cache entry is finalized only when the returned writer is closed.
 // IMPORTANT: The caller MUST call Close() on the returned io.WriteCloser to finalize
 // the operation and release associated resources, including the context timeout.
-func (c *DaramjweeCache) Set(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
 	if c.HotStore == nil {
 		return nil, &ConfigError{"hotStore is not configured"}
 	}
 
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 
-	wc, err := c.setStreamToStore(ctx, c.HotStore, key, etag)
+	wc, err := c.setStreamToStore(ctx, c.HotStore, key, metadata)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -179,12 +180,12 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 	job := func(jobCtx context.Context) {
 		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key)
 
-		var oldETag string
+		var oldMetadata *Metadata
 		if meta, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil && meta != nil {
-			oldETag = meta.ETag
+			oldMetadata = meta
 		}
 
-		result, err := fetcher.Fetch(jobCtx, oldETag)
+		result, err := fetcher.Fetch(jobCtx, oldMetadata)
 		if err != nil {
 			if err == ErrNotModified {
 				level.Debug(c.Logger).Log("msg", "background refresh: object not modified", "key", key)
@@ -199,7 +200,7 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 			}
 		}()
 
-		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.Metadata.ETag)
+		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.Metadata)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get cache writer for refresh", "key", key, "err", err)
 			return
@@ -240,8 +241,8 @@ func (c *DaramjweeCache) getStreamFromStore(ctx context.Context, store Store, ke
 	return store.GetStream(ctx, key)
 }
 
-func (c *DaramjweeCache) setStreamToStore(ctx context.Context, store Store, key string, etag string) (io.WriteCloser, error) {
-	return store.SetWithWriter(ctx, key, etag)
+func (c *DaramjweeCache) setStreamToStore(ctx context.Context, store Store, key string, metadata *Metadata) (io.WriteCloser, error) {
+	return store.SetWithWriter(ctx, key, metadata)
 }
 
 func (c *DaramjweeCache) deleteFromStore(ctx context.Context, store Store, key string) error {
@@ -272,7 +273,7 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 			}
 		}()
 
-		destWriter, err := c.setStreamToStore(jobCtx, destStore, key, meta.ETag)
+		destWriter, err := c.setStreamToStore(jobCtx, destStore, key, meta)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get writer for dest store for background set", "key", key, "err", err)
 			return
@@ -291,8 +292,8 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 	c.Worker.Submit(job)
 }
 
-func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key, etag string, coldStream io.ReadCloser) (io.ReadCloser, error) {
-	hotWriter, err := c.setStreamToStore(ctx, c.HotStore, key, etag)
+func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key string, metadata *Metadata, coldStream io.ReadCloser) (io.ReadCloser, error) {
+	hotWriter, err := c.setStreamToStore(ctx, c.HotStore, key, metadata)
 	if err != nil {
 		level.Error(c.Logger).Log("msg", "failed to get hot store writer for promotion", "key", key, "err", err)
 		return coldStream, nil
@@ -304,7 +305,7 @@ func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key, etag stri
 
 func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, result *FetchResult) (io.ReadCloser, error) {
 	if c.HotStore != nil && result.Metadata != nil {
-		cacheWriter, err := c.setStreamToStore(ctx, c.HotStore, key, result.Metadata.ETag)
+		cacheWriter, err := c.setStreamToStore(ctx, c.HotStore, key, result.Metadata)
 		if err != nil {
 			level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
 			return result.Body, err

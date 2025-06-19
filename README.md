@@ -85,14 +85,18 @@ type originFetcher struct {
 	key string
 }
 
-func (f *originFetcher) Fetch(ctx context.Context, oldETag string) (*daramjwee.FetchResult, error) {
-	fmt.Printf("[Origin] Fetching key: %s\n", f.key)
+func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	oldETagVal := "none"
+	if oldMetadata != nil {
+		oldETagVal = oldMetadata.ETag
+	}
+	fmt.Printf("[Origin] Fetching key: %s (Old ETag: %s)\n", f.key, oldETagVal)
 	// In a real application, this would be a DB query or an API call.
 	const originData = "Hello, Daramjwee!"
 	const originETag = "v1"
 
 	// If the ETag matches, notify that the content has not been modified.
-	if oldETag == originETag {
+	if oldMetadata != nil && oldMetadata.ETag == originETag {
 		return nil, daramjwee.ErrNotModified
 	}
 

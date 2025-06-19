@@ -83,7 +83,7 @@ func TestMemStore_SetAndGetStream(t *testing.T) {
 	content := "hello world"
 
 	// 1. Set data
-	writer, err := store.SetWithWriter(ctx, key, etag)
+	writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
 	require.NoError(t, err)
@@ -126,7 +126,7 @@ func TestMemStore_Stat(t *testing.T) {
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 
 	// 2. Set data
-	writer, _ := store.SetWithWriter(ctx, key, etag)
+	writer, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	writer.Write([]byte("data"))
 	writer.Close()
 
@@ -149,7 +149,7 @@ func TestMemStore_Delete(t *testing.T) {
 	content := "some data"
 
 	// 1. Set data
-	writer, _ := store.SetWithWriter(ctx, key, "v1")
+	writer, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	writer.Write([]byte(content))
 	writer.Close()
 
@@ -179,14 +179,14 @@ func TestMemStore_Overwrite(t *testing.T) {
 	key := "overwrite-key"
 
 	// 1. Write initial version
-	writer1, _ := store.SetWithWriter(ctx, key, "v1")
+	writer1, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	writer1.Write([]byte("version 1"))
 	writer1.Close()
 	assert.Equal(t, int64(len("version 1")), store.currentSize)
 
 	// 2. Write new version
 	newContent := "this is version 2"
-	writer2, _ := store.SetWithWriter(ctx, key, "v2")
+	writer2, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v2"})
 	writer2.Write([]byte(newContent))
 	writer2.Close()
 
@@ -212,7 +212,7 @@ func TestMemStore_Eviction(t *testing.T) {
 	policy.setKeysToEvict("key1")
 
 	// 2. Add first item (10 bytes)
-	writer1, _ := store.SetWithWriter(ctx, "key1", "v1")
+	writer1, _ := store.SetWithWriter(ctx, "key1", &daramjwee.Metadata{ETag: "v1"})
 	writer1.Write([]byte("0123456789"))
 	writer1.Close()
 	assert.Equal(t, int64(10), store.currentSize)
@@ -220,7 +220,7 @@ func TestMemStore_Eviction(t *testing.T) {
 	require.NoError(t, err, "key1 should exist before eviction")
 
 	// 3. Add second item (15 bytes), which exceeds capacity (10 + 15 > 20)
-	writer2, _ := store.SetWithWriter(ctx, "key2", "v2")
+	writer2, _ := store.SetWithWriter(ctx, "key2", &daramjwee.Metadata{ETag: "v2"})
 	writer2.Write([]byte("0123456789ABCDE"))
 	err = writer2.Close() // Eviction happens here
 	require.NoError(t, err)
@@ -241,7 +241,7 @@ func TestMemStore_PolicyIntegration(t *testing.T) {
 	key1, key2 := "key1", "key2"
 
 	// 1. Add key1
-	writer1, _ := store.SetWithWriter(ctx, key1, "v1")
+	writer1, _ := store.SetWithWriter(ctx, key1, &daramjwee.Metadata{ETag: "v1"})
 	writer1.Write([]byte("data1"))
 	writer1.Close()
 	assert.Contains(t, policy.added, key1, "Add should be called for key1")
@@ -264,11 +264,11 @@ func TestMemStore_PolicyIntegration(t *testing.T) {
 
 	// 5. Eviction (via Add)
 	policy.setKeysToEvict(key2)
-	writer2, _ := store.SetWithWriter(ctx, key2, "v2")
+	writer2, _ := store.SetWithWriter(ctx, key2, &daramjwee.Metadata{ETag: "v2"})
 	writer2.Write([]byte("data2"))
 	writer2.Close() // Add key2
 
-	writer3, _ := store.SetWithWriter(ctx, "key3", "v3")
+	writer3, _ := store.SetWithWriter(ctx, "key3", &daramjwee.Metadata{ETag: "v3"})
 	writer3.Write([]byte("data3-long")) // Exceeds capacity
 	writer3.Close()
 
@@ -294,7 +294,7 @@ func TestMemStore_Concurrency(t *testing.T) {
 			content := "content"
 
 			// Perform a write
-			writer, err := store.SetWithWriter(ctx, key, "v1")
+			writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 			if assert.NoError(t, err) {
 				_, err = writer.Write([]byte(content))
 				if assert.NoError(t, err) {
@@ -326,7 +326,7 @@ func TestMemStore_Parallel(t *testing.T) {
 	// Pre-populate with some data
 	keys := []string{"keyA", "keyB", "keyC", "keyD"}
 	for _, key := range keys {
-		writer, _ := store.SetWithWriter(ctx, key, "v_init")
+		writer, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v_init"})
 		writer.Write([]byte("initial"))
 		writer.Close()
 	}
@@ -334,7 +334,7 @@ func TestMemStore_Parallel(t *testing.T) {
 	t.Run("group", func(t *testing.T) {
 		t.Run("Set-Get", func(t *testing.T) {
 			t.Parallel()
-			writer, _ := store.SetWithWriter(ctx, "keyA", "v_setget")
+			writer, _ := store.SetWithWriter(ctx, "keyA", &daramjwee.Metadata{ETag: "v_setget"})
 			writer.Write([]byte("from set-get"))
 			writer.Close()
 			r, m, err := store.GetStream(ctx, "keyA")
@@ -356,7 +356,7 @@ func TestMemStore_Parallel(t *testing.T) {
 		})
 		t.Run("Set-New", func(t *testing.T) {
 			t.Parallel()
-			writer, _ := store.SetWithWriter(ctx, "keyE", "v_new")
+			writer, _ := store.SetWithWriter(ctx, "keyE", &daramjwee.Metadata{ETag: "v_new"})
 			writer.Write([]byte("new key"))
 			writer.Close()
 		})
@@ -387,7 +387,7 @@ func TestMemStore_SetEmptyValue(t *testing.T) {
 	etag := "v_empty"
 
 	// Set empty data
-	writer, err := store.SetWithWriter(ctx, key, etag)
+	writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 	// Write nothing
 	err = writer.Close()
