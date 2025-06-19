@@ -36,11 +36,6 @@ func NewObjstoreAdapter(bucket objstore.Bucket, logger log.Logger) daramjwee.Sto
 // 컴파일 타임에 인터페이스 만족 확인
 var _ daramjwee.Store = (*objstoreAdapter)(nil)
 
-// metaFilePayload defines the structure for storing metadata in a .meta.json file.
-type metaFilePayload struct {
-	ETag string `json:"etag"`
-}
-
 func (a *objstoreAdapter) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	// First, get the metadata. This also serves as an existence check.
 	meta, err := a.Stat(ctx, key)
@@ -66,16 +61,16 @@ func (a *objstoreAdapter) GetStream(ctx context.Context, key string) (io.ReadClo
 // which is concurrently uploaded to the object store in a separate goroutine.
 // This is highly memory-efficient as the entire object does not need to be
 // buffered in memory before the upload begins.
-func (a *objstoreAdapter) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (a *objstoreAdapter) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 
 	writer := &streamingObjstoreWriter{
-		ctx:     ctx,
-		adapter: a,
-		key:     key,
-		etag:    etag,
-		pw:      pw,
-		wg:      &sync.WaitGroup{},
+		ctx:      ctx,
+		adapter:  a,
+		key:      key,
+		metadata: metadata,
+		pw:       pw,
+		wg:       &sync.WaitGroup{},
 	}
 
 	writer.wg.Add(1)
@@ -140,12 +135,12 @@ func (a *objstoreAdapter) Stat(ctx context.Context, key string) (*daramjwee.Meta
 		return nil, fmt.Errorf("failed to read metadata for key '%s': %w", key, err)
 	}
 
-	var payload metaFilePayload
-	if err := json.Unmarshal(metaBytes, &payload); err != nil {
+	var metadata daramjwee.Metadata
+	if err := json.Unmarshal(metaBytes, &metadata); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal metadata for key '%s': %w", key, err)
 	}
 
-	return &daramjwee.Metadata{ETag: payload.ETag}, nil
+	return &metadata, nil
 }
 
 // --- Helper methods and types ---
@@ -163,7 +158,7 @@ type streamingObjstoreWriter struct {
 	ctx       context.Context
 	adapter   *objstoreAdapter
 	key       string
-	etag      string
+	metadata  *daramjwee.Metadata
 	pw        *io.PipeWriter
 	wg        *sync.WaitGroup
 	uploadErr error
@@ -194,8 +189,7 @@ func (w *streamingObjstoreWriter) Close() error {
 
 	// 4. If data upload was successful, upload the metadata object.
 	metaPath := w.adapter.toMetaPath(w.key)
-	payload := metaFilePayload{ETag: w.etag}
-	metaBytes, err := json.Marshal(payload)
+	metaBytes, err := json.Marshal(w.metadata)
 	if err != nil {
 		level.Error(w.adapter.logger).Log("msg", "failed to marshal metadata", "key", metaPath, "err", err)
 		return fmt.Errorf("failed to marshal metadata for key '%s': %w", w.key, err)

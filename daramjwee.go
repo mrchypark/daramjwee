@@ -41,7 +41,7 @@ type Cache interface {
 	// response-to-client and writing-to-cache scenarios.
 	// NOTE: The caller is responsible for calling Close() on the returned
 	// io.WriteCloser to ensure the cache entry is committed and resources are released.
-	Set(ctx context.Context, key string, etag string) (io.WriteCloser, error)
+	Set(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error)
 
 	// Delete removes an object from the cache.
 	Delete(ctx context.Context, key string) error
@@ -69,7 +69,7 @@ type FetchResult struct {
 
 // Fetcher defines the contract for fetching an object from an origin.
 type Fetcher interface {
-	Fetch(ctx context.Context, oldETag string) (*FetchResult, error)
+	Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error)
 }
 
 // Store defines the interface for a single cache storage tier (e.g., memory, disk).
@@ -77,7 +77,7 @@ type Store interface {
 	// GetStream retrieves an object and its metadata as a stream.
 	GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error)
 	// SetWithWriter returns a writer that streams data into the store.
-	SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error)
+	SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error)
 	// Delete removes an object from the store.
 	Delete(ctx context.Context, key string) error
 	// Stat retrieves metadata for an object without its data.

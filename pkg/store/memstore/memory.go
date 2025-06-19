@@ -66,12 +66,12 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 
 // SetWithWriter returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
-func (ms *MemStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (ms *MemStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
 	return &memStoreWriter{
-		ms:   ms,
-		key:  key,
-		etag: etag,
-		buf:  &bytes.Buffer{},
+		ms:       ms,
+		key:      key,
+		metadata: metadata,
+		buf:      &bytes.Buffer{},
 	}, nil
 }
 
@@ -114,10 +114,10 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 
 // memStoreWriter는 io.WriteCloser 인터페이스를 만족하는 헬퍼 타입입니다.
 type memStoreWriter struct {
-	ms   *MemStore
-	key  string
-	etag string
-	buf  *bytes.Buffer
+	ms       *MemStore
+	key      string
+	metadata *daramjwee.Metadata
+	buf      *bytes.Buffer
 }
 
 // Write는 받은 데이터를 내부 버퍼에 씁니다.
@@ -140,7 +140,7 @@ func (w *memStoreWriter) Close() error {
 
 	newEntry := entry{
 		value: finalData,
-		etag:  w.etag,
+		etag:  w.metadata.ETag,
 	}
 
 	w.ms.data[w.key] = newEntry

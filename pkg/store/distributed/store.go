@@ -59,8 +59,8 @@ func (d *DistributedStore) GetStream(ctx context.Context, key string) (io.ReadCl
 	return nil, nil, nil
 }
 
-func (d *DistributedStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
-	return d.localStore.SetWithWriter(ctx, key, etag)
+func (d *DistributedStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
+	return d.localStore.SetWithWriter(ctx, key, metadata)
 }
 
 func (d *DistributedStore) Delete(ctx context.Context, key string) error {

@@ -32,8 +32,12 @@ type originFetcher struct {
 	key string
 }
 
-func (f *originFetcher) Fetch(ctx context.Context, oldETag string) (*daramjwee.FetchResult, error) {
-	fmt.Printf("[Origin] Fetching key: %s, (old ETag: '%s')\n", f.key, oldETag)
+func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	oldETagVal := "none"
+	if oldMetadata != nil {
+		oldETagVal = oldMetadata.ETag
+	}
+	fmt.Printf("[Origin] Fetching key: %s, (old ETag: '%s')\n", f.key, oldETagVal)
 	time.Sleep(500 * time.Millisecond) // 원본과의 통신 지연 시뮬레이션
 
 	obj, ok := fakeOrigin[f.key]
@@ -42,7 +46,7 @@ func (f *originFetcher) Fetch(ctx context.Context, oldETag string) (*daramjwee.F
 	}
 
 	// ETag가 동일하면, 데이터 변경이 없음을 알립니다.
-	if oldETag != "" && oldETag == obj.etag {
+	if oldMetadata != nil && oldMetadata.ETag == obj.etag {
 		return nil, daramjwee.ErrNotModified
 	}
 
