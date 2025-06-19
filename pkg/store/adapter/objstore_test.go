@@ -38,7 +38,7 @@ func TestObjstoreAdapter_SetAndGetStream(t *testing.T) {
 	content := "hello, daramjwee!"
 
 	// 1. SetWithWriter를 사용하여 스트리밍 업로더를 가져옵니다.
-	wc, err := testStore.SetWithWriter(ctx, key, etag)
+	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err, "SetWithWriter should not return an error")
 	require.NotNil(t, wc, "writer should not be nil")
 
@@ -78,7 +78,7 @@ func TestObjstoreAdapter_Stat(t *testing.T) {
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound, "Stat for a non-existent key should return ErrNotFound")
 
 	// Create an object to test Stat
-	wc, err := testStore.SetWithWriter(ctx, key, etag)
+	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 	_, err = wc.Write([]byte("some data"))
 	require.NoError(t, err)
@@ -99,7 +99,7 @@ func TestObjstoreAdapter_Delete(t *testing.T) {
 	etag := "etag-for-delete"
 
 	// Create an object to delete
-	wc, err := testStore.SetWithWriter(ctx, key, etag)
+	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 	_, err = wc.Write([]byte("data to be deleted"))
 	require.NoError(t, err)
@@ -141,7 +141,7 @@ func TestObjstoreAdapter_StreamingWriter_UploadError(t *testing.T) {
 		testStore.(*objstoreAdapter).bucket = originalBucket
 	}()
 
-	wc, err := testStore.SetWithWriter(ctx, key, etag)
+	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 
 	_, err = wc.Write([]byte("this will fail"))

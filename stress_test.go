@@ -50,7 +50,7 @@ func TestCache_WithSlowColdStore(t *testing.T) {
 
 	key := "slow-item"
 	content := "content from slow store"
-	slowCold.setData(key, content, "v-slow")
+	slowCold.setData(key, content, &Metadata{ETag: "v-slow"})
 
 	// Get 호출 (내부적으로 Cold Hit -> Promotion 발생)
 	stream, err := cache.Get(context.Background(), key, &mockFetcher{})

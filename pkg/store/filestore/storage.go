@@ -58,11 +58,6 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) { //
 // 컴파일 타임에 인터페이스 만족 확인
 var _ daramjwee.Store = (*FileStore)(nil)
 
-// metaFilePayload defines the structure for storing metadata in a .meta.json file.
-type metaFilePayload struct {
-	ETag string `json:"etag"`
-}
-
 func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
@@ -89,7 +84,7 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 // To ensure atomicity and prevent data corruption from partial writes,
 // data is first written to a temporary file. When the writer is closed,
 // the temporary file is atomically renamed to its final destination.
-func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 
@@ -132,14 +127,14 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, etag string)
 			}
 
 			// 2. 데이터가 완전히 쓰인 후 메타데이터 파일 쓰기
-			if err := fs.writeMetaFile(path, etag); err != nil {
+			if err := fs.writeMetaFile(path, metadata); err != nil {
 				// 데이터는 쓰였지만 메타데이터 쓰기에 실패한 경우
 				return fmt.Errorf("데이터 복사 후 메타데이터 쓰기 실패: %w", err)
 			}
 		} else {
 			// 기존의 원자적 rename 방식
 			// 1. 메타데이터 파일 먼저 쓰기
-			if err := fs.writeMetaFile(path, etag); err != nil {
+			if err := fs.writeMetaFile(path, metadata); err != nil {
 				if errRemove := os.Remove(tmpFile.Name()); errRemove != nil {
 					level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
 				}
@@ -211,17 +206,16 @@ func (fs *FileStore) readMetaFile(dataPath string) (*daramjwee.Metadata, error) 
 		}
 		return nil, err
 	}
-	var payload metaFilePayload
-	if err := json.Unmarshal(metaBytes, &payload); err != nil {
+	var metadata daramjwee.Metadata
+	if err := json.Unmarshal(metaBytes, &metadata); err != nil {
 		return nil, err
 	}
-	return &daramjwee.Metadata{ETag: payload.ETag}, nil
+	return &metadata, nil
 }
 
-func (fs *FileStore) writeMetaFile(dataPath string, etag string) error {
+func (fs *FileStore) writeMetaFile(dataPath string, metadata *daramjwee.Metadata) error {
 	metaPath := fs.toMetaPath(dataPath)
-	payload := metaFilePayload{ETag: etag}
-	metaBytes, err := json.Marshal(payload)
+	metaBytes, err := json.Marshal(metadata)
 	if err != nil {
 		return err
 	}

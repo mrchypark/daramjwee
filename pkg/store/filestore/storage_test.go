@@ -58,7 +58,7 @@ func TestFileStore_SetWithCopyAndTruncate_ErrorOnCopy(t *testing.T) {
 	//    임시 파일 삭제는 성공할 수 있습니다.
 	key := "non-existent-dir/copy-error-key"
 
-	writer, err := fs.SetWithWriter(ctx, key, "v1")
+	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	if err != nil {
 		t.Fatalf("SetWithWriter 초기화 실패: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestFileStore_SetAndGet(t *testing.T) {
 	content := "hello daramjwee"
 
 	// 1. 데이터 쓰기
-	writer, err := fs.SetWithWriter(ctx, key, etag)
+	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	if err != nil {
 		t.Fatalf("SetWithWriter 실패: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestFileStore_Stat(t *testing.T) {
 	etag := "etag-for-stat"
 
 	// 테스트 데이터 설정
-	writer, _ := fs.SetWithWriter(ctx, key, etag)
+	writer, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	if _, err := writer.Write([]byte("some data")); err != nil {
 		t.Fatalf("Error writing data for stat test: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestFileStore_Delete(t *testing.T) {
 	key := "delete-key"
 
 	// 테스트 데이터 설정
-	writer, _ := fs.SetWithWriter(ctx, key, "v1")
+	writer, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	if _, err := writer.Write([]byte("to be deleted")); err != nil {
 		t.Fatalf("Error writing data for delete test: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestFileStore_Overwrite(t *testing.T) {
 	key := "overwrite-key"
 
 	// Version 1 쓰기
-	writer1, _ := fs.SetWithWriter(ctx, key, "v1")
+	writer1, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	if _, err := writer1.Write([]byte("version 1")); err != nil {
 		t.Fatalf("Error writing data for overwrite test (initial): %v", err)
 	}
@@ -238,7 +238,7 @@ func TestFileStore_Overwrite(t *testing.T) {
 	}
 
 	// Version 2 쓰기 (덮어쓰기)
-	writer2, _ := fs.SetWithWriter(ctx, key, "v2")
+	writer2, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v2"})
 	if _, err := writer2.Write([]byte("version 2")); err != nil {
 		t.Fatalf("Error writing data for overwrite test (new): %v", err)
 	}
@@ -273,7 +273,7 @@ func TestFileStore_PathTraversal(t *testing.T) {
 
 	// "../"를 포함하는 악의적인 키
 	maliciousKey := "../malicious-file"
-	writer, err := fs.SetWithWriter(ctx, maliciousKey, "v1")
+	writer, err := fs.SetWithWriter(ctx, maliciousKey, &daramjwee.Metadata{ETag: "v1"})
 	if err != nil {
 		t.Fatalf("SetWithWriter 실패: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestFileStore_Set_ErrorOnWriteMeta(t *testing.T) {
 	err := os.Mkdir(metaPath, 0755)
 	require.NoError(t, err)
 
-	writer, err := fs.SetWithWriter(ctx, key, "v1")
+	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
 
 	_, err = writer.Write([]byte("this should be cleaned up"))
@@ -343,7 +343,7 @@ func TestFileStore_SetWithRename_ErrorOnRename(t *testing.T) {
 	err := os.Mkdir(dataPath, 0755)
 	require.NoError(t, err)
 
-	writer, err := fs.SetWithWriter(ctx, key, "v1")
+	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("some data"))
 	require.NoError(t, err)

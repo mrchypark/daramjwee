@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/mrchypark/daramjwee" // Added import
 	"github.com/mrchypark/daramjwee/pkg/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,7 +41,7 @@ func TestMemStore_EvictionStress(t *testing.T) {
 		key := fmt.Sprintf("stress-key-%d", i)
 		size := 1024 + rand.Intn(9*1024) // 1KB ~ 10KB
 
-		writer, err := store.SetWithWriter(ctx, key, "v1")
+		writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 		require.NoError(t, err)
 
 		_, err = writer.Write(dataChunk[:size])

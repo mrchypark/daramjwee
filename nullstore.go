@@ -24,7 +24,7 @@ func (ns *nullStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 }
 
 // SetWithWriter는 모든 데이터를 버리는 io.WriteCloser를 반환합니다.
-func (ns *nullStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (ns *nullStore) SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
 	return &nullWriteCloser{}, nil
 }
 

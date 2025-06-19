@@ -21,16 +21,16 @@ type mockFetcher struct {
 	mu          sync.Mutex
 	fetchCount  int
 	content     string
-	etag        string
-	err         error
-	fetchDelay  time.Duration
-	lastOldETag string
+	etag            string
+	err             error
+	fetchDelay      time.Duration
+	lastOldMetadata *Metadata
 }
 
-func (f *mockFetcher) Fetch(ctx context.Context, oldETag string) (*FetchResult, error) {
+func (f *mockFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error) {
 	f.mu.Lock()
 	f.fetchCount++
-	f.lastOldETag = oldETag
+	f.lastOldMetadata = oldMetadata
 	f.mu.Unlock()
 
 	// Honor context cancellation
@@ -45,7 +45,7 @@ func (f *mockFetcher) Fetch(ctx context.Context, oldETag string) (*FetchResult, 
 		return nil, f.err
 	}
 
-	if oldETag == f.etag {
+	if oldMetadata != nil && oldMetadata.ETag == f.etag {
 		return nil, ErrNotModified
 	}
 
@@ -108,7 +108,7 @@ func (s *mockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 	return io.NopCloser(bytes.NewReader(data)), meta, nil
 }
 
-func (s *mockStore) SetWithWriter(ctx context.Context, key string, etag string) (io.WriteCloser, error) {
+func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
 	s.mu.Lock()
 	s.setCallCount++
 	s.mu.Unlock()
@@ -121,7 +121,7 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, etag string) 
 		onClose: func() error {
 			s.mu.Lock()
 			s.data[key] = buf.Bytes()
-			s.meta[key] = &Metadata{ETag: etag}
+			s.meta[key] = metadata
 			s.mu.Unlock() // Unlock 후 채널에 신호 전송
 
 			// 쓰기 작업이 완료되었음을 알림
@@ -153,18 +153,18 @@ func (s *mockStore) Stat(ctx context.Context, key string) (*Metadata, error) {
 	return meta, nil
 }
 
-func (s *mockStore) setData(key, content, etag string) {
+func (s *mockStore) setData(key, content string, metadata *Metadata) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data[key] = []byte(content)
-	s.meta[key] = &Metadata{ETag: etag}
+	s.meta[key] = metadata
 }
 
 // setMetaOnly는 "메타데이터만 있는" 상태를 설정하는 헬퍼 함수입니다.
-func (s *mockStore) setMetaOnly(key, etag string) {
+func (s *mockStore) setMetaOnly(key string, metadata *Metadata) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.meta[key] = &Metadata{ETag: etag}
+	s.meta[key] = metadata
 	s.metaOnlyKeys[key] = true
 }
 
@@ -182,12 +182,12 @@ type deterministicFetcher struct {
 	mu           sync.Mutex
 	fetchCount   int
 	content      string
-	etag         string
-	err          error
-	fetchDelay   time.Duration
-	lastOldETag  string
-	fetchStarted chan struct{} // Fetch 시작을 알리는 채널
-	fetchEnd     chan struct{} // Fetch 완료를 알리는 채널
+	etag            string
+	err             error
+	fetchDelay      time.Duration
+	lastOldMetadata *Metadata
+	fetchStarted    chan struct{} // Fetch 시작을 알리는 채널
+	fetchEnd        chan struct{} // Fetch 완료를 알리는 채널
 
 	onFetch func()
 }
@@ -202,10 +202,10 @@ func newDeterministicFetcher(content, etag string) *deterministicFetcher {
 }
 
 // Fetch는 daramjwee.Fetcher 인터페이스를 구현합니다.
-func (f *deterministicFetcher) Fetch(ctx context.Context, oldETag string) (*FetchResult, error) {
+func (f *deterministicFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error) {
 	f.mu.Lock()
 	f.fetchCount++
-	f.lastOldETag = oldETag
+	f.lastOldMetadata = oldMetadata
 	f.mu.Unlock()
 
 	// 외부에서 주입한 콜백을 실행하여, 테스트 중인 코드의 실행 흐름에 개입합니다.
@@ -231,7 +231,7 @@ func (f *deterministicFetcher) Fetch(ctx context.Context, oldETag string) (*Fetc
 		return nil, f.err
 	}
 
-	if oldETag == f.etag {
+	if oldMetadata != nil && oldMetadata.ETag == f.etag {
 		return nil, ErrNotModified
 	}
 
@@ -278,7 +278,7 @@ func TestCache_Get_ColdHit(t *testing.T) {
 
 	key := "my-key"
 	content := "cold content"
-	cold.setData(key, content, "v1-cold")
+	cold.setData(key, content, &Metadata{ETag: "v1-cold"})
 
 	fetcher := &mockFetcher{}
 
@@ -352,7 +352,7 @@ func TestCache_Get_NotModified(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, 1, fetcher.getFetchCount())
-	assert.Equal(t, etag, fetcher.lastOldETag)
+	assert.Equal(t, etag, fetcher.lastOldMetadata.ETag)
 }
 
 // TestCache_Get_StoreError tests how the cache handles errors from the underlying store.
@@ -427,7 +427,7 @@ func TestCache_Set_Directly(t *testing.T) {
 	content := "direct set content"
 	etag := "v-set"
 
-	writer, err := cache.Set(ctx, key, etag)
+	writer, err := cache.Set(ctx, key, &Metadata{ETag: etag})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
 	require.NoError(t, err)
@@ -447,8 +447,7 @@ func TestCache_BackgroundRefresh_SetError(t *testing.T) {
 	key := "bg-refresh-fail"
 
 	// 1. Prime the cache
-	hot.data[key] = []byte("initial")
-	hot.meta[key] = &Metadata{ETag: "v1"}
+	hot.setData(key, "initial", &Metadata{ETag: "v1"})
 
 	// 2. Configure the hot store to fail on the *next* Set call.
 	hot.setErr = fmt.Errorf("failed to write to hot store")
@@ -480,8 +479,7 @@ func TestCache_Close(t *testing.T) {
 	cache, hot, _ := setupCache(t)
 	key := "key-after-close"
 
-	hot.data[key] = []byte("data")
-	hot.meta[key] = &Metadata{ETag: "v1"}
+	hot.setData(key, "data", &Metadata{ETag: "v1"})
 
 	// Close the cache
 	cache.Close()
@@ -507,7 +505,7 @@ func TestCache_Get_HotHit_Deterministic(t *testing.T) {
 	cache, hot, _ := setupCache(t)
 	key := "my-key"
 
-	hot.setData(key, "hot content", "v1")
+	hot.setData(key, "hot content", &Metadata{ETag: "v1"})
 	fetcher := newDeterministicFetcher("new content", "v2")
 
 	stream, err := cache.Get(ctx, key, fetcher)
@@ -603,10 +601,10 @@ func TestCache_Get_ColdHit_WithEviction(t *testing.T) {
 	keyToEvict := "hot-item-to-be-evicted"
 
 	// 1. Hot 캐시를 가득 채운 상태로 만듭니다. (시뮬레이션)
-	hot.setData(keyToEvict, "i should be evicted", "v1")
+	hot.setData(keyToEvict, "i should be evicted", &Metadata{ETag: "v1"})
 
 	// 2. Cold 캐시에 승격 대상 아이템을 넣습니다.
-	cold.setData(keyToPromote, "i am from cold", "v-cold")
+	cold.setData(keyToPromote, "i am from cold", &Metadata{ETag: "v-cold"})
 
 	// 3. Get 호출로 승격을 유발합니다.
 	stream, err := cache.Get(ctx, keyToPromote, &mockFetcher{})
@@ -633,7 +631,7 @@ func TestCache_Get_NotModified_ButEvictedRace_Deterministic(t *testing.T) {
 	key := "deterministic-race-key"
 
 	// 1. 핫 캐시에 아이템을 미리 저장합니다.
-	hot.setMetaOnly(key, "v1")
+	hot.setMetaOnly(key, &Metadata{ETag: "v1"})
 
 	// 2. Fetcher가 ErrNotModified를 반환하도록 설정합니다.
 	fetcher := newDeterministicFetcher("", "v1")
@@ -675,7 +673,7 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	key := "get-delete-key"
 	content := "some content"
 
-	hot.setData(key, content, "v1")
+	hot.setData(key, content, &Metadata{ETag: "v1"})
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -683,7 +681,9 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	// Goroutine 1: Get an object (and hold the stream)
 	go func() {
 		defer wg.Done()
-		stream, err := cache.Get(ctx, key, &mockFetcher{})
+		// Use a fetcher that won't cause a write on refresh, to isolate the Delete behavior
+		fetcherForGet := &mockFetcher{err: ErrNotModified, etag: "v1"}
+		stream, err := cache.Get(ctx, key, fetcherForGet)
 		// Get은 성공할 수도, 실패할 수도 있습니다. 중요한 것은 패닉이 없는 것입니다.
 		if err == nil {
 			// 스트림을 잠시 유지하여 락이 걸리는 시간을 시뮬레이션
@@ -703,6 +703,8 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	wg.Wait()
 
 	// 최종 상태: 아이템은 삭제되어야 합니다.
-	_, err := cache.Get(ctx, key, &mockFetcher{})
+	// Use a fetcher that will also return ErrNotFound for the final Get
+	finalFetcher := &mockFetcher{err: ErrNotFound}
+	_, err := cache.Get(ctx, key, finalFetcher)
 	assert.ErrorIs(t, err, ErrNotFound, "모든 작업 후 아이템은 삭제된 상태여야 합니다.")
 }
