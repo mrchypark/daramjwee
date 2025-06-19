@@ -138,9 +138,13 @@ func (w *memStoreWriter) Close() error {
 		w.ms.currentSize -= int64(len(oldEntry.value))
 	}
 
+	var etagVal string
+	if w.metadata != nil {
+		etagVal = w.metadata.ETag
+	}
 	newEntry := entry{
 		value: finalData,
-		etag:  w.metadata.ETag,
+		etag:  etagVal,
 	}
 
 	w.ms.data[w.key] = newEntry
