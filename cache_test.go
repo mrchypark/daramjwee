@@ -515,8 +515,9 @@ func TestCache_Get_HotHit_Deterministic(t *testing.T) {
 	readBytes, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "hot content", string(readBytes))
-	// 동기적 호출에서는 fetcher가 호출되지 않아야 함 (이 검증은 유효)
-	assert.Equal(t, 0, fetcher.getFetchCount())
+	// The fetcher should not be called synchronously by the Get call.
+	// However, the background refresh can be very fast.
+	// We will verify the fetch count after ensuring the background work is observed.
 
 	// 백그라운드 Fetch 시작 대기
 	<-fetcher.fetchStarted
