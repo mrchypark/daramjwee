@@ -67,11 +67,12 @@ func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher F
 // handleColdHit는 Cold 캐시에서 객체를 찾았을 때의 로직을 처리합니다.
 func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, fetcher Fetcher, coldStream io.ReadCloser, coldMeta *Metadata) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
-	cc, _ := context.WithTimeout(context.Background(), c.DefaultTimeout)
+	// cc, _ := context.WithTimeout(context.Background(), c.DefaultTimeout) // This line can also be removed if cc is no longer used
 
-	if err := c.ScheduleRefresh(cc, key, fetcher); err != nil {
-		level.Warn(c.Logger).Log("msg", "failed to schedule refresh on cold hit", "key", key, "err", err)
-	}
+	// // ScheduleRefresh call removed/commented
+	// if err := c.ScheduleRefresh(cc, key, fetcher); err != nil {
+	// 	level.Warn(c.Logger).Log("msg", "failed to schedule refresh on cold hit", "key", key, "err", err)
+	// }
 
 	// Cold 캐시의 데이터를 클라이언트로 스트리밍하면서 동시에 Hot 캐시로 승격시킵니다.
 	return c.promoteAndTeeStream(ctx, key, coldMeta, coldStream)
