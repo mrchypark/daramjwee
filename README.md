@@ -12,51 +12,70 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
 2.  **Modular and Pluggable Architecture:** Key components such as the storage backend (`Store`), eviction strategy (`EvictionPolicy`), and asynchronous task runner (`Worker`) are all designed as interfaces. This allows users to easily swap in their own implementations to fit specific needs.
 
-## Key Features
+## Current Status & Key Implementations
 
-* 🐿️ **Hybrid Cache Tiers:** Combines a fast local store (Hot Tier) with a large-capacity remote store (Cold Tier) to optimize for both performance and cost. The Cold Tier is optional; if not configured, a `nullStore` is used to reduce code complexity.
+`daramjwee` is more than a proof-of-concept; it is a stable and mature library ready for production use. Its robustness is verified by a comprehensive test suite, including unit, integration, and stress tests.
 
-* 🔥 **Flexible Storage Backends:** Comes with built-in support for in-memory (`MemStore`) and filesystem (`FileStore`) backends.
+  * **Robust Storage Backends (`Store`):**
 
-* ☁️ **Cloud-Native:** An adapter for `thanos-io/objstore` provides out-of-the-box support for major cloud object stores like AWS S3, Google Cloud Storage, and Azure Blob Storage to be used as a Cold Tier.
+      * **`FileStore`**: Guarantees atomic writes using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyAndTruncate`) for compatibility with network filesystems like NFS.
+      * **`MemStore`**: A thread-safe, high-throughput in-memory store with fully integrated capacity-based eviction logic.
+      * **`objstore` Adapter**: A built-in adapter for `thanos-io/objstore` allows immediate use of major cloud object stores like AWS S3, Google Cloud Storage, and Azure Blob Storage as a Cold Tier. It supports true, memory-efficient streaming uploads using `io.Pipe`.
 
-* 🔄 **Background Refresh & Promotion:** On a cache hit, it serves the user request immediately while asynchronously refreshing the cache in the background via a worker (`ScheduleRefresh`). Data hit in the Cold Tier is automatically promoted to the Hot Tier.
+  * **Advanced Eviction Policies (`EvictionPolicy`):**
 
-* ⚙️ **ETag-based Efficiency:** Exchanges ETags with the origin server to check for content changes. If the content is not modified (`ErrNotModified`), it avoids unnecessary data transfer, saving network bandwidth.
+      * In addition to the traditional **LRU**, it implements modern, high-performance algorithms like **S3-FIFO** and **SIEVE**, allowing you to choose the optimal policy for your workload.
 
-* 🧩 **Pluggable Eviction Policies:** Includes LRU (Least Recently Used) and S3-FIFO policies by default. Users can apply custom strategies by implementing the `EvictionPolicy` interface.
+  * **Reliable Concurrency Management:**
 
-## Architectural Highlights
+      * **Worker Pool (`Worker`):** A configurable worker pool manages background tasks like cache refreshes, preventing unbounded goroutine creation and ensuring stable resource usage under load.
+      * **Striped Locking (`FileLockManager`):** `FileStore` uses striped locking instead of a single global lock, minimizing lock contention for different keys during concurrent requests.
 
-`daramjwee` is engineered with several core principles to ensure high performance and robustness in demanding environments.
+  * **Efficient Caching Logic:**
 
-* **True Streaming-First API**: At the heart of `daramjwee` is a strict adherence to stream-based I/O (`io.Reader` and `io.Writer`). This design ensures that objects of any size can be proxied without being fully buffered in memory, leading to minimal memory footprint and low latency. Operations like promoting an object from a cold tier to a hot tier happen concurrently while streaming the data to the client, thanks to `io.TeeReader`.
+      * **ETag-based Optimization:** Avoids unnecessary data transfer by exchanging ETags with the origin server. If content is not modified (`ErrNotModified`), the fetch is skipped, saving network bandwidth.
+      * **Negative Caching:** Caches the "not found" state for non-existent keys, preventing repeated, wasteful requests to the origin.
+      * **Grace Period (Stale-While-Revalidate):** Can serve stale data for a configured grace period while asynchronously refreshing it in the background, minimizing latency while maintaining data freshness.
 
-* **Robust and Modular Storage**: The `Store` interface provides a clean abstraction for storage backends.
-    * The built-in `FileStore` is designed for safety, using an atomic "write-to-temp-then-rename" pattern to prevent data corruption from partial writes. It also offers a copy-based alternative for compatibility with network filesystems like NFS.
-    * The `objstore` adapter for `thanos-io/objstore` leverages `io.Pipe` to achieve true streaming uploads to cloud providers, which is highly memory-efficient.
+## Data Retrieval Flow
 
-* **High-Concurrency Ready**: Performance under concurrent load is a primary focus.
-    * `FileStore` uses striped locking instead of a single global lock to minimize lock contention for different keys.
-    * Background tasks (like cache refreshes) are managed by a configurable worker pool, preventing unbounded goroutine creation and ensuring stable resource usage.
+The data retrieval process in `daramjwee` follows a clear, tiered approach to maximize performance and efficiency.
 
-## Roadmap
+```mermaid
+flowchart TD
+    A[Client Request for a Key] --> B{Check Hot Tier};
 
-* **Cache Stampede Prevention**: Implement a `singleflight` mechanism for origin fetches. This will prevent multiple concurrent requests for the same missing key from overwhelming the origin data source (the "thundering herd" problem).
-* **More Eviction Policies**: Explore and add other modern eviction policies.
-* **Metrics**: Expose Prometheus metrics for cache hits, misses, latency, and stored object counts to improve observability.
+    B -- Hit --> C[Stream data to Client];
+    C --> D(Schedule Background Refresh);
+    D --> E[End];
 
-## How It Works
+    B -- Miss --> F{Check Cold Tier};
 
-The data retrieval flow in `daramjwee` is as follows:
+    F -- Hit --> G[Stream data to Client & Promote to Hot Tier];
+    G --> E;
+
+    F -- Miss --> H[Fetch from Origin];
+    H -- Success --> I[Stream data to Client & Write to Hot Tier];
+    I --> J(Optionally: Schedule write to Cold Tier);
+    J --> E;
+    
+    H -- Not Found --> K[Cache Negative Entry];
+    K --> L[Return 'Not Found' to Client];
+    L --> E;
+    
+    H -- Not Modified (304) --> M{Re-fetch from Hot Tier};
+    M -- Success --> C;
+    M -- Failure (e.g., evicted) --> L;
+
+```
 
 1.  **Check Hot Tier:** Looks for the object in the Hot Tier.
-    * **Hit:** Immediately returns the object stream and schedules a background task to refresh the cache.
+      * **Hit:** Immediately returns the object stream to the client and schedules a background task to refresh the cache with the latest data from the origin.
 2.  **Check Cold Tier:** If not in the Hot Tier, it checks the Cold Tier.
-    * **Hit:** Streams the object to the client while simultaneously promoting it to the Hot Tier.
+      * **Hit:** Streams the object to the client while simultaneously promoting it to the Hot Tier for faster access next time.
 3.  **Fetch from Origin:** If the object is in neither tier (Cache Miss), it invokes the user-provided `Fetcher` to retrieve the data from the origin.
-    * The fetched data stream is sent to the client and written to the Hot Tier at the same time.
-    * A background job can be scheduled to also write the data to the Cold Tier.
+      * The fetched data stream is sent to the client and written to the Hot Tier at the same time.
+      * A background job can be scheduled to also write the data to the Cold Tier.
 
 ## Getting Started
 
@@ -72,11 +91,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/mrchypark/daramjwee"
+	"github.comcom/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 )
 
@@ -85,24 +105,36 @@ type originFetcher struct {
 	key string
 }
 
+// A simple in-memory origin for demonstration.
+var fakeOrigin = map[string]struct {
+	data string
+	etag string
+}{
+	"hello": {"Hello, Daramjwee! This is the first object.", "v1"},
+	"world": {"World is beautiful. This is the second object.", "v2"},
+}
+
 func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	oldETagVal := "none"
 	if oldMetadata != nil {
 		oldETagVal = oldMetadata.ETag
 	}
 	fmt.Printf("[Origin] Fetching key: %s (Old ETag: %s)\n", f.key, oldETagVal)
+
 	// In a real application, this would be a DB query or an API call.
-	const originData = "Hello, Daramjwee!"
-	const originETag = "v1"
+	obj, ok := fakeOrigin[f.key]
+	if !ok {
+		return nil, daramjwee.ErrNotFound
+	}
 
 	// If the ETag matches, notify that the content has not been modified.
-	if oldMetadata != nil && oldMetadata.ETag == originETag {
+	if oldMetadata != nil && oldMetadata.ETag == obj.etag {
 		return nil, daramjwee.ErrNotModified
 	}
 
 	return &daramjwee.FetchResult{
-		Body:     io.NopCloser(bytes.NewReader([]byte(originData))),
-		Metadata: &daramjwee.Metadata{ETag: originETag},
+		Body:     io.NopCloser(bytes.NewReader([]byte(obj.data))),
+		Metadata: &daramjwee.Metadata{ETag: obj.etag},
 	}, nil
 }
 
@@ -132,7 +164,7 @@ func main() {
 
 	// 4. Use the cache in your HTTP handlers.
 	http.HandleFunc("/objects/", func(w http.ResponseWriter, r *http.Request) {
-		key := r.URL.Path[len("/objects/"):]
+		key := strings.TrimPrefix(r.URL.Path, "/objects/")
 
 		// Call cache.Get() to retrieve the data stream.
 		stream, err := cache.Get(r.Context(), key, &originFetcher{key: key})
