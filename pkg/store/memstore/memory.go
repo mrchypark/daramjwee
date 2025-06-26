@@ -11,10 +11,10 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
-// entry holds the value and etag for a single cache item.
+// entry holds the value and metadata for a single cache item.
 type entry struct {
-	value []byte
-	etag  string
+	value    []byte
+	metadata *daramjwee.Metadata
 }
 
 // MemStore is a thread-safe, in-memory implementation of the daramjwee.Store interface.
@@ -59,9 +59,8 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 
 	reader := bytes.NewReader(e.value)
 	readCloser := io.NopCloser(reader)
-	meta := &daramjwee.Metadata{ETag: e.etag}
 
-	return readCloser, meta, nil
+	return readCloser, e.metadata, nil
 }
 
 // SetWithWriter returns a writer that streams data into an in-memory buffer.
@@ -106,8 +105,7 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 	// Access via Stat should also be considered a "touch".
 	ms.policy.Touch(key)
 
-	meta := &daramjwee.Metadata{ETag: e.etag}
-	return meta, nil
+	return e.metadata, nil
 }
 
 // --- SetWithWriter를 위한 헬퍼 구조체 ---
@@ -138,13 +136,9 @@ func (w *memStoreWriter) Close() error {
 		w.ms.currentSize -= int64(len(oldEntry.value))
 	}
 
-	var etagVal string
-	if w.metadata != nil {
-		etagVal = w.metadata.ETag
-	}
 	newEntry := entry{
-		value: finalData,
-		etag:  etagVal,
+		value:    finalData,
+		metadata: w.metadata,
 	}
 
 	w.ms.data[w.key] = newEntry

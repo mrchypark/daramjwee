@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
@@ -165,4 +166,71 @@ func (b *errorBucket) Upload(ctx context.Context, name string, r io.Reader, opts
 	// Consume the reader to allow the pipe to close, but return an error.
 	_, _ = io.ReadAll(r)
 	return errSimulatedUpload // 미리 정의한 커스텀 에러를 반환합니다.
+}
+
+// TestObjstoreAdapter_NegativeCache_NoBody tests that setting an item with IsNegative=true
+// and no body results in a zero-byte object.
+func TestObjstoreAdapter_NegativeCache_NoBody(t *testing.T) {
+	ctx := context.Background()
+	key := "negative-cache-key"
+
+	// 1. Set an item with IsNegative=true and an empty body.
+	meta := &daramjwee.Metadata{ETag: "v-neg", IsNegative: true}
+	wc, err := testStore.SetWithWriter(ctx, key, meta)
+	require.NoError(t, err)
+	// Write *no* data.
+	err = wc.Close()
+	require.NoError(t, err)
+
+	// 2. Verify via GetStream.
+	rc, retrievedMeta, err := testStore.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer rc.Close()
+
+	// Check metadata
+	assert.True(t, retrievedMeta.IsNegative)
+	assert.Equal(t, "v-neg", retrievedMeta.ETag)
+
+	// Check body
+	readBytes, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Len(t, readBytes, 0, "Retrieved body should be empty")
+}
+
+// TestObjstoreAdapter_MetadataFields ensures all metadata fields are stored and retrieved correctly.
+func TestObjstoreAdapter_MetadataFields(t *testing.T) {
+	ctx := context.Background()
+	key := "metadata-test-key"
+	now := time.Now().Truncate(time.Millisecond) // Truncate for reliable comparison
+
+	// 1. Set data with complex metadata
+	originalMeta := &daramjwee.Metadata{
+		ETag:       "v-complex",
+		GraceUntil: now,
+		IsNegative: true,
+	}
+	wc, err := testStore.SetWithWriter(ctx, key, originalMeta)
+	require.NoError(t, err)
+	_, err = wc.Write([]byte("data"))
+	require.NoError(t, err)
+	err = wc.Close()
+	require.NoError(t, err)
+
+	// 2. Get data and verify metadata
+	_, retrievedMeta, err := testStore.GetStream(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, retrievedMeta)
+
+	assert.Equal(t, originalMeta.ETag, retrievedMeta.ETag)
+	assert.True(t, originalMeta.GraceUntil.Equal(retrievedMeta.GraceUntil), "GraceUntil should be equal")
+	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
+
+	// 3. Stat data and verify metadata
+	retrievedMetaFromStat, err := testStore.Stat(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, retrievedMetaFromStat)
+
+	assert.Equal(t, originalMeta.ETag, retrievedMetaFromStat.ETag)
+	assert.True(t, originalMeta.GraceUntil.Equal(retrievedMetaFromStat.GraceUntil), "GraceUntil from Stat should be equal")
+	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }

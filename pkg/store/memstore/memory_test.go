@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/assert"
@@ -380,6 +381,43 @@ func TestMemStore_Parallel(t *testing.T) {
 }
 
 // TestMemStore_SetEmptyValue tests setting an empty value.
+// TestMemStore_NegativeCache_NoBody tests that setting an item with IsNegative=true
+// and writing no data results in a zero-byte entry.
+func TestMemStore_NegativeCache_NoBody(t *testing.T) {
+	ctx := context.Background()
+	store := New(100, nil)
+	key := "negative-cache-key"
+
+	// 1. Set an item with IsNegative=true and an empty body.
+	meta := &daramjwee.Metadata{ETag: "v-neg", IsNegative: true}
+	writer, err := store.SetWithWriter(ctx, key, meta)
+	require.NoError(t, err)
+	// Write *no* data to the writer.
+	err = writer.Close()
+	require.NoError(t, err)
+
+	// 2. Verify internal state.
+	store.mu.RLock()
+	entry, ok := store.data[key]
+	require.True(t, ok, "Entry should exist in the map")
+	assert.Len(t, entry.value, 0, "Internal value should be a zero-length byte slice")
+	store.mu.RUnlock()
+
+	// 3. Verify via GetStream.
+	reader, retrievedMeta, err := store.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// Check metadata
+	assert.True(t, retrievedMeta.IsNegative)
+	assert.Equal(t, "v-neg", retrievedMeta.ETag)
+
+	// Check body
+	readBytes, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Len(t, readBytes, 0, "Retrieved body should be empty for a negative cache entry")
+}
+
 func TestMemStore_SetEmptyValue(t *testing.T) {
 	ctx := context.Background()
 	store := New(100, nil)
@@ -403,4 +441,41 @@ func TestMemStore_SetEmptyValue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", string(readBytes))
 	assert.Equal(t, etag, meta.ETag)
+}
+
+// TestMemStore_MetadataFields ensures all metadata fields are stored and retrieved correctly.
+func TestMemStore_MetadataFields(t *testing.T) {
+	ctx := context.Background()
+	store := New(0, nil)
+	key := "metadata-test-key"
+	now := time.Now().Truncate(time.Millisecond) // Truncate for reliable comparison
+
+	// 1. Set data with complex metadata
+	originalMeta := &daramjwee.Metadata{
+		ETag:       "v-complex",
+		GraceUntil: now,
+		IsNegative: true,
+	}
+	writer, err := store.SetWithWriter(ctx, key, originalMeta)
+	require.NoError(t, err)
+	err = writer.Close()
+	require.NoError(t, err)
+
+	// 2. Get data and verify metadata
+	_, retrievedMeta, err := store.GetStream(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, retrievedMeta)
+
+	assert.Equal(t, originalMeta.ETag, retrievedMeta.ETag)
+	assert.True(t, originalMeta.GraceUntil.Equal(retrievedMeta.GraceUntil), "GraceUntil should be equal")
+	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
+
+	// 3. Stat data and verify metadata
+	retrievedMetaFromStat, err := store.Stat(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, retrievedMetaFromStat)
+
+	assert.Equal(t, originalMeta.ETag, retrievedMetaFromStat.ETag)
+	assert.True(t, originalMeta.GraceUntil.Equal(retrievedMetaFromStat.GraceUntil), "GraceUntil from Stat should be equal")
+	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
@@ -357,4 +358,79 @@ func TestFileStore_SetWithRename_ErrorOnRename(t *testing.T) {
 	metaPath := fs.toMetaPath(dataPath)
 	_, err = os.Stat(metaPath)
 	assert.True(t, os.IsNotExist(err), "Meta file should be removed during rollback after rename failure")
+}
+
+// TestFileStore_NegativeCache_NoBody tests that setting an item with IsNegative=true
+// and no body results in a zero-byte data file.
+func TestFileStore_NegativeCache_NoBody(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "negative-cache-key"
+
+	// 1. Set an item with IsNegative=true and an empty body.
+	meta := &daramjwee.Metadata{ETag: "v-neg", IsNegative: true}
+	writer, err := fs.SetWithWriter(ctx, key, meta)
+	require.NoError(t, err)
+	// Write *no* data.
+	err = writer.Close()
+	require.NoError(t, err)
+
+	// 2. Verify the file system state.
+	dataPath := fs.toDataPath(key)
+	stat, err := os.Stat(dataPath)
+	require.NoError(t, err, "Data file should exist")
+	assert.Equal(t, int64(0), stat.Size(), "Data file should be empty (0 bytes)")
+
+	// 3. Verify via GetStream.
+	reader, retrievedMeta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// Check metadata
+	assert.True(t, retrievedMeta.IsNegative)
+	assert.Equal(t, "v-neg", retrievedMeta.ETag)
+
+	// Check body
+	readBytes, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Len(t, readBytes, 0, "Retrieved body should be empty")
+}
+
+// TestFileStore_MetadataFields ensures all metadata fields are stored and retrieved correctly.
+func TestFileStore_MetadataFields(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "metadata-test-key"
+	now := time.Now().Truncate(time.Millisecond) // Truncate for reliable comparison
+
+	// 1. Set data with complex metadata
+	originalMeta := &daramjwee.Metadata{
+		ETag:       "v-complex",
+		GraceUntil: now,
+		IsNegative: true,
+	}
+	writer, err := fs.SetWithWriter(ctx, key, originalMeta)
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("data"))
+	require.NoError(t, err)
+	err = writer.Close()
+	require.NoError(t, err)
+
+	// 2. Get data and verify metadata
+	_, retrievedMeta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, retrievedMeta)
+
+	assert.Equal(t, originalMeta.ETag, retrievedMeta.ETag)
+	assert.True(t, originalMeta.GraceUntil.Equal(retrievedMeta.GraceUntil), "GraceUntil should be equal")
+	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
+
+	// 3. Stat data and verify metadata
+	retrievedMetaFromStat, err := fs.Stat(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, retrievedMetaFromStat)
+
+	assert.Equal(t, originalMeta.ETag, retrievedMetaFromStat.ETag)
+	assert.True(t, originalMeta.GraceUntil.Equal(retrievedMetaFromStat.GraceUntil), "GraceUntil from Stat should be equal")
+	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
