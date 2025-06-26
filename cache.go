@@ -103,10 +103,10 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 		return nil, err // 그 외의 Fetch 에러
 	}
 
-	// --- 제안: Fetcher가 (nil, nil)을 반환했을 때의 동작 수정 ---
+	// --- 여기가 핵심 수정 부분입니다 ---
 	if result == nil {
 		// 1. 네거티브 캐싱이 비활성화(TTL <= 0)되어 있는지 확인합니다.
-		if c.NegativeGracePeriod <= 0 {
+		if c.NegativeGracePeriod < 0 { // 0도 유효한 값이므로 < 0 으로 변경
 			level.Debug(c.Logger).Log("msg", "origin returned (nil, nil), but negative caching is disabled", "key", key)
 			return nil, ErrNotFound
 		}
@@ -114,17 +114,22 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 		// 2. 네거티브 캐싱이 활성화된 경우에만 캐싱을 진행합니다.
 		level.Debug(c.Logger).Log("msg", "origin returned (nil, nil), caching as negative entry", "key", key, "ttl", c.NegativeGracePeriod)
 
-		// "존재하지 않음"을 나타내는 특별한 결과 생성
-		negativeResult := &FetchResult{
-			Body:     nil,
-			Metadata: &Metadata{IsNegative: true}, // 이 플래그와 아래 로직은 이전 논의와 동일하게 필요
+		// 스트림을 만들 필요 없이, 메타데이터만 있는 빈 항목을 직접 저장합니다.
+		if c.HotStore != nil {
+			// 빈 데이터를 쓰기 위한 writer를 가져옵니다.
+			writer, err := c.setStreamToStore(ctx, c.HotStore, key, &Metadata{IsNegative: true})
+			if err != nil {
+				// 쓰기 실패는 로깅만 하고, 사용자에게는 여전히 ErrNotFound를 반환합니다.
+				level.Warn(c.Logger).Log("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
+			} else {
+				// writer에 아무것도 쓰지 않고 바로 Close()를 호출하여
+				// 메타데이터만 저장하고 쓰기 작업을 완료합니다.
+				if closeErr := writer.Close(); closeErr != nil {
+					level.Warn(c.Logger).Log("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
+				}
+			}
 		}
-
-		// 이 특별한 결과를 캐시에 저장
-		_, cacheErr := c.cacheAndTeeStream(ctx, key, negativeResult)
-		if cacheErr != nil {
-			level.Warn(c.Logger).Log("msg", "failed to cache negative result", "key", key, "err", cacheErr)
-		}
+		// --- 수정 끝 ---
 
 		// 사용자에게는 최종적으로 ErrNotFound 반환
 		return nil, ErrNotFound
@@ -133,6 +138,7 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 	// 기존 긍정 캐시 처리 로직 (변경 없음)
 	hotTeeStream, err := c.cacheAndTeeStream(ctx, key, result)
 	if err != nil {
+		// cacheAndTeeStream 실패 시, 캐싱 없이 원본 스트림이라도 반환
 		return result.Body, nil
 	}
 	c.scheduleSetToStore(context.Background(), c.ColdStore, key)

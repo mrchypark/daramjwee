@@ -18,16 +18,28 @@ import (
 
 // mockFetcher is a mock implementation of the Fetcher interface.
 type mockFetcher struct {
-	mu          sync.Mutex
-	fetchCount  int
-	content     string
+	mu              sync.Mutex
+	fetchCount      int
+	content         string
 	etag            string
 	err             error
 	fetchDelay      time.Duration
 	lastOldMetadata *Metadata
+
+	// --- 이 부분을 추가합니다 ---
+	// FetchFunc는 Fetch 메서드의 동작을 테스트 중에 교체할 수 있게 해주는 함수 필드입니다.
+	FetchFunc func(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error)
 }
 
+// Fetch 메서드가 이제 FetchFunc 필드를 사용하도록 수정합니다.
 func (f *mockFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error) {
+	// --- 이 부분을 수정합니다 ---
+	// FetchFunc이 설정되어 있다면, 그 함수를 대신 호출합니다.
+	if f.FetchFunc != nil {
+		return f.FetchFunc(ctx, oldMetadata)
+	}
+
+	// 기존의 Fetch 로직은 그대로 둡니다.
 	f.mu.Lock()
 	f.fetchCount++
 	f.lastOldMetadata = oldMetadata
@@ -120,9 +132,15 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Met
 	return &mockWriteCloser{
 		onClose: func() error {
 			s.mu.Lock()
-			s.data[key] = buf.Bytes()
+			defer s.mu.Unlock() // Defer unlock to ensure it runs even if there are panics
+
+			// --- 여기가 핵심 수정 부분입니다 ---
+			// 버퍼에 실제 데이터가 있을 때만 data 맵에 항목을 추가합니다.
+			if buf.Len() > 0 {
+				s.data[key] = buf.Bytes()
+			}
 			s.meta[key] = metadata
-			s.mu.Unlock() // Unlock 후 채널에 신호 전송
+			// --- 수정 끝 ---
 
 			// 쓰기 작업이 완료되었음을 알림
 			s.writeCompleted <- key
@@ -179,9 +197,9 @@ func (mwc *mockWriteCloser) Close() error                      { return mwc.onCl
 
 // deterministicFetcher는 Fetcher의 Mock 구현체로, 채널을 통해 동기화를 지원합니다.
 type deterministicFetcher struct {
-	mu           sync.Mutex
-	fetchCount   int
-	content      string
+	mu              sync.Mutex
+	fetchCount      int
+	content         string
 	etag            string
 	err             error
 	fetchDelay      time.Duration
@@ -708,4 +726,139 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	finalFetcher := &mockFetcher{err: ErrNotFound}
 	_, err := cache.Get(ctx, key, finalFetcher)
 	assert.ErrorIs(t, err, ErrNotFound, "모든 작업 후 아이템은 삭제된 상태여야 합니다.")
+}
+
+// Filename: cache_test.go (추가할 테스트 코드)
+
+// TestCache_NegativeCache_Enabled는 네거티브 캐시가 활성화됐을 때,
+// 오리진에서 ErrNotFound와 유사한 상황(결과가 nil)이 발생하면
+// "없음" 상태가 캐시되는지 검증합니다.
+func TestCache_NegativeCache_Enabled(t *testing.T) {
+	// 1. 네거티브 캐시 활성화 (TTL 5분)
+	cache, hot, _ := setupCache(t, WithNegativeCache(5*time.Minute))
+	ctx := context.Background()
+	key := "negative-key"
+
+	// 2. Fetcher가 (nil, nil)을 반환하도록 설정 (데이터가 없다는 의미)
+	// mockFetcher의 content를 비워두면 FetchResult.Body가 nil이 됩니다.
+	// 이 테스트에서는 Fetcher가 결과 없이 nil 에러를 반환하는 상황을 시뮬레이션 합니다.
+	fetcher := &mockFetcher{content: "", etag: ""} // FetchResult가 nil이 되도록 설정
+	fetcher.err = nil                              // 에러는 없지만, 결과도 없는 상황
+
+	// Fetcher의 Fetch 함수를 수정하여 명시적으로 nil, nil을 반환하게 만듭니다.
+	// 실제로는 Fetcher 구현에 따라 ErrNotFound를 반환하거나 할 수 있습니다.
+	// 여기서는 cache.go의 `if result == nil` 분기를 테스트하는 것이 목적입니다.
+	customFetcher := &mockFetcher{}
+	customFetcher.FetchFunc = func(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error) {
+		// 이 방식은 컴파일 에러를 발생시키지 않습니다.
+		customFetcher.mu.Lock()
+		customFetcher.fetchCount++
+		customFetcher.mu.Unlock()
+		return nil, nil // 명시적으로 (nil, nil) 반환
+	}
+
+	// 3. Get 호출
+	stream, err := cache.Get(ctx, key, customFetcher)
+
+	// 4. 검증
+	// (nil, nil)을 받았으므로 최종적으로 사용자에게는 ErrNotFound가 반환되어야 합니다.
+	assert.ErrorIs(t, err, ErrNotFound, "최종적으로 ErrNotFound가 반환되어야 합니다.")
+	assert.Nil(t, stream, "에러 발생 시 스트림은 nil이어야 합니다.")
+
+	// Fetcher는 한 번 호출되어야 합니다.
+	assert.Equal(t, 1, customFetcher.getFetchCount(), "Fetcher는 한 번 호출되어야 합니다.")
+
+	// Hot Store에 네거티브 캐시 항목이 저장되었는지 확인합니다.
+	hot.mu.RLock()
+	defer hot.mu.RUnlock()
+	meta, metaOk := hot.meta[key]
+	_, dataOk := hot.data[key]
+
+	assert.True(t, metaOk, "네거티브 캐시 메타데이터가 저장되어야 합니다.")
+	assert.False(t, dataOk, "네거티브 캐시에는 데이터가 없어야 합니다.")
+	assert.True(t, meta.IsNegative, "메타데이터의 IsNegative 플래그가 true여야 합니다.")
+}
+
+// TestCache_NegativeCache_Disabled는 네거티브 캐시가 비활성화됐을 때,
+// 오리진에서 데이터가 없어도 아무것도 캐시하지 않는 것을 검증합니다.
+func TestCache_NegativeCache_Disabled(t *testing.T) {
+	// 1. 네거티브 캐시 비활성화 (기본값)
+	cache, hot, _ := setupCache(t)
+	ctx := context.Background()
+	key := "no-negative-key"
+
+	// 2. Fetcher가 (nil, nil)을 반환하도록 설정
+	customFetcher := &mockFetcher{}
+	customFetcher.FetchFunc = func(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error) {
+		// 이 방식은 컴파일 에러를 발생시키지 않습니다.
+		customFetcher.mu.Lock()
+		customFetcher.fetchCount++
+		customFetcher.mu.Unlock()
+		return nil, nil // 명시적으로 (nil, nil) 반환
+	}
+
+	// 3. Get 호출
+	_, err := cache.Get(ctx, key, customFetcher)
+
+	// 4. 검증
+	assert.ErrorIs(t, err, ErrNotFound)
+	assert.Equal(t, 1, customFetcher.getFetchCount())
+
+	// Hot Store에 아무것도 저장되지 않았는지 확인
+	hot.mu.RLock()
+	defer hot.mu.RUnlock()
+	_, metaOk := hot.meta[key]
+	assert.False(t, metaOk, "네거티브 캐시가 비활성화되면 메타데이터가 저장되지 않아야 합니다.")
+}
+
+// TestCache_PositiveGracePeriod_ServesStaleWhileRefreshing는
+// 유예 기간(Grace Period)이 설정된 아이템이 만료되었을 때,
+// 이전 데이터를 먼저 반환하고 백그라운드에서 갱신을 시도하는지 검증합니다.
+func TestCache_PositiveGracePeriod_ServesStaleWhileRefreshing(t *testing.T) {
+	// 1. 유예 기간 활성화
+	cache, hot, _ := setupCache(t, WithGracePeriod(5*time.Minute))
+	ctx := context.Background()
+	key := "grace-key"
+
+	// 2. 만료되었지만 유예 기간은 지나지 않은 "오래된" 데이터를 캐시에 저장
+	// GraceUntil 필드를 과거 시간으로 설정하여 만료 상태를 시뮬레이션
+	oldContent := "stale data"
+	hot.setData(key, oldContent, &Metadata{
+		ETag:       "v1",
+		GraceUntil: time.Now().Add(-1 * time.Minute), // 1분 전에 만료됨
+	})
+
+	// 3. Fetcher는 "새로운" 데이터를 반환하도록 설정
+	fetcher := newDeterministicFetcher("fresh data", "v2")
+
+	// 4. Get 호출
+	stream, err := cache.Get(ctx, key, fetcher)
+	require.NoError(t, err)
+
+	// 5. 검증 (1단계 - 즉시 반환)
+	// 즉시 반환된 데이터는 "오래된" 데이터여야 합니다.
+	readBytes, _ := io.ReadAll(stream)
+	stream.Close()
+	assert.Equal(t, oldContent, string(readBytes), "만료된 데이터가 즉시 반환되어야 합니다.")
+
+	// 6. 검증 (2단계 - 백그라운드 작업)
+	// 백그라운드에서 Fetcher가 호출되고 캐시가 갱신되어야 합니다.
+	// newDeterministicFetcher와 mockStore의 채널을 사용하여 동기화
+	<-fetcher.fetchStarted
+	<-fetcher.fetchEnd
+	select {
+	case completedKey := <-hot.writeCompleted:
+		assert.Equal(t, key, completedKey)
+	case <-time.After(2 * time.Second):
+		t.Fatal("백그라운드 쓰기 작업이 시간 내에 완료되지 않았습니다.")
+	}
+
+	// Fetcher가 한 번 호출되었는지 확인
+	assert.Equal(t, 1, fetcher.getFetchCount())
+
+	// 캐시가 "새로운" 데이터로 갱신되었는지 확인
+	hot.mu.RLock()
+	defer hot.mu.RUnlock()
+	assert.Equal(t, "v2", hot.meta[key].ETag, "캐시의 ETag가 v2로 갱신되어야 합니다.")
+	assert.Equal(t, "fresh data", string(hot.data[key]), "캐시의 데이터가 'fresh data'로 갱신되어야 합니다.")
 }
