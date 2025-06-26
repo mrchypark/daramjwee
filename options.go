@@ -17,13 +17,18 @@ func (e *ConfigError) Error() string {
 // Config는 daramjwee 캐시의 모든 설정을 담는 구조체입니다.
 // Option 함수들은 이 구조체의 필드를 변경합니다.
 type Config struct {
-	HotStore         Store
-	ColdStore        Store
+	HotStore  Store
+	ColdStore Store
+
 	WorkerStrategy   string
 	WorkerPoolSize   int
 	WorkerQueueSize  int
 	WorkerJobTimeout time.Duration
-	DefaultTimeout   time.Duration
+
+	DefaultTimeout time.Duration
+
+	PositiveGracePeriod time.Duration
+	NegativeGracePeriod time.Duration
 }
 
 // Option은 Config를 수정하는 함수 타입입니다.
@@ -78,6 +83,33 @@ func WithDefaultTimeout(timeout time.Duration) Option {
 			return &ConfigError{"default timeout must be positive"}
 		}
 		cfg.DefaultTimeout = timeout
+		return nil
+	}
+}
+
+// WithTTL 0 으로 설정되어 무한대였던, TTL을 설정합니다.
+// ttl이 0보다 크면 기능이 활성화됩니다.
+func WithGracePeriod(gracePeriod time.Duration) Option {
+	return func(cfg *Config) error {
+		if gracePeriod <= 0 {
+			// 혼동을 막기 위해 음수 및 0값은 에러 처리
+			return &ConfigError{"positive cache TTL cannot be a negative value and zero"}
+		}
+		cfg.PositiveGracePeriod = gracePeriod
+		return nil
+	}
+}
+
+// WithNegativeCache는 네거티브 캐싱을 활성화하고 TTL을 설정합니다.
+// ttl이 0 이상이면 기능이 활성화됩니다.
+// 0 이면 네거티브 캐싱을 활성화, 0 보다 크면 TTL 설정을 추가합니다.
+func WithNegativeCache(gracePeriod time.Duration) Option {
+	return func(cfg *Config) error {
+		if gracePeriod < 0 {
+			// 혼동을 막기 위해 음수 값은 에러 처리
+			return &ConfigError{"negative cache TTL cannot be a negative value"}
+		}
+		cfg.NegativeGracePeriod = gracePeriod
 		return nil
 	}
 }

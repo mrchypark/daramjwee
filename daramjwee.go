@@ -58,7 +58,9 @@ type Cache interface {
 // Metadata holds essential metadata about a cached item.
 // It is designed to be extensible for future needs (e.g., LastModified, Size).
 type Metadata struct {
-	ETag string
+	ETag       string
+	IsNegative bool
+	GraceUntil time.Time
 }
 
 // FetchResult holds the data and metadata returned from a successful fetch operation.
@@ -126,11 +128,13 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 
 	// 1. 기본값이 담긴 Config 구조체를 생성합니다.
 	cfg := Config{
-		DefaultTimeout:   30 * time.Second,
-		WorkerStrategy:   "pool", // 기본 워커 전략
-		WorkerPoolSize:   10,     // 기본 워커 풀 사이즈
-		WorkerQueueSize:  100,    // 기본 워커 큐 사이즈,
-		WorkerJobTimeout: 30 * time.Second,
+		DefaultTimeout:      30 * time.Second,
+		WorkerStrategy:      "pool", // 기본 워커 전략
+		WorkerPoolSize:      10,     // 기본 워커 풀 사이즈
+		WorkerQueueSize:     100,    // 기본 워커 큐 사이즈,
+		WorkerJobTimeout:    30 * time.Second,
+		PositiveGracePeriod: 0 * time.Second,
+		NegativeGracePeriod: -1 * time.Second,
 	}
 
 	// 2. 사용자가 제공한 Option들을 적용하여 Config를 수정합니다.
@@ -157,11 +161,13 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	c := &DaramjweeCache{
-		Logger:         logger,
-		HotStore:       cfg.HotStore,
-		ColdStore:      cfg.ColdStore,
-		Worker:         workerManager,
-		DefaultTimeout: cfg.DefaultTimeout,
+		Logger:              logger,
+		HotStore:            cfg.HotStore,
+		ColdStore:           cfg.ColdStore,
+		Worker:              workerManager,
+		DefaultTimeout:      cfg.DefaultTimeout,
+		PositiveGracePeriod: cfg.PositiveGracePeriod,
+		NegativeGracePeriod: cfg.NegativeGracePeriod,
 	}
 
 	level.Info(logger).Log("msg", "daramjwee cache initialized", "default_timeout", c.DefaultTimeout)

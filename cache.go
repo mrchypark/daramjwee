@@ -15,11 +15,13 @@ import (
 
 // DaramjweeCache는 Cache 인터페이스의 구체적인 구현체입니다.
 type DaramjweeCache struct {
-	HotStore       Store
-	ColdStore      Store // Optional
-	Logger         log.Logger
-	Worker         *worker.Manager
-	DefaultTimeout time.Duration
+	HotStore            Store
+	ColdStore           Store // Optional
+	Logger              log.Logger
+	Worker              *worker.Manager
+	DefaultTimeout      time.Duration
+	PositiveGracePeriod time.Duration
+	NegativeGracePeriod time.Duration
 }
 
 // 컴파일 타임에 DaramjweeCache가 Cache 인터페이스를 만족하는지 확인합니다.
@@ -82,21 +84,17 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, fetcher 
 func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "full cache miss, fetching from origin", "key", key)
 
-	// Origin에 요청하기 전에, 만료되었을 수 있는 로컬 캐시의 ETag를 확인합니다.
 	var oldMetadata *Metadata
 	if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil {
 		oldMetadata = meta
 	}
 
-	// Origin에서 데이터를 가져옵니다.
 	result, err := fetcher.Fetch(ctx, oldMetadata)
 	if err != nil {
-		// Origin의 데이터가 변경되지 않은 경우 (HTTP 304 Not Modified)
 		if err == ErrNotModified {
 			level.Debug(c.Logger).Log("msg", "object not modified, serving from hot cache again", "key", key)
 			stream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
 			if err != nil {
-				// 304 응답을 받았지만, 그 사이에 캐시가 삭제되었을 수 있는 엣지 케이스 처리
 				level.Warn(c.Logger).Log("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
 				return nil, ErrNotFound
 			}
@@ -105,16 +103,39 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 		return nil, err // 그 외의 Fetch 에러
 	}
 
-	// 가져온 데이터를 클라이언트로 스트리밍하면서 동시에 Hot 캐시에 저장합니다.
-	hotTeeStream, err := c.cacheAndTeeStream(ctx, key, result)
-	if err != nil {
-		// 캐싱에 실패하더라도 클라이언트에게는 데이터를 전달해야 합니다.
-		return result.Body, nil
+	// --- 제안: Fetcher가 (nil, nil)을 반환했을 때의 동작 수정 ---
+	if result == nil {
+		// 1. 네거티브 캐싱이 비활성화(TTL <= 0)되어 있는지 확인합니다.
+		if c.NegativeGracePeriod <= 0 {
+			level.Debug(c.Logger).Log("msg", "origin returned (nil, nil), but negative caching is disabled", "key", key)
+			return nil, ErrNotFound
+		}
+
+		// 2. 네거티브 캐싱이 활성화된 경우에만 캐싱을 진행합니다.
+		level.Debug(c.Logger).Log("msg", "origin returned (nil, nil), caching as negative entry", "key", key, "ttl", c.NegativeGracePeriod)
+
+		// "존재하지 않음"을 나타내는 특별한 결과 생성
+		negativeResult := &FetchResult{
+			Body:     nil,
+			Metadata: &Metadata{IsNegative: true}, // 이 플래그와 아래 로직은 이전 논의와 동일하게 필요
+		}
+
+		// 이 특별한 결과를 캐시에 저장
+		_, cacheErr := c.cacheAndTeeStream(ctx, key, negativeResult)
+		if cacheErr != nil {
+			level.Warn(c.Logger).Log("msg", "failed to cache negative result", "key", key, "err", cacheErr)
+		}
+
+		// 사용자에게는 최종적으로 ErrNotFound 반환
+		return nil, ErrNotFound
 	}
 
-	// 백그라운드에서 Hot 캐시의 데이터를 Cold 캐시에도 저장하도록 작업을 예약합니다.
+	// 기존 긍정 캐시 처리 로직 (변경 없음)
+	hotTeeStream, err := c.cacheAndTeeStream(ctx, key, result)
+	if err != nil {
+		return result.Body, nil
+	}
 	c.scheduleSetToStore(context.Background(), c.ColdStore, key)
-
 	return hotTeeStream, nil
 }
 
@@ -343,6 +364,7 @@ type cancelWriteCloser struct {
 func newCancelWriteCloser(wc io.WriteCloser, cancel context.CancelFunc) io.WriteCloser {
 	return &cancelWriteCloser{WriteCloser: wc, cancel: cancel}
 }
+
 func (cwc *cancelWriteCloser) Close() error {
 	defer cwc.cancel()
 	return cwc.WriteCloser.Close()
