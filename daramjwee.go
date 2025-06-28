@@ -19,10 +19,12 @@ import (
 var (
 	// ErrNotFound is returned when an object is not found in the cache or the origin.
 	ErrNotFound = errors.New("daramjwee: object not found")
-
 	// ErrNotModified is a sentinel error returned by a Fetcher when the resource
 	// at the origin has not changed compared to the cached version.
 	ErrNotModified = errors.New("daramjwee: resource not modified")
+	// ErrCacheableNotFound is returned when a resource is not found, but this state
+	// is cacheable (e.g., a negative cache entry).
+	ErrCacheableNotFound = errors.New("daramjwee: resource not found, but this state is cacheable")
 )
 
 // --- Primary Public Interface ---
@@ -60,7 +62,7 @@ type Cache interface {
 type Metadata struct {
 	ETag       string
 	IsNegative bool
-	GraceUntil time.Time
+	CachedAt   time.Time
 }
 
 // FetchResult holds the data and metadata returned from a successful fetch operation.
@@ -128,13 +130,14 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 
 	// 1. 기본값이 담긴 Config 구조체를 생성합니다.
 	cfg := Config{
-		DefaultTimeout:      30 * time.Second,
-		WorkerStrategy:      "pool", // 기본 워커 전략
-		WorkerPoolSize:      10,     // 기본 워커 풀 사이즈
-		WorkerQueueSize:     100,    // 기본 워커 큐 사이즈,
-		WorkerJobTimeout:    30 * time.Second,
-		PositiveGracePeriod: 0 * time.Second,
-		NegativeGracePeriod: -1 * time.Second,
+		DefaultTimeout:   30 * time.Second,
+		WorkerStrategy:   "pool", // 기본 워커 전략
+		WorkerPoolSize:   1,      // 기본 워커 풀 사이즈
+		WorkerQueueSize:  500,    // 기본 워커 큐 사이즈,
+		WorkerJobTimeout: 30 * time.Second,
+		ShutdownTimeout:  30 * time.Second,
+		PositiveFreshFor: 0 * time.Second,
+		NegativeFreshFor: 0 * time.Second,
 	}
 
 	// 2. 사용자가 제공한 Option들을 적용하여 Config를 수정합니다.
@@ -161,13 +164,13 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	c := &DaramjweeCache{
-		Logger:              logger,
-		HotStore:            cfg.HotStore,
-		ColdStore:           cfg.ColdStore,
-		Worker:              workerManager,
-		DefaultTimeout:      cfg.DefaultTimeout,
-		PositiveGracePeriod: cfg.PositiveGracePeriod,
-		NegativeGracePeriod: cfg.NegativeGracePeriod,
+		Logger:           logger,
+		HotStore:         cfg.HotStore,
+		ColdStore:        cfg.ColdStore,
+		Worker:           workerManager,
+		DefaultTimeout:   cfg.DefaultTimeout,
+		PositiveFreshFor: cfg.PositiveFreshFor,
+		NegativeFreshFor: cfg.NegativeFreshFor,
 	}
 
 	level.Info(logger).Log("msg", "daramjwee cache initialized", "default_timeout", c.DefaultTimeout)

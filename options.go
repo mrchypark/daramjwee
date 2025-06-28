@@ -25,10 +25,11 @@ type Config struct {
 	WorkerQueueSize  int
 	WorkerJobTimeout time.Duration
 
-	DefaultTimeout time.Duration
+	DefaultTimeout  time.Duration
+	ShutdownTimeout time.Duration
 
-	PositiveGracePeriod time.Duration
-	NegativeGracePeriod time.Duration
+	PositiveFreshFor time.Duration
+	NegativeFreshFor time.Duration
 }
 
 // Option은 Config를 수정하는 함수 타입입니다.
@@ -87,29 +88,34 @@ func WithDefaultTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithTTL 0 으로 설정되어 무한대였던, TTL을 설정합니다.
-// ttl이 0보다 크면 기능이 활성화됩니다.
-func WithGracePeriod(gracePeriod time.Duration) Option {
+func WithShutdownTimeout(timeout time.Duration) Option {
 	return func(cfg *Config) error {
-		if gracePeriod <= 0 {
-			// 혼동을 막기 위해 음수 및 0값은 에러 처리
-			return &ConfigError{"positive cache TTL cannot be a negative value and zero"}
+		if timeout <= 0 {
+			return &ConfigError{"Shutdown timeout must be positive"}
 		}
-		cfg.PositiveGracePeriod = gracePeriod
+		cfg.ShutdownTimeout = timeout
 		return nil
 	}
 }
 
-// WithNegativeCache는 네거티브 캐싱을 활성화하고 TTL을 설정합니다.
-// ttl이 0 이상이면 기능이 활성화됩니다.
-// 0 이면 네거티브 캐싱을 활성화, 0 보다 크면 TTL 설정을 추가합니다.
-func WithNegativeCache(gracePeriod time.Duration) Option {
+func WithCache(freshFor time.Duration) Option {
 	return func(cfg *Config) error {
-		if gracePeriod < 0 {
+		if freshFor < 0 {
+			// 혼동을 막기 위해 음수 및 0값은 에러 처리
+			return &ConfigError{"positive cache TTL cannot be a negative value"}
+		}
+		cfg.PositiveFreshFor = freshFor
+		return nil
+	}
+}
+
+func WithNegativeCache(freshFor time.Duration) Option {
+	return func(cfg *Config) error {
+		if freshFor < 0 {
 			// 혼동을 막기 위해 음수 값은 에러 처리
 			return &ConfigError{"negative cache TTL cannot be a negative value"}
 		}
-		cfg.NegativeGracePeriod = gracePeriod
+		cfg.NegativeFreshFor = freshFor
 		return nil
 	}
 }

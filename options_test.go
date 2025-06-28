@@ -13,7 +13,6 @@ import (
 
 // --- 테스트를 위한 Mock Store ---
 // 이 테스트 파일 내에서만 사용할 간단한 Mock Store입니다.
-// cache_test.go의 mockStore를 가져오지 않고, 의존성을 최소화합니다.
 type optionsTestMockStore struct{}
 
 func (s *optionsTestMockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
@@ -54,8 +53,17 @@ func TestNew_OptionValidation(t *testing.T) {
 				WithColdStore(&optionsTestMockStore{}),
 				WithWorker("pool", 10, 100, 5*time.Second),
 				WithDefaultTimeout(10 * time.Second),
-				WithGracePeriod(1 * time.Minute),
+				WithShutdownTimeout(20 * time.Second), // **수정**: ShutdownTimeout 테스트 추가
+				WithCache(1 * time.Minute),            // **수정**: WithGracePeriod -> WithCache
 				WithNegativeCache(5 * time.Minute),
+			},
+			expectErr: false,
+		},
+		{
+			name: "Success with positive cache TTL of zero", // **수정**: 0은 유효한 값이므로 성공 케이스로 변경
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithCache(0),
 			},
 			expectErr: false,
 		},
@@ -136,22 +144,31 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectedMsg: "default timeout must be positive",
 		},
 		{
-			name: "Failure with zero grace period",
+			name: "Failure with zero shutdown timeout", // **추가**: ShutdownTimeout 실패 케이스
 			options: []Option{
 				WithHotStore(validHotStore),
-				WithGracePeriod(0),
+				WithShutdownTimeout(0),
 			},
 			expectErr:   true,
-			expectedMsg: "positive cache TTL cannot be a negative value and zero",
+			expectedMsg: "Shutdown timeout must be positive",
 		},
 		{
-			name: "Failure with negative grace period",
+			name: "Failure with negative shutdown timeout", // **추가**: ShutdownTimeout 실패 케이스
 			options: []Option{
 				WithHotStore(validHotStore),
-				WithGracePeriod(-1 * time.Minute),
+				WithShutdownTimeout(-10 * time.Second),
 			},
 			expectErr:   true,
-			expectedMsg: "positive cache TTL cannot be a negative value and zero",
+			expectedMsg: "Shutdown timeout must be positive",
+		},
+		{
+			name: "Failure with negative value for positive cache", // **수정**: WithGracePeriod -> WithCache
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithCache(-1 * time.Minute),
+			},
+			expectErr:   true,
+			expectedMsg: "positive cache TTL cannot be a negative value",
 		},
 		{
 			name: "Failure with negative value for negative cache",
@@ -189,14 +206,14 @@ func TestNew_OptionValidation(t *testing.T) {
 func TestNew_OptionOverrides(t *testing.T) {
 	validHotStore := &optionsTestMockStore{}
 	finalTimeout := 15 * time.Second
-	finalGracePeriod := 10 * time.Minute
+	finalFreshFor := 10 * time.Minute // **수정**: 변수명 및 값 변경
 
 	options := []Option{
 		WithHotStore(validHotStore),
 		WithDefaultTimeout(5 * time.Second), // 초기값
-		WithGracePeriod(1 * time.Minute),    // 초기값
+		WithCache(1 * time.Minute),          // **수정**: WithGracePeriod -> WithCache
 		WithDefaultTimeout(finalTimeout),    // 최종값
-		WithGracePeriod(finalGracePeriod),   // 최종값
+		WithCache(finalFreshFor),            // **수정**: WithGracePeriod -> WithCache
 	}
 
 	cache, err := New(nil, options...)
@@ -210,12 +227,11 @@ func TestNew_OptionOverrides(t *testing.T) {
 	require.True(t, ok, "Failed to assert cache to *DaramjweeCache")
 
 	assert.Equal(t, finalTimeout, dCache.DefaultTimeout, "The last DefaultTimeout option should be applied")
-	assert.Equal(t, finalGracePeriod, dCache.PositiveGracePeriod, "The last WithGracePeriod option should be applied")
+	assert.Equal(t, finalFreshFor, dCache.PositiveFreshFor, "The last WithCache option should be applied") // **수정**: 검증 필드 변경
 }
 
 // TestNew_NilColdStoreIsValid는 ColdStore로 nil을 전달하는 것이 유효하며,
-// 이 경우 내부적으로 nullStore가 사용되는 것을 (간접적으로) 검증합니다.
-// New 함수는 에러 없이 성공적으로 Cache 객체를 반환해야 합니다.
+// 이 경우 내부적으로 nullStore가 사용되는 것을 검증합니다.
 func TestNew_NilColdStoreIsValid(t *testing.T) {
 	validHotStore := &optionsTestMockStore{}
 
@@ -234,6 +250,7 @@ func TestNew_NilColdStoreIsValid(t *testing.T) {
 	require.True(t, ok)
 
 	// nullStore 타입인지 확인합니다.
+	// daramjwee.go의 New 함수에서 nil ColdStore는 *nullStore로 대체됩니다.
 	_, ok = dCache.ColdStore.(*nullStore)
 	assert.True(t, ok, "ColdStore should be an instance of nullStore when configured with nil")
 }
