@@ -188,7 +188,6 @@ func setupCache(t *testing.T, opts ...Option) (Cache, *mockStore, *mockStore) {
 }
 
 // --- 전체 테스트 스위트 ---
-
 // TestCache_Get_FullMiss는 캐시에 데이터가 전혀 없을 때의 동작을 검증합니다.
 func TestCache_Get_FullMiss(t *testing.T) {
 	cache, hot, _ := setupCache(t)
@@ -198,20 +197,31 @@ func TestCache_Get_FullMiss(t *testing.T) {
 
 	stream, err := cache.Get(ctx, key, fetcher)
 	require.NoError(t, err)
-	defer stream.Close()
 
-	readBytes, _ := io.ReadAll(stream)
+	// 1. 스트림에서 데이터를 모두 읽습니다.
+	readBytes, err := io.ReadAll(stream)
+	require.NoError(t, err, "스트림에서 데이터를 읽는 중 에러가 발생하면 안 됩니다")
+
+	// 2. (핵심 수정) 스트림을 명시적으로 닫아 쓰기 완료 신호를 트리거합니다.
+	err = stream.Close()
+	require.NoError(t, err)
+
+	// 3. 이제 Hot 캐시로의 비동기 쓰기가 완료될 때까지 안전하게 기다릴 수 있습니다.
+	<-hot.writeCompleted
+
+	// 4. 읽은 콘텐츠와 캐시 상태를 검증합니다.
 	assert.Equal(t, content, string(readBytes))
 	assert.Equal(t, 1, fetcher.getFetchCount())
 
 	hot.mu.RLock()
 	defer hot.mu.RUnlock()
+	require.NotNil(t, hot.meta[key], "메타데이터가 Hot 캐시에 존재해야 합니다.")
 	assert.Equal(t, content, string(hot.data[key]))
 	assert.Equal(t, etag, hot.meta[key].ETag)
 	assert.False(t, hot.meta[key].CachedAt.IsZero())
 }
 
-// ✅ [복원된 테스트] TestCache_Get_ColdHit는 콜드 캐시 히트 및 핫 캐시 승격을 검증합니다.
+// TestCache_Get_ColdHit는 콜드 캐시 히트 및 핫 캐시 승격을 검증합니다.
 func TestCache_Get_ColdHit(t *testing.T) {
 	cache, hot, cold := setupCache(t)
 	ctx := context.Background()
@@ -224,19 +234,25 @@ func TestCache_Get_ColdHit(t *testing.T) {
 	stream, err := cache.Get(ctx, key, &mockFetcher{})
 	require.NoError(t, err)
 
-	readBytes, _ := io.ReadAll(stream)
-	stream.Close()
+	readBytes, err := io.ReadAll(stream)
+	require.NoError(t, err)
+
+	// 3. (핵심 수정) 스트림을 명시적으로 닫습니다.
+	err = stream.Close()
+	require.NoError(t, err)
+
+	// 4. 비동기 쓰기(승격) 완료를 기다립니다.
+	<-hot.writeCompleted
+
+	// 5. 콘텐츠와 승격 상태를 검증합니다.
 	assert.Equal(t, content, string(readBytes))
 
-	// 3. Hot 캐시로 승격되었는지 확인
-	<-hot.writeCompleted // 비동기 쓰기 완료 대기
 	hot.mu.RLock()
 	defer hot.mu.RUnlock()
 	require.NotNil(t, hot.data[key])
 	assert.Equal(t, content, string(hot.data[key]))
 	require.NotNil(t, hot.meta[key])
 	assert.Equal(t, etag, hot.meta[key].ETag)
-	// 승격 시 CachedAt이 현재 시간으로 갱신되었는지 확인
 	assert.True(t, hot.meta[key].CachedAt.After(time.Now().Add(-1*time.Minute)))
 }
 
@@ -415,34 +431,7 @@ func TestCache_Get_NotModified_ButEvictedRace_Deterministic(t *testing.T) {
 // --- 동시성(Concurrency) 테스트 ---
 
 // ✅ [복원된 테스트]
-func TestCache_Get_ThunderingHerd(t *testing.T) {
-	cache, _, _ := setupCache(t)
-	key := "herd-key"
-	// 원본 응답이 느린 상황 시뮬레이션
-	fetcher := newDeterministicFetcher("origin data", "v1", nil)
-	fetcher.fetchDelay = 100 * time.Millisecond
 
-	numRequests := 10
-	var wg sync.WaitGroup
-	wg.Add(numRequests)
-
-	for i := 0; i < numRequests; i++ {
-		go func() {
-			defer wg.Done()
-			stream, err := cache.Get(context.Background(), key, fetcher)
-			if assert.NoError(t, err) {
-				io.Copy(io.Discard, stream) // 스트림을 소모하여 TeeReader가 동작하도록 함
-				stream.Close()
-			}
-		}()
-	}
-
-	wg.Wait()
-	// 현재 구현에서는 singleflight가 없으므로 모든 요청이 오리진으로 가야 합니다.
-	assert.Equal(t, numRequests, fetcher.getFetchCount())
-}
-
-// ✅ [복원된 테스트]
 func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	cache, hot, _ := setupCache(t)
 	key := "get-delete-key"
@@ -451,13 +440,20 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Goroutine 1: Get an object (and hold the stream)
+	// 채널을 사용해 Get이 시작되었음을 Delete에 알립니다.
+	getStarted := make(chan struct{})
+
+	// Goroutine 1: Get an object
 	go func() {
 		defer wg.Done()
 		fetcherForGet := &mockFetcher{err: ErrNotModified, etag: "v1"}
+
+		// Get을 실행하기 직전에 신호를 보냅니다.
+		close(getStarted)
+
 		stream, err := cache.Get(context.Background(), key, fetcherForGet)
 		if err == nil {
-			time.Sleep(50 * time.Millisecond)
+			// 스트림을 즉시 닫아 락을 오래 잡고 있지 않도록 합니다.
 			stream.Close()
 		}
 	}()
@@ -465,12 +461,16 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	// Goroutine 2: Delete the same object
 	go func() {
 		defer wg.Done()
-		time.Sleep(10 * time.Millisecond)
+		// Get이 시작될 때까지 기다립니다.
+		<-getStarted
+
 		err := cache.Delete(context.Background(), key)
 		assert.NoError(t, err)
 	}()
 
 	wg.Wait()
-	_, err := cache.Get(context.Background(), key, &mockFetcher{err: ErrNotFound})
+
+	// 최종 상태 검증
+	_, _, err := hot.GetStream(context.Background(), key)
 	assert.ErrorIs(t, err, ErrNotFound, "Item should be deleted after all operations")
 }

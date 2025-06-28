@@ -141,24 +141,33 @@ func TestWorkerPool_JobDroppingOnFullQueue(t *testing.T) {
 	poolSize, queueSize := 1, 1
 	manager, err := NewManager("pool", log.NewNopLogger(), poolSize, queueSize, 1*time.Second)
 	require.NoError(t, err)
-	defer manager.Shutdown(1 * time.Second) // defer 호출 수정
+	defer manager.Shutdown(1 * time.Second)
 
+	var firstJobStarted = make(chan struct{})
 	var firstJobDone = make(chan struct{})
 	var thirdJobExecuted atomic.Bool
 
+	// 첫 번째 작업은 시작과 끝을 채널로 알립니다.
 	firstJob := func(ctx context.Context) {
-		time.Sleep(50 * time.Millisecond)
+		close(firstJobStarted)
+		// 작업을 모방하는 약간의 시간
+		time.Sleep(10 * time.Millisecond)
 		close(firstJobDone)
 	}
+
+	// 세 번째 작업
 	thirdJob := func(ctx context.Context) {
 		thirdJobExecuted.Store(true)
 	}
 
-	manager.Submit(firstJob)                     // 워커가 즉시 가져감
+	manager.Submit(firstJob) // 워커가 즉시 가져감
+	<-firstJobStarted        // 첫 번째 작업이 시작될 때까지 대기
+
 	manager.Submit(func(ctx context.Context) {}) // 큐에 들어감
 	manager.Submit(thirdJob)                     // 큐가 꽉 차서 버려져야 함
 
-	<-firstJobDone
+	<-firstJobDone // 첫 번째 작업이 끝날 때까지 대기
+	// 워커가 두 번째 작업을 처리할 시간을 약간 줍니다.
 	time.Sleep(50 * time.Millisecond)
 
 	assert.False(t, thirdJobExecuted.Load(), "큐가 가득 찼을 때 제출된 작업은 실행되지 않고 버려져야 합니다.")

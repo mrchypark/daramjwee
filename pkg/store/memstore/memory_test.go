@@ -453,7 +453,7 @@ func TestMemStore_MetadataFields(t *testing.T) {
 	// 1. Set data with complex metadata
 	originalMeta := &daramjwee.Metadata{
 		ETag:       "v-complex",
-		GraceUntil: now,
+		CachedAt:   now,
 		IsNegative: true,
 	}
 	writer, err := store.SetWithWriter(ctx, key, originalMeta)
@@ -467,7 +467,7 @@ func TestMemStore_MetadataFields(t *testing.T) {
 	require.NotNil(t, retrievedMeta)
 
 	assert.Equal(t, originalMeta.ETag, retrievedMeta.ETag)
-	assert.True(t, originalMeta.GraceUntil.Equal(retrievedMeta.GraceUntil), "GraceUntil should be equal")
+	assert.True(t, originalMeta.CachedAt.Equal(retrievedMeta.CachedAt), "GraceUntil should be equal")
 	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
 
 	// 3. Stat data and verify metadata
@@ -476,6 +476,6 @@ func TestMemStore_MetadataFields(t *testing.T) {
 	require.NotNil(t, retrievedMetaFromStat)
 
 	assert.Equal(t, originalMeta.ETag, retrievedMetaFromStat.ETag)
-	assert.True(t, originalMeta.GraceUntil.Equal(retrievedMetaFromStat.GraceUntil), "GraceUntil from Stat should be equal")
+	assert.True(t, originalMeta.CachedAt.Equal(retrievedMetaFromStat.CachedAt), "GraceUntil from Stat should be equal")
 	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
