@@ -251,7 +251,17 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 func (c *DaramjweeCache) Close() {
 	if c.Worker != nil {
 		level.Info(c.Logger).Log("msg", "shutting down daramjwee cache")
-		c.Worker.Shutdown()
+
+		// --- 여기가 수정된 부분입니다 ---
+		// Shutdown에 타임아웃을 전달하고, 반환된 에러를 처리합니다.
+		// 30초와 같은 합리적인 기본값을 사용합니다.
+		// 이 값은 나중에 daramjwee.New의 옵션으로 설정할 수 있도록 확장할 수도 있습니다.
+		shutdownTimeout := 30 * time.Second
+		if err := c.Worker.Shutdown(shutdownTimeout); err != nil {
+			level.Error(c.Logger).Log("msg", "graceful shutdown failed", "err", err)
+		} else {
+			level.Info(c.Logger).Log("msg", "daramjwee cache shutdown complete")
+		}
 	}
 }
 

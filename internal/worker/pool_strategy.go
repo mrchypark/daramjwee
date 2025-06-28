@@ -1,13 +1,19 @@
+// Filename: internal/worker/pool_strategy.go
+
 package worker
 
 import (
 	"context"
+	"errors" // 에러 정의를 위해 추가
 	"sync"
 	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 )
+
+// ErrShutdownTimeout은 종료 작업이 타임아웃되었을 때 반환되는 에러입니다.
+var ErrShutdownTimeout = errors.New("worker: shutdown timed out")
 
 // PoolStrategy는 정해진 개수의 워커 풀을 사용하여 작업을 처리합니다.
 type PoolStrategy struct {
@@ -16,16 +22,13 @@ type PoolStrategy struct {
 	poolSize     int
 	jobs         chan Job
 	wg           sync.WaitGroup
-	quit         chan struct{}
-	shutdownOnce sync.Once // Shutdown이 한 번만 실행되도록 보장합니다.
+	shutdownOnce sync.Once
 }
 
 func NewPoolStrategy(logger log.Logger, poolSize int, queueSize int, timeout time.Duration) *PoolStrategy {
 	if poolSize <= 0 {
-		poolSize = 10 // 기본 풀 사이즈
+		poolSize = 10
 	}
-
-	// queueSize가 0 이하일 경우 합리적인 기본값으로 설정합니다.
 	if queueSize <= 0 {
 		queueSize = 100
 	}
@@ -33,14 +36,13 @@ func NewPoolStrategy(logger log.Logger, poolSize int, queueSize int, timeout tim
 		logger:   logger,
 		poolSize: poolSize,
 		timeout:  timeout,
-		// [수정] poolSize 대신 queueSize를 사용하여 작업 채널의 버퍼를 설정합니다.
-		jobs: make(chan Job, queueSize),
-		quit: make(chan struct{}),
+		jobs:     make(chan Job, queueSize),
 	}
 	p.start()
 	return p
 }
 
+// start는 for-range 패턴을 사용하여 워커를 실행합니다.
 func (p *PoolStrategy) start() {
 	p.wg.Add(p.poolSize)
 	for i := 0; i < p.poolSize; i++ {
@@ -49,37 +51,58 @@ func (p *PoolStrategy) start() {
 			logger := log.With(p.logger, "worker_id", workerID)
 			level.Info(logger).Log("msg", "worker started")
 
-			for {
-				select {
-				case job := <-p.jobs:
-					ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
-					job(ctx)
-					cancel() // 루프 내에서는 defer를 사용할 수 없으므로 명시적으로 호출
-				case <-p.quit:
-					level.Info(logger).Log("msg", "worker stopped")
-					return
-				}
+			// **핵심 수정**: for-range는 'jobs' 채널이 닫힐 때까지 큐의 모든 작업을 처리하고,
+			// 채널이 닫히면 루프가 자동으로 안전하게 종료됩니다.
+			for job := range p.jobs {
+				ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+				job(ctx)
+				cancel()
 			}
+			level.Info(logger).Log("msg", "worker stopped")
 		}(i)
 	}
 }
 
+// Submit은 큐가 찼을 때 작업을 버립니다.
 func (p *PoolStrategy) Submit(job Job) {
-	// NOTE: This is a blocking submission. If the job channel is full, this call
-	// will block until a worker becomes available. This provides back-pressure.
-	// For use cases where dropping jobs is acceptable, a non-blocking select
-	// with a default case could be implemented.
+	// 닫힌 채널에 전송 시 발생하는 패닉을 방지합니다.
+	defer func() {
+		if r := recover(); r != nil {
+			level.Warn(p.logger).Log("msg", "job submitted to a closed worker pool", "err", r)
+		}
+	}()
+
 	select {
 	case p.jobs <- job:
-		// Job 전송 성공
-	case <-p.quit:
-		level.Warn(p.logger).Log("msg", "worker is shutting down, job submission ignored")
+		// 작업 전송 성공
+	default:
+		// 큐가 가득 찼으면 작업을 버립니다.
+		level.Warn(p.logger).Log("msg", "worker queue is full, dropping job")
 	}
 }
 
-func (p *PoolStrategy) Shutdown() {
+// Shutdown은 타임아웃과 함께 우아한 종료를 수행합니다.
+func (p *PoolStrategy) Shutdown(timeout time.Duration) error {
 	p.shutdownOnce.Do(func() {
-		close(p.quit) // 모든 워커에게 종료 신호 전송
+		// 1. **(가장 중요)** 'jobs' 채널을 닫습니다.
+		//    이것이 "더 이상 새 일을 받지 말고, 남은 일만 처리하고 퇴근하라"는 신호입니다.
+		close(p.jobs)
 	})
-	p.wg.Wait() // 모든 워커가 종료될 때까지 대기
+
+	doneCh := make(chan struct{})
+	go func() {
+		// 모든 워커가 for-range 루프를 마치고 종료되면 Wait()가 리턴됩니다.
+		p.wg.Wait()
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+		// 시간 내에 정상 종료
+		return nil
+	case <-time.After(timeout):
+		// 타임아웃 발생
+		level.Error(p.logger).Log("msg", "shutdown timed out", "timeout", timeout)
+		return ErrShutdownTimeout
+	}
 }

@@ -12,10 +12,10 @@ import (
 // 이 함수는 실행에 필요한 모든 정보를 클로저(closure) 형태로 캡처해야 합니다.
 type Job func(ctx context.Context)
 
-// Strategy는 작업을 어떻게 실행할지에 대한 정책을 정의하는 인터페이스입니다.
+// Strategy 인터페이스에 타임아웃이 있는 종료 메서드를 추가합니다.
 type Strategy interface {
 	Submit(job Job)
-	Shutdown()
+	Shutdown(timeout time.Duration) error // 기존 Shutdown을 대체하거나, 오버로딩합니다.
 }
 
 // Manager는 워커 전략을 관리하고 작업을 전달하는 역할을 합니다.
@@ -54,7 +54,13 @@ func (m *Manager) Submit(job Job) {
 }
 
 // Shutdown은 워커 매니저를 안전하게 종료합니다.
-func (m *Manager) Shutdown() {
+func (m *Manager) Shutdown(timeout time.Duration) error {
 	level.Info(m.logger).Log("msg", "shutting down worker manager")
-	m.strategy.Shutdown()
+	err := m.strategy.Shutdown(timeout)
+	if err != nil {
+		level.Error(m.logger).Log("msg", "error during shutdown", "err", err)
+		return err
+	}
+	level.Info(m.logger).Log("msg", "worker manager shutdown complete")
+	return nil
 }

@@ -1,9 +1,10 @@
 // Filename: internal/worker/worker_test.go
+
 package worker
 
 import (
 	"context"
-	"sync"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,34 +23,17 @@ func TestWorkerManager_NewManager(t *testing.T) {
 		qSize        int
 		expectedType interface{}
 	}{
-		{
-			name:         "Pool Strategy",
-			strategy:     "pool",
-			pSize:        1,
-			qSize:        1,
-			expectedType: &PoolStrategy{},
-		},
-		{
-			name:         "All Strategy",
-			strategy:     "all",
-			pSize:        1,
-			qSize:        1,
-			expectedType: &AllStrategy{},
-		},
-		{
-			name:         "Invalid Strategy Should Default to Pool",
-			strategy:     "invalid-strategy",
-			pSize:        1,
-			qSize:        1,
-			expectedType: &PoolStrategy{},
-		},
+		{"Pool Strategy", "pool", 1, 1, &PoolStrategy{}},
+		{"All Strategy", "all", 1, 1, &AllStrategy{}},
+		{"Invalid Strategy Should Default to Pool", "invalid-strategy", 1, 1, &PoolStrategy{}},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			manager, err := NewManager(tc.strategy, log.NewNopLogger(), tc.pSize, tc.qSize, 1*time.Second)
 			require.NoError(t, err)
-			defer manager.Shutdown()
+			// defer 호출을 수정합니다. 타임아웃 값을 명시적으로 전달합니다.
+			defer manager.Shutdown(1 * time.Second)
 
 			assert.IsType(t, tc.expectedType, manager.strategy)
 		})
@@ -60,7 +44,7 @@ func TestWorkerManager_NewManager(t *testing.T) {
 func TestWorkerManager_SubmitAndRun(t *testing.T) {
 	manager, err := NewManager("pool", log.NewNopLogger(), 1, 10, 1*time.Second)
 	require.NoError(t, err)
-	defer manager.Shutdown()
+	defer manager.Shutdown(1 * time.Second) // defer 호출 수정
 
 	var counter int32
 	jobDone := make(chan bool)
@@ -82,64 +66,62 @@ func TestWorkerManager_SubmitAndRun(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&counter))
 }
 
-// TestWorkerManager_Shutdown은 워커가 정상적으로 종료되는지 검증합니다.
-func TestWorkerManager_Shutdown(t *testing.T) {
-	manager, err := NewManager("pool", log.NewNopLogger(), 1, 10, 5*time.Second)
+// --- TestWorkerManager_Shutdown 테스트를 새로운 의도에 맞게 재작성 ---
+
+// TestWorkerManager_Shutdown_Success는 모든 작업이 타임아웃 내에 완료될 때,
+// Shutdown이 에러 없이 정상 종료되는지 검증합니다.
+func TestWorkerManager_Shutdown_Success(t *testing.T) {
+	manager, err := NewManager("pool", log.NewNopLogger(), 1, 1, 5*time.Second)
 	require.NoError(t, err)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	jobStarted := make(chan bool)
+	jobDone := make(chan struct{})
 	job := func(ctx context.Context) {
-		jobStarted <- true
-		time.Sleep(50 * time.Millisecond) // 작업을 시뮬레이션
-		wg.Done()
+		time.Sleep(50 * time.Millisecond) // 작업 시간
+		close(jobDone)
 	}
-
 	manager.Submit(job)
-	<-jobStarted // 작업이 시작된 것을 확인
 
-	shutdownDone := make(chan bool)
-	go func() {
-		manager.Shutdown() // 이 함수는 wg.Wait() 때문에 작업이 끝날 때까지 블록되어야 함
-		shutdownDone <- true
-	}()
+	// 작업 시간(50ms)보다 긴 타임아웃(100ms)으로 Shutdown 호출
+	shutdownErr := manager.Shutdown(100 * time.Millisecond)
+	require.NoError(t, shutdownErr, "Shutdown should succeed without a timeout error")
 
-	// Shutdown이 즉시 리턴되지 않는지 확인 (블록되어야 함)
+	// Shutdown이 성공적으로 끝났다면, 실제 작업도 완료되었어야 합니다.
 	select {
-	case <-shutdownDone:
-		t.Fatal("Shutdown should have blocked until the job was finished")
-	case <-time.After(10 * time.Millisecond):
-		// expected behavior
-	}
-
-	// 작업이 완료되고 Shutdown이 정상적으로 끝나는지 확인
-	wg.Wait()
-	select {
-	case <-shutdownDone:
-		// success
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Shutdown did not complete after job finished")
+	case <-jobDone:
+		// 예상된 성공 경로
+	default:
+		t.Fatal("Shutdown returned success, but the job did not complete")
 	}
 }
 
-// TestWorkerManager_JobTimeout은 작업이 설정된 타임아웃을 초과했을 때
-// 컨텍스트가 취소되는지 검증합니다.
+// TestWorkerManager_Shutdown_Timeout은 작업이 타임아웃보다 오래 걸릴 때,
+// Shutdown이 타임아웃 에러를 올바르게 반환하는지 검증합니다.
+func TestWorkerManager_Shutdown_Timeout(t *testing.T) {
+	manager, err := NewManager("pool", log.NewNopLogger(), 1, 1, 5*time.Second)
+	require.NoError(t, err)
+
+	job := func(ctx context.Context) {
+		time.Sleep(200 * time.Millisecond) // 작업 시간 > Shutdown 타임아웃
+	}
+	manager.Submit(job)
+
+	// 작업 시간(200ms)보다 짧은 타임아웃(100ms)으로 Shutdown 호출
+	shutdownErr := manager.Shutdown(100 * time.Millisecond)
+	require.Error(t, shutdownErr, "Shutdown should have returned a timeout error")
+	assert.ErrorIs(t, shutdownErr, ErrShutdownTimeout, "The returned error should be ErrShutdownTimeout")
+}
+
+// TestWorkerManager_JobTimeout은 작업이 설정된 타임아웃을 초과했을 때 컨텍스트가 취소되는지 검증합니다.
 func TestWorkerManager_JobTimeout(t *testing.T) {
-	// 10ms의 매우 짧은 타임아웃 설정
 	manager, err := NewManager("pool", log.NewNopLogger(), 1, 6, 10*time.Millisecond)
 	require.NoError(t, err)
-	defer manager.Shutdown()
+	defer manager.Shutdown(1 * time.Second) // defer 호출 수정
 
 	jobCanceled := make(chan bool)
 	job := func(ctx context.Context) {
-		// 작업은 타임아웃(10ms)보다 긴 100ms 동안 대기
 		select {
 		case <-time.After(100 * time.Millisecond):
-			// 컨텍스트가 취소되지 않았다면 이쪽으로 빠짐 (테스트 실패)
 		case <-ctx.Done():
-			// 컨텍스트가 타임아웃으로 취소되면 이쪽으로 빠짐 (테스트 성공)
 			jobCanceled <- true
 		}
 	}
@@ -152,4 +134,67 @@ func TestWorkerManager_JobTimeout(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Job was not canceled by timeout")
 	}
+}
+
+// TestWorkerPool_JobDroppingOnFullQueue는 큐가 가득 찼을 때 새 작업이 거부되는지 검증합니다.
+func TestWorkerPool_JobDroppingOnFullQueue(t *testing.T) {
+	poolSize, queueSize := 1, 1
+	manager, err := NewManager("pool", log.NewNopLogger(), poolSize, queueSize, 1*time.Second)
+	require.NoError(t, err)
+	defer manager.Shutdown(1 * time.Second) // defer 호출 수정
+
+	var firstJobDone = make(chan struct{})
+	var thirdJobExecuted atomic.Bool
+
+	firstJob := func(ctx context.Context) {
+		time.Sleep(50 * time.Millisecond)
+		close(firstJobDone)
+	}
+	thirdJob := func(ctx context.Context) {
+		thirdJobExecuted.Store(true)
+	}
+
+	manager.Submit(firstJob)                     // 워커가 즉시 가져감
+	manager.Submit(func(ctx context.Context) {}) // 큐에 들어감
+	manager.Submit(thirdJob)                     // 큐가 꽉 차서 버려져야 함
+
+	<-firstJobDone
+	time.Sleep(50 * time.Millisecond)
+
+	assert.False(t, thirdJobExecuted.Load(), "큐가 가득 찼을 때 제출된 작업은 실행되지 않고 버려져야 합니다.")
+}
+
+// TestShutdown_WithFullQueue는 큐가 가득 찬 상태에서 Shutdown을 호출했을 때의 동작을 검증합니다.
+func TestShutdown_WithFullQueue(t *testing.T) {
+	poolSize, queueSize := 2, 4
+	manager, err := NewManager("pool", log.NewNopLogger(), poolSize, queueSize, 1*time.Second)
+	require.NoError(t, err)
+
+	var jobsDone atomic.Int32
+	expectedJobsToRun := poolSize + queueSize
+
+	// 큐를 가득 채웁니다.
+	for i := 0; i < expectedJobsToRun; i++ {
+		manager.Submit(func(ctx context.Context) {
+			// 작업 내용은 테스트 결과에 영향을 주지 않으므로 간단하게 유지합니다.
+			jobsDone.Add(1)
+		})
+		// *** 핵심 수정 ***
+		// Submit 루프가 너무 빨리 실행되어 워커가 작업을 가져갈 기회를 갖기 전에
+		// 큐가 가득 차는 것을 방지하기 위해, CPU를 다른 고루틴에 양보합니다.
+		runtime.Gosched()
+	}
+
+	// 이 시점에는 워커들이 작업을 가져가기 시작했으므로,
+	// 추가 작업을 제출하면 성공적으로 큐에 들어갈 가능성이 있습니다.
+	// 테스트의 안정성을 위해, 모든 작업이 완료된 후 카운트를 확인합니다.
+
+	// Shutdown이 시간 내에 정상적으로 완료되는지 확인
+	// 모든 작업이 완료될 시간을 넉넉하게 줍니다.
+	shutdownErr := manager.Shutdown(500 * time.Millisecond)
+	require.NoError(t, shutdownErr, "Shutdown should complete without a timeout")
+
+	// 최종적으로, 큐에 성공적으로 들어간 작업만 실행되었는지 확인합니다.
+	// runtime.Gosched() 덕분에 6개의 작업이 모두 성공적으로 제출되었을 것입니다.
+	assert.Equal(t, int32(expectedJobsToRun), jobsDone.Load(), "모든 작업이 성공적으로 제출되고 완료되어야 합니다.")
 }

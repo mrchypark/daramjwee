@@ -862,3 +862,88 @@ func TestCache_PositiveGracePeriod_ServesStaleWhileRefreshing(t *testing.T) {
 	assert.Equal(t, "v2", hot.meta[key].ETag, "캐시의 ETag가 v2로 갱신되어야 합니다.")
 	assert.Equal(t, "fresh data", string(hot.data[key]), "캐시의 데이터가 'fresh data'로 갱신되어야 합니다.")
 }
+
+// --- 1. Grace Period (유예 기간) 엣지 케이스 테스트 ---
+
+// TestGracePeriod_RefreshFails는 유예 기간이 적용된 데이터 반환 후,
+// 백그라운드 갱신에 실패했을 때의 동작을 검증합니다.
+func TestGracePeriod_RefreshFails(t *testing.T) {
+	// 1. 유예 기간 활성화
+	cache, hot, _ := setupCache(t, WithGracePeriod(5*time.Minute))
+	ctx := context.Background()
+	key := "grace-refresh-fails-key"
+
+	// 2. 만료된(stale) 데이터를 캐시에 저장
+	oldContent := "stale data"
+	hot.setData(key, oldContent, &Metadata{
+		ETag:       "v1",
+		GraceUntil: time.Now().Add(-1 * time.Minute), // 1분 전에 만료됨
+	})
+
+	// 3. Fetcher는 에러를 반환하도록 설정
+	fetcherErr := errors.New("origin server is down")
+	fetcher := newDeterministicFetcher("", "") // 내용은 중요하지 않음
+	fetcher.err = fetcherErr
+
+	// 4. Get 호출 -> 만료된 데이터를 즉시 반환해야 함
+	stream, err := cache.Get(ctx, key, fetcher)
+	require.NoError(t, err)
+	readBytes, _ := io.ReadAll(stream)
+	stream.Close()
+	assert.Equal(t, oldContent, string(readBytes), "만료된 데이터가 즉시 반환되어야 합니다.")
+
+	// 5. 백그라운드 작업이 실패했는지 확인
+	// fetcher가 호출되고, 에러로 인해 캐시 쓰기는 발생하지 않아야 함
+	<-fetcher.fetchStarted
+	<-fetcher.fetchEnd
+
+	// Fetcher가 한 번 호출되었는지 확인
+	assert.Equal(t, 1, fetcher.getFetchCount())
+
+	// 캐시의 내용은 변경되지 않고 그대로 남아있어야 함
+	hot.mu.RLock()
+	defer hot.mu.RUnlock()
+	assert.Equal(t, "v1", hot.meta[key].ETag, "갱신 실패 후 ETag는 변경되지 않아야 합니다.")
+	assert.Equal(t, oldContent, string(hot.data[key]), "갱신 실패 후 데이터는 변경되지 않아야 합니다.")
+}
+
+// TestGracePeriod_RefreshTimeout은 백그라운드 갱신 작업이 타임아웃될 때의 동작을 검증합니다.
+func TestGracePeriod_RefreshTimeout(t *testing.T) {
+	// 1. 워커 타임아웃을 매우 짧게 설정하고, 유예 기간 활성화
+	cache, hot, _ := setupCache(t,
+		WithGracePeriod(5*time.Minute),
+		WithWorker("pool", 1, 1, 50*time.Millisecond), // 50ms의 짧은 타임아웃
+	)
+	ctx := context.Background()
+	key := "grace-refresh-timeout-key"
+
+	// 2. 만료된 데이터 저장
+	oldContent := "stale data"
+	hot.setData(key, oldContent, &Metadata{ETag: "v1"})
+
+	// 3. Fetcher는 타임아웃보다 더 긴 지연 시간을 갖도록 설정
+	fetcher := newDeterministicFetcher("new data", "v2")
+	fetcher.fetchDelay = 100 * time.Millisecond
+
+	// 4. Get 호출 -> 만료된 데이터 즉시 반환
+	stream, err := cache.Get(ctx, key, fetcher)
+	require.NoError(t, err)
+	stream.Close() // 스트림은 바로 닫음
+
+	// 5. 백그라운드 작업이 타임아웃으로 실패하는 것을 관찰
+	// newDeterministicFetcher는 내부적으로 context.Done()을 감지함
+	<-fetcher.fetchStarted
+	<-fetcher.fetchEnd
+
+	assert.Equal(t, 1, fetcher.getFetchCount(), "Fetcher는 호출되어야 합니다.")
+
+	// 약간의 시간을 주어 로그가 출력될 시간을 확보 (선택 사항)
+	time.Sleep(50 * time.Millisecond)
+
+	// 캐시 내용은 변경되지 않았어야 함
+	hot.mu.RLock()
+	defer hot.mu.RUnlock()
+	assert.Equal(t, "v1", hot.meta[key].ETag, "타임아웃 발생 시 캐시는 갱신되지 않아야 합니다.")
+}
+
+// --- 2. 자원 누수(Resource Leak) 테스트 ---
