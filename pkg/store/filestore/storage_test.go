@@ -434,3 +434,54 @@ func TestFileStore_MetadataFields(t *testing.T) {
 	assert.True(t, originalMeta.CachedAt.Equal(retrievedMetaFromStat.CachedAt), "GraceUntil from Stat should be equal")
 	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
+
+// TestFileStore_SetWithCopyAndTruncate_OrphanFileOnMetaWriteFail는
+// copy-and-truncate 전략 사용 시, 데이터 파일 복사 후 메타데이터 쓰기에 실패했을 때
+// 고아 데이터 파일(orphan data file)이 남는지 검증합니다. 이는 스토리지 누수의
+// 잠재적 원인이 될 수 있음을 보여줍니다.
+func TestFileStore_SetWithCopyAndTruncate_OrphanFileOnMetaWriteFail(t *testing.T) {
+	// 1. copy-and-truncate 옵션으로 FileStore 설정
+	fs := setupTestStoreWithOptions(t, WithCopyAndTruncate())
+	ctx := context.Background()
+	key := "orphan-file-test-key"
+	dataPath := fs.toDataPath(key)
+	metaPath := fs.toMetaPath(dataPath)
+
+	// 2. 메타 파일 쓰기 실패를 유도합니다.
+	//    메타 파일이 생성될 경로에 미리 디렉토리를 생성해두면,
+	//    내부적으로 writeMetaFile(os.WriteFile) 호출이 "is a directory" 에러를
+	//    반환하며 실패하게 됩니다.
+	err := os.Mkdir(metaPath, 0755)
+	require.NoError(t, err, "메타데이터 경로에 디렉토리 생성 실패")
+
+	// 3. Set 작업을 실행합니다.
+	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v-orphan"})
+	require.NoError(t, err)
+
+	_, err = writer.Write([]byte("this is orphan data"))
+	require.NoError(t, err)
+
+	// 4. Close를 호출합니다. 이 때 내부적으로 메타데이터 쓰기가 실패해야 합니다.
+	closeErr := writer.Close()
+	require.Error(t, closeErr, "메타데이터 쓰기 실패로 인해 Close()는 에러를 반환해야 합니다.")
+	// 에러 메시지에 "is a directory"가 포함되어 있는지 확인하여 의도된 실패인지 검증
+	assert.Contains(t, closeErr.Error(), "is a directory", "에러 메시지가 예상과 다릅니다.")
+
+	// 5. 최종 상태를 검증합니다. (가장 중요한 부분)
+
+	// 5.1. 데이터 파일은 성공적으로 복사되어 남아있어야 합니다 (고아 파일).
+	_, err = os.Stat(dataPath)
+	assert.NoError(t, err, "데이터 파일이 존재해야 합니다 (고아 파일).")
+
+	// 5.2. 임시 파일은 깨끗하게 삭제되었는지 확인합니다.
+	files, readDirErr := os.ReadDir(fs.baseDir)
+	require.NoError(t, readDirErr, "테스트 디렉토리를 읽는 데 실패했습니다.")
+
+	for _, file := range files {
+		// 우리가 생성한 메타 디렉토리를 제외하고, 다른 임시 파일은 없어야 합니다.
+		if file.Name() == filepath.Base(metaPath) {
+			continue
+		}
+		assert.False(t, strings.HasPrefix(file.Name(), "daramjwee-tmp-"), "임시 파일(%s)이 남아있습니다.", file.Name())
+	}
+}

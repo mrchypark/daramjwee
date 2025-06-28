@@ -479,3 +479,75 @@ func TestMemStore_MetadataFields(t *testing.T) {
 	assert.True(t, originalMeta.CachedAt.Equal(retrievedMetaFromStat.CachedAt), "GraceUntil from Stat should be equal")
 	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
+
+// --- 비정상 정책 테스트를 위한 Mock Policy ---
+type badPolicy struct {
+	// Evict는 항상 존재하지 않는 키를 반환합니다.
+	EvictFunc func() []string
+}
+
+func (p *badPolicy) Touch(key string)           {}
+func (p *badPolicy) Add(key string, size int64) {}
+func (p *badPolicy) Remove(key string)          {}
+func (p *badPolicy) Evict() []string {
+	if p.EvictFunc != nil {
+		return p.EvictFunc()
+	}
+	return []string{"non-existent-key-1", "non-existent-key-2"}
+}
+
+// TestMemStore_EvictionLoop_WithBadPolicy는 EvictionPolicy가
+// 유효하지 않은 (존재하지 않는) 키를 계속 반환할 때, MemStore가
+// 무한 루프나 교착 상태에 빠지지 않는지 검증합니다.
+func TestMemStore_EvictionLoop_WithBadPolicy(t *testing.T) {
+	ctx := context.Background()
+	// 1. 비정상적으로 동작하는 정책을 생성합니다.
+	policy := &badPolicy{}
+	// 용량이 100바이트인 저장소 생성
+	store := New(100, policy)
+
+	// 2. 용량을 초과하는 첫 번째 아이템을 추가합니다.
+	// 이 아이템 자체는 정상적으로 추가되어야 합니다.
+	writer1, err := store.SetWithWriter(ctx, "key1", &daramjwee.Metadata{})
+	require.NoError(t, err)
+	_, err = writer1.Write(make([]byte, 80)) // 80 bytes
+	require.NoError(t, err)
+	err = writer1.Close()
+	require.NoError(t, err)
+
+	// 3. 용량을 초과하게 만드는 두 번째 아이템을 추가합니다.
+	// 이로 인해 Close() 내부에서 축출 루프가 시작됩니다.
+	writer2, err := store.SetWithWriter(ctx, "key2", &daramjwee.Metadata{})
+	require.NoError(t, err)
+	_, err = writer2.Write(make([]byte, 80)) // 80 bytes. Total=160, Capacity=100
+	require.NoError(t, err)
+
+	// 4. Close() 호출이 무한 루프에 빠지지 않고 일정 시간 내에 완료되는지 검증합니다.
+	// 이 채널은 Close()가 성공적으로 리턴되면 닫힙니다.
+	closeDone := make(chan struct{})
+	go func() {
+		// badPolicy가 존재하지 않는 키만 반환하므로,
+		// 방어 코드가 없다면 이 호출은 영원히 끝나지 않을 것입니다.
+		err = writer2.Close()
+		require.NoError(t, err) // 에러 없이 정상 종료되어야 함
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		// 테스트 성공. Close()가 정상적으로 리턴되었습니다.
+	case <-time.After(500 * time.Millisecond):
+		// 500ms 동안 Close()가 리턴되지 않으면 테스트 실패.
+		t.Fatal("writer.Close() did not complete in time, potential infinite loop detected.")
+	}
+
+	// 5. 최종 상태 검증
+	// 축출이 일어나지 않았으므로, 현재 크기는 160이어야 합니다.
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	assert.Equal(t, int64(160), store.currentSize, "Eviction should have failed, so size should be the sum of both items.")
+	_, key1Exists := store.data["key1"]
+	_, key2Exists := store.data["key2"]
+	assert.True(t, key1Exists, "key1 should still exist")
+	assert.True(t, key2Exists, "key2 should still exist")
+}

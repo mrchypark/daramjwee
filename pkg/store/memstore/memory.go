@@ -151,19 +151,26 @@ func (w *memStoreWriter) Close() error {
 	if w.ms.capacity > 0 {
 		for w.ms.currentSize > w.ms.capacity {
 			keysToEvict := w.ms.policy.Evict()
-			// 더 이상 축출할 아이템이 없으면 무한 루프 방지를 위해 중단합니다.
 			if len(keysToEvict) == 0 {
+				// 더 이상 축출할 후보가 없으면 중단
 				break
 			}
+
+			var actuallyEvicted bool
 			for _, keyToEvict := range keysToEvict {
 				if entryToEvict, ok := w.ms.data[keyToEvict]; ok {
-					// 축출되는 아이템의 크기만큼 currentSize를 줄입니다.
 					w.ms.currentSize -= int64(len(entryToEvict.value))
 					delete(w.ms.data, keyToEvict)
+					actuallyEvicted = true
 				}
+			}
+
+			if !actuallyEvicted {
+				// 정책이 유효하지 않은 키만 계속 반환하는 경우,
+				// 무한 루프를 방지하기 위해 중단합니다.
+				break
 			}
 		}
 	}
-
 	return nil
 }

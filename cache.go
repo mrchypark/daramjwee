@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-kit/log"
@@ -12,6 +13,8 @@ import (
 	"github.com/mrchypark/daramjwee/internal/worker"
 	"golang.org/x/sync/errgroup"
 )
+
+var ErrCacheClosed = errors.New("daramjwee: cache is closed")
 
 // DaramjweeCache는 Cache 인터페이스의 구체적인 구현체입니다.
 type DaramjweeCache struct {
@@ -23,6 +26,7 @@ type DaramjweeCache struct {
 	ShutdownTimeout  time.Duration
 	PositiveFreshFor time.Duration
 	NegativeFreshFor time.Duration
+	isClosed         atomic.Bool
 }
 
 // 컴파일 타임에 DaramjweeCache가 Cache 인터페이스를 만족하는지 확인합니다.
@@ -30,6 +34,10 @@ var _ Cache = (*DaramjweeCache)(nil)
 
 // Get은 요청된 캐싱 전략에 따라 데이터를 가져옵니다.
 func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error) {
+	if c.isClosed.Load() {
+		return nil, ErrCacheClosed
+	}
+	// ... (이하 동일)
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
 
@@ -54,6 +62,143 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	// 3. Origin에서 Fetch
 	return c.handleMiss(ctx, key, fetcher)
 }
+
+// Set은 데이터를 캐시에 직접 쓰는 스트림을 반환합니다.
+func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
+	if c.isClosed.Load() {
+		return nil, ErrCacheClosed
+	}
+	// ... (이하 동일)
+	if c.HotStore == nil {
+		return nil, &ConfigError{"hotStore is not configured"}
+	}
+	ctx, cancel := c.newCtxWithTimeout(ctx)
+
+	if metadata == nil {
+		metadata = &Metadata{}
+	}
+	metadata.CachedAt = time.Now()
+
+	wc, err := c.setStreamToStore(ctx, c.HotStore, key, metadata)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return newCancelWriteCloser(wc, cancel), nil
+}
+
+// Delete는 모든 캐시 티어에서 객체를 동시에 삭제합니다.
+func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
+	if c.isClosed.Load() {
+		return ErrCacheClosed
+	}
+	// ... (이하 동일)
+	ctx, cancel := c.newCtxWithTimeout(ctx)
+	defer cancel()
+
+	g, gCtx := errgroup.WithContext(ctx)
+
+	if c.HotStore != nil {
+		g.Go(func() error {
+			err := c.deleteFromStore(gCtx, c.HotStore, key)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				level.Error(c.Logger).Log("msg", "failed to delete from hot store", "key", key, "err", err)
+				return err
+			}
+			return nil
+		})
+	}
+
+	g.Go(func() error {
+		err := c.deleteFromStore(gCtx, c.ColdStore, key)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			level.Error(c.Logger).Log("msg", "failed to delete from cold store", "key", key, "err", err)
+			return err
+		}
+		return nil
+	})
+
+	return g.Wait()
+}
+
+// ScheduleRefresh는 백그라운드 캐시 갱신 작업을 워커에게 제출합니다.
+func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetcher Fetcher) error {
+	// --- 여기에도 가드 코드 추가 ---
+	if c.isClosed.Load() {
+		return ErrCacheClosed
+	}
+	// -------------------------
+
+	if c.Worker == nil {
+		return errors.New("worker is not configured, cannot schedule refresh")
+	}
+
+	job := func(jobCtx context.Context) {
+		// ... (이하 동일)
+		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key)
+
+		var oldMetadata *Metadata
+		if meta, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil && meta != nil {
+			oldMetadata = meta
+		}
+
+		result, err := fetcher.Fetch(jobCtx, oldMetadata)
+		if err != nil {
+			if errors.Is(err, ErrNotModified) {
+				level.Debug(c.Logger).Log("msg", "background refresh: object not modified", "key", key)
+			} else {
+				level.Error(c.Logger).Log("msg", "background fetch failed", "key", key, "err", err)
+			}
+			return
+		}
+		defer result.Body.Close()
+
+		if result.Metadata == nil {
+			result.Metadata = &Metadata{}
+		}
+		result.Metadata.CachedAt = time.Now()
+
+		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.Metadata)
+		if err != nil {
+			level.Error(c.Logger).Log("msg", "failed to get cache writer for refresh", "key", key, "err", err)
+			return
+		}
+
+		_, copyErr := io.Copy(writer, result.Body)
+		closeErr := writer.Close()
+
+		if copyErr != nil || closeErr != nil {
+			level.Error(c.Logger).Log("msg", "failed to write to cache during refresh", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+		} else {
+			level.Info(c.Logger).Log("msg", "background refresh successful", "key", key)
+		}
+	}
+
+	c.Worker.Submit(job)
+	return nil
+}
+
+// Close는 워커를 안전하게 종료시킵니다.
+func (c *DaramjweeCache) Close() {
+	// --- 수정된 Close 메서드 ---
+	if c.isClosed.Swap(true) {
+		// 이미 닫혔으면 아무것도 하지 않음 (중복 호출 방지)
+		return
+	}
+	// -------------------------
+
+	if c.Worker != nil {
+		level.Info(c.Logger).Log("msg", "shutting down daramjwee cache")
+		if err := c.Worker.Shutdown(c.ShutdownTimeout); err != nil {
+			level.Error(c.Logger).Log("msg", "graceful shutdown failed", "err", err)
+		} else {
+			level.Info(c.Logger).Log("msg", "daramjwee cache shutdown complete")
+		}
+	}
+}
+
+// --- 이하 내부 헬퍼 메서드들은 변경 없음 ---
+// handleHotHit, handleColdHit, handleMiss, ...
 
 // handleHotHit는 Hot 캐시에서 객체를 찾았을 때의 로직을 처리합니다.
 func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher Fetcher, hotStream io.ReadCloser, meta *Metadata) (io.ReadCloser, error) {
@@ -163,120 +308,6 @@ func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (i
 	}
 	return nil, ErrNotFound
 }
-
-// Set은 데이터를 캐시에 직접 쓰는 스트림을 반환합니다.
-func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
-	if c.HotStore == nil {
-		return nil, &ConfigError{"hotStore is not configured"}
-	}
-	ctx, cancel := c.newCtxWithTimeout(ctx)
-
-	if metadata == nil {
-		metadata = &Metadata{}
-	}
-	metadata.CachedAt = time.Now()
-
-	wc, err := c.setStreamToStore(ctx, c.HotStore, key, metadata)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	return newCancelWriteCloser(wc, cancel), nil
-}
-
-// Delete는 모든 캐시 티어에서 객체를 동시에 삭제합니다.
-func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
-	ctx, cancel := c.newCtxWithTimeout(ctx)
-	defer cancel()
-
-	g, gCtx := errgroup.WithContext(ctx)
-
-	if c.HotStore != nil {
-		g.Go(func() error {
-			err := c.deleteFromStore(gCtx, c.HotStore, key)
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				level.Error(c.Logger).Log("msg", "failed to delete from hot store", "key", key, "err", err)
-				return err
-			}
-			return nil
-		})
-	}
-
-	g.Go(func() error {
-		err := c.deleteFromStore(gCtx, c.ColdStore, key)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			level.Error(c.Logger).Log("msg", "failed to delete from cold store", "key", key, "err", err)
-			return err
-		}
-		return nil
-	})
-
-	return g.Wait()
-}
-
-// ScheduleRefresh는 백그라운드 캐시 갱신 작업을 워커에게 제출합니다.
-func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetcher Fetcher) error {
-	if c.Worker == nil {
-		return errors.New("worker is not configured, cannot schedule refresh")
-	}
-
-	job := func(jobCtx context.Context) {
-		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key)
-
-		var oldMetadata *Metadata
-		if meta, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil && meta != nil {
-			oldMetadata = meta
-		}
-
-		result, err := fetcher.Fetch(jobCtx, oldMetadata)
-		if err != nil {
-			if errors.Is(err, ErrNotModified) {
-				level.Debug(c.Logger).Log("msg", "background refresh: object not modified", "key", key)
-			} else {
-				level.Error(c.Logger).Log("msg", "background fetch failed", "key", key, "err", err)
-			}
-			return
-		}
-		defer result.Body.Close()
-
-		if result.Metadata == nil {
-			result.Metadata = &Metadata{}
-		}
-		result.Metadata.CachedAt = time.Now()
-
-		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.Metadata)
-		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to get cache writer for refresh", "key", key, "err", err)
-			return
-		}
-
-		_, copyErr := io.Copy(writer, result.Body)
-		closeErr := writer.Close()
-
-		if copyErr != nil || closeErr != nil {
-			level.Error(c.Logger).Log("msg", "failed to write to cache during refresh", "key", key, "copyErr", copyErr, "closeErr", closeErr)
-		} else {
-			level.Info(c.Logger).Log("msg", "background refresh successful", "key", key)
-		}
-	}
-
-	c.Worker.Submit(job)
-	return nil
-}
-
-// Close는 워커를 안전하게 종료시킵니다.
-func (c *DaramjweeCache) Close() {
-	if c.Worker != nil {
-		level.Info(c.Logger).Log("msg", "shutting down daramjwee cache")
-		if err := c.Worker.Shutdown(c.ShutdownTimeout); err != nil {
-			level.Error(c.Logger).Log("msg", "graceful shutdown failed", "err", err)
-		} else {
-			level.Info(c.Logger).Log("msg", "daramjwee cache shutdown complete")
-		}
-	}
-}
-
-// --- 내부 헬퍼 메서드 및 타입 ---
 
 // newCtxWithTimeout는 컨텍스트에 데드라인이 없으면 기본 타임아웃을 적용합니다.
 func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {

@@ -3,6 +3,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"runtime"
 	"sync/atomic"
@@ -206,4 +207,51 @@ func TestShutdown_WithFullQueue(t *testing.T) {
 	// 최종적으로, 큐에 성공적으로 들어간 작업만 실행되었는지 확인합니다.
 	// runtime.Gosched() 덕분에 6개의 작업이 모두 성공적으로 제출되었을 것입니다.
 	assert.Equal(t, int32(expectedJobsToRun), jobsDone.Load(), "모든 작업이 성공적으로 제출되고 완료되어야 합니다.")
+}
+
+// TestPoolStrategy_DropsJob_WhenQueueIsFull_And_LogsIt는 워커 풀의 큐가 가득 찼을 때
+// 새로운 작업이 버려지고, 이 사실이 경고 로그로 기록되는지를 검증합니다.
+func TestPoolStrategy_DropsJob_WhenQueueIsFull_And_LogsIt(t *testing.T) {
+	// 1. 로그 출력을 캡처하기 위한 설정
+	var logBuf bytes.Buffer
+	// 테스트용 로거는 bytes.Buffer에 로그를 씁니다.
+	logger := log.NewLogfmtLogger(&logBuf)
+
+	// 2. 큐 크기가 1인 워커 풀 생성
+	// 워커 1개, 큐 크기 1로 설정하여 시나리오를 단순화합니다.
+	poolSize, queueSize := 1, 1
+	strategy := NewPoolStrategy(logger, poolSize, queueSize, 1*time.Second)
+	defer strategy.Shutdown(1 * time.Second) // 테스트 종료 시 자원 정리
+
+	// 3. 작업 유실 시나리오 구성
+	firstJobStarted := make(chan struct{})
+	firstJobBlocker := make(chan struct{}) // 첫 번째 작업을 계속 점유 상태로 둘 블로커
+
+	// 첫 번째 작업: 시작을 알리고, 블로커가 닫힐 때까지 대기
+	firstJob := func(ctx context.Context) {
+		close(firstJobStarted)
+		<-firstJobBlocker
+	}
+
+	// 두 번째 및 세 번째 작업은 내용이 중요하지 않음
+	secondJob := func(ctx context.Context) {}
+	thirdJob := func(ctx context.Context) {}
+
+	// 4. 작업 제출
+	strategy.Submit(firstJob) // -> 워커가 즉시 가져가서 실행 (블로킹 상태)
+	<-firstJobStarted         // 첫 번째 작업이 실행될 때까지 대기
+
+	strategy.Submit(secondJob) // -> 큐(크기 1)에 들어감
+
+	strategy.Submit(thirdJob) // -> 큐가 꽉 찼으므로 이 작업은 버려져야 함 (로그 발생)
+
+	// 5. 로그 내용 검증
+	// 버려진 작업에 대한 로그가 기록될 시간을 잠시 줍니다.
+	time.Sleep(50 * time.Millisecond)
+
+	expectedLogMsg := "worker queue is full, dropping job"
+	assert.Contains(t, logBuf.String(), expectedLogMsg, "작업 유실 시 경고 로그가 기록되어야 합니다.")
+
+	// 6. 테스트 정리
+	close(firstJobBlocker) // 블로킹을 해제하여 워커가 정상 종료되도록 함
 }

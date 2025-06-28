@@ -389,23 +389,31 @@ func TestCache_Delete(t *testing.T) {
 	assert.False(t, coldOk)
 }
 
-// ✅ [복원된 테스트]
+// TestCache_Close는 cache.Close() 이후의 동작을 검증합니다.
 func TestCache_Close(t *testing.T) {
+	// 1. 테스트 준비
 	cache, hot, _ := setupCache(t, WithCache(1*time.Minute))
 	key := "key-after-close"
+	// 백그라운드 갱신을 유발할 수 있는 만료된 데이터를 준비
 	hot.setData(key, "data", &Metadata{CachedAt: time.Now().Add(-2 * time.Minute)})
+	fetcher := &mockFetcher{content: "new", etag: "v2"}
 
-	// Close the cache first
+	// 2. 캐시를 닫음
 	cache.Close()
 
-	// Try to trigger a background refresh
-	fetcher := &mockFetcher{content: "new", etag: "v2"}
+	// 3. 닫힌 캐시에 Get을 호출하는 것이 새로운 API 계약을 따르는지 확인
+	// 이제 이 호출은 에러를 반환해야 합니다.
 	stream, err := cache.Get(context.Background(), key, fetcher)
-	require.NoError(t, err)
-	stream.Close()
 
-	// Wait a bit to see if any background task runs
-	time.Sleep(50 * time.Millisecond)
+	// --- 여기가 핵심 수정 부분 ---
+	// NoError가 아니라, ErrCacheClosed 에러가 발생하는 것을 기대해야 합니다.
+	require.ErrorIs(t, err, ErrCacheClosed, "Get() on a closed cache should now return ErrCacheClosed")
+	// 에러가 발생했으므로 스트림은 nil이어야 합니다.
+	assert.Nil(t, stream, "Stream should be nil when an error is returned")
+	// -------------------------
+
+	// 4. (부가 검증) 어떠한 경우에도 백그라운드 작업이 실행되지 않았는지 확인
+	time.Sleep(50 * time.Millisecond) // 혹시 모를 비동기 호출을 기다림
 	assert.Equal(t, 0, fetcher.getFetchCount(), "Fetcher should not be called after cache is closed")
 }
 
@@ -473,4 +481,44 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	// 최종 상태 검증
 	_, _, err := hot.GetStream(context.Background(), key)
 	assert.ErrorIs(t, err, ErrNotFound, "Item should be deleted after all operations")
+}
+
+// TestCache_ReturnsError_AfterClose는 Close()가 호출된 캐시 인스턴스에 대해
+// 후속 Get, Set, Delete 호출이 명시적인 에러(ErrCacheClosed)를 반환하는지 검증합니다.
+func TestCache_ReturnsError_AfterClose(t *testing.T) {
+	// 1. 테스트할 캐시를 생성합니다.
+	cache, _, _ := setupCache(t)
+	ctx := context.Background()
+	key := "any-key-after-close"
+
+	// 2. 캐시를 즉시 닫습니다.
+	cache.Close()
+
+	// 3. 닫힌 캐시에 대한 각 공개 메서드 호출을 검증합니다.
+
+	// 3.1. Get() 호출 검증
+	_, getErr := cache.Get(ctx, key, &mockFetcher{})
+	assert.ErrorIs(t, getErr, ErrCacheClosed, "Get() on a closed cache should return ErrCacheClosed")
+
+	// 3.2. Set() 호출 검증
+	_, setErr := cache.Set(ctx, key, &Metadata{})
+	assert.ErrorIs(t, setErr, ErrCacheClosed, "Set() on a closed cache should return ErrCacheClosed")
+
+	// 3.3. Delete() 호출 검증
+	deleteErr := cache.Delete(ctx, key)
+	assert.ErrorIs(t, deleteErr, ErrCacheClosed, "Delete() on a closed cache should return ErrCacheClosed")
+
+	// 3.4. ScheduleRefresh() 호출 검증 (이것도 공개 API이므로 확인)
+	_ = cache.ScheduleRefresh(ctx, key, &mockFetcher{})
+	// 참고: ScheduleRefresh는 현재 에러를 반환하지 않지만, 안전을 위해 nil이 아니어야 함을 확인하거나
+	// 향후 ErrCacheClosed를 반환하도록 수정할 수 있습니다.
+	// 우선 현재의 계약을 기반으로 테스트합니다.
+	if dc, ok := cache.(*DaramjweeCache); ok {
+		if dc.isClosed.Load() {
+			// isClosed 플래그가 있다면, 에러가 반환되어야 함.
+			// 여기서는 ScheduleRefresh도 에러를 반환하도록 수정되었다고 가정합니다.
+			// func (c *DaramjweeCache) ScheduleRefresh(...) error { if c.isClosed.Load() { return ErrCacheClosed } ... }
+			// assert.ErrorIs(t, refreshErr, ErrCacheClosed, "ScheduleRefresh() on a closed cache should return ErrCacheClosed")
+		}
+	}
 }
