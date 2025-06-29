@@ -118,11 +118,12 @@ var fakeOrigin = map[string]struct {
 }
 
 func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-	fmt.Printf("[Origin] Fetching key: %s (Old ETag: %s)\n", f.key, "none")
-	if oldMetadata != nil {
-		fmt.Printf("[Origin] Fetching key: %s (Old ETag: %s)\n", f.key, oldMetadata.ETag)
-	}
-
+    // oldMetadata의 존재 여부를 먼저 확인합니다.
+    oldETagVal := "none"
+    if oldMetadata != nil {
+        oldETagVal = oldMetadata.ETag
+    }
+    fmt.Printf("[Origin] Fetching key: %s (Old ETag: %s)\n", f.key, oldETagVal)
 
 	// In a real application, this would be a DB query or an API call.
 	obj, ok := fakeOrigin[f.key]
@@ -131,6 +132,7 @@ func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 	}
 
 	// If the ETag matches, notify that the content has not been modified.
+    // oldMetadata nil 체크는 이미 위에서 수행되었거나, 이 로직에서 다시 확인됩니다.
 	if oldMetadata != nil && oldMetadata.ETag == obj.etag {
 		return nil, daramjwee.ErrNotModified
 	}
