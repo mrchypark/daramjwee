@@ -68,7 +68,6 @@ flowchart TD
     J -- Not Modified (304) --> O{Re-fetch from Hot Tier};
     O -- Success --> D;
     O -- Failure (e.g., evicted) --> N;
-```
 
 1.  **Check Hot Tier:** Looks for the object in the Hot Tier.
       * **Hit (Fresh):** Immediately returns the object stream to the client.
@@ -195,7 +194,6 @@ func main() {
 	fmt.Println("Server is running on :8080")
 	http.ListenAndServe(":8080", nil)
 }
-```
 
 goos: linux
 goarch: amd64
@@ -238,11 +236,7 @@ cpu: AMD EPYC 7763 64-Core Processor
 BenchmarkMemStore_ConcurrentReadWrite-4   	 6852753	       181.7 ns/op	      64 B/op	       2 allocs/op
 PASS
 ok  	github.com/mrchypark/daramjwee/pkg/store/memstore	1.429s
-```
 
-## Benchmarks
-
-```
 goos: linux
 goarch: amd64
 pkg: github.com/mrchypark/daramjwee
@@ -284,4 +278,49 @@ cpu: AMD EPYC 7763 64-Core Processor
 BenchmarkMemStore_ConcurrentReadWrite-4   	 6669056	       178.3 ns/op	      64 B/op	       2 allocs/op
 PASS
 ok  	github.com/mrchypark/daramjwee/pkg/store/memstore	1.378s
+
+## Benchmarks
+
+```
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkCache_Get_HotHit-4    	  504807	      2131 ns/op	    1475 B/op	      26 allocs/op
+BenchmarkCache_Get_ColdHit-4   	  501777	      2112 ns/op	    1476 B/op	      26 allocs/op
+BenchmarkCache_Get_Miss-4      	  311844	      3993 ns/op	    2139 B/op	      37 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee	3.785s
+?   	github.com/mrchypark/daramjwee/cmd/daramjwee	[no test files]
+?   	github.com/mrchypark/daramjwee/examples	[no test files]
+PASS
+ok  	github.com/mrchypark/daramjwee/internal/worker	0.275s
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/policy
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkLRU_Churn-4      	 6978236	       158.4 ns/op	      57 B/op	       2 allocs/op
+BenchmarkS3FIFO_Churn-4   	 6714217	       174.1 ns/op	      64 B/op	       3 allocs/op
+BenchmarkSieve_Churn-4    	 6859024	       176.5 ns/op	      61 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/policy	4.039s
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/adapter	0.107s
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/store/filestore
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkFileStore_Set_RenameStrategy-4   	   14076	     84456 ns/op	    1209 B/op	      22 allocs/op
+BenchmarkFileStore_Set_CopyStrategy-4     	   10000	    108032 ns/op	    1048 B/op	      26 allocs/op
+BenchmarkFileStore_Get_RenameStrategy-4   	  112060	     10312 ns/op	     549 B/op	      16 allocs/op
+BenchmarkFileStore_Get_CopyStrategy-4     	  113214	     10426 ns/op	     549 B/op	      16 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/filestore	7.202s
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/store/memstore
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkMemStore_ConcurrentReadWrite-4   	 6803426	       181.8 ns/op	      64 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/memstore	1.422s
 ```
