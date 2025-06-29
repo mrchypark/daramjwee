@@ -15,3 +15,7 @@ coverage-text:
 	@go test -coverprofile=coverage.out -covermode=atomic ./...
 	@echo "\nFunction coverage:"
 	@go tool cover -func=coverage.out
+
+bench:
+	@echo "Running benchmarks..."
+	@go test -bench=. -benchmem ./... > bench_results.txt

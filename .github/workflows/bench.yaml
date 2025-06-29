@@ -1,0 +1,17 @@
+name: Run Benchmarks and Update README
+
+on:  push:    branches:      - main  workflow_dispatch:
+
+jobs:  benchmark:    runs-on: ubuntu-latest
+
+    steps:    - name: Checkout code      uses: actions/checkout@v3
+
+    - name: Set up Go      uses: actions/setup-go@v3      with:        go-version: 1.20
+
+    - name: Run benchmarks      run: make bench
+
+    - name: Read benchmark results      id: bench_results      run: echo "::set-output name=results::$(cat bench_results.txt)"
+
+    - name: Update README.md      run: |        # Remove existing benchmark section if it exists        sed -i '/^## Benchmarks$/,/```$/d' README.md                # Append new benchmark results        echo -e "\n## Benchmarks\n" >> README.md        echo '```' >> README.md        echo "${{ steps.bench_results.outputs.results }}" >> README.md        echo '```' >> README.md
+
+    - name: Commit and push changes      run: |        git config user.name github-actions        git config user.email github-actions@github.com        git add README.md        git commit -m "Update benchmark results in README.md" || echo "No changes to commit"        git push || echo "No changes to push"
