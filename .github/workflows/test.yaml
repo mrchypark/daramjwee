@@ -38,7 +38,11 @@ jobs:
 
     - name: Read benchmark results
       id: bench_results
-      run: echo "results=$(cat bench_results.txt)" >> $GITHUB_OUTPUT
+      run: |
+        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+        echo "results<<$EOF" >> $GITHUB_OUTPUT
+        cat bench_results.txt >> $GITHUB_OUTPUT
+        echo "$EOF" >> $GITHUB_OUTPUT
 
     - name: Update README.md
       run: |
