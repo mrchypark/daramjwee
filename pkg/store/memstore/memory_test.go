@@ -4,6 +4,7 @@ package memstore
 import (
 	"context"
 	"io"
+	"math/rand"
 	"sync"
 	"testing"
 	"time"
@@ -550,4 +551,48 @@ func TestMemStore_EvictionLoop_WithBadPolicy(t *testing.T) {
 	_, key2Exists := store.data["key2"]
 	assert.True(t, key1Exists, "key1 should still exist")
 	assert.True(t, key2Exists, "key2 should still exist")
+}
+
+// BenchmarkMemStore_ConcurrentReadWrite는 높은 동시성 환경에서 MemStore의
+// 읽기/쓰기 처리 성능을 측정합니다. 이 벤치마크는 락 경합(lock contention)이
+// 성능에 미치는 영향을 파악하는 데 도움이 됩니다.
+func BenchmarkMemStore_ConcurrentReadWrite(b *testing.B) {
+	// 1. 벤치마크를 위한 저장소 설정
+	store := New(0, nil) // 용량 제한 없음
+	ctx := context.Background()
+	key := "benchmark-key"
+	data := []byte("benchmark-data")
+
+	// 벤치마크 시작 전 초기 데이터 하나를 써둡니다.
+	writer, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{})
+	writer.Write(data)
+	writer.Close()
+
+	// 2. 병렬로 벤치마크 실행
+	// b.N은 벤치마크 프레임워크에 의해 결정되는 반복 횟수입니다.
+	b.RunParallel(func(pb *testing.PB) {
+		// 각 병렬 고루틴은 자신만의 난수 생성기를 가집니다.
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+		// pb.Next()가 true인 동안 루프를 계속 실행합니다.
+		for pb.Next() {
+			// 50% 확률로 읽기 또는 쓰기 연산을 수행합니다.
+			if r.Intn(2) == 0 {
+				// 읽기 연산
+				reader, _, err := store.GetStream(ctx, key)
+				if err == nil {
+					// 실제 읽는 동작을 시뮬레이션
+					io.Copy(io.Discard, reader)
+					reader.Close()
+				}
+			} else {
+				// 쓰기 연산
+				writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{})
+				if err == nil {
+					writer.Write(data)
+					writer.Close()
+				}
+			}
+		}
+	})
 }

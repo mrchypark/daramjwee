@@ -11,7 +11,6 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee/internal/worker"
-	"golang.org/x/sync/errgroup"
 )
 
 var ErrCacheClosed = errors.New("daramjwee: cache is closed")
@@ -87,38 +86,36 @@ func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata
 	return newCancelWriteCloser(wc, cancel), nil
 }
 
-// Delete는 모든 캐시 티어에서 객체를 동시에 삭제합니다.
+// Delete는 모든 캐시 티어에서 객체를 순차적으로 삭제하여 교착 상태를 방지합니다.
 func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	if c.isClosed.Load() {
 		return ErrCacheClosed
 	}
-	// ... (이하 동일)
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
 
-	g, gCtx := errgroup.WithContext(ctx)
+	// --- errgroup을 사용한 병렬 삭제를 제거 ---
+	var firstErr error
 
+	// 1. 항상 Hot Store를 먼저 삭제합니다.
 	if c.HotStore != nil {
-		g.Go(func() error {
-			err := c.deleteFromStore(gCtx, c.HotStore, key)
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				level.Error(c.Logger).Log("msg", "failed to delete from hot store", "key", key, "err", err)
-				return err
+		if err := c.deleteFromStore(ctx, c.HotStore, key); err != nil && !errors.Is(err, ErrNotFound) {
+			level.Error(c.Logger).Log("msg", "failed to delete from hot store", "key", key, "err", err)
+			if firstErr == nil {
+				firstErr = err
 			}
-			return nil
-		})
+		}
 	}
 
-	g.Go(func() error {
-		err := c.deleteFromStore(gCtx, c.ColdStore, key)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			level.Error(c.Logger).Log("msg", "failed to delete from cold store", "key", key, "err", err)
-			return err
+	// 2. 그 다음 Cold Store를 삭제합니다.
+	if err := c.deleteFromStore(ctx, c.ColdStore, key); err != nil && !errors.Is(err, ErrNotFound) {
+		level.Error(c.Logger).Log("msg", "failed to delete from cold store", "key", key, "err", err)
+		if firstErr == nil {
+			firstErr = err
 		}
-		return nil
-	})
+	}
 
-	return g.Wait()
+	return firstErr
 }
 
 // ScheduleRefresh는 백그라운드 캐시 갱신 작업을 워커에게 제출합니다.

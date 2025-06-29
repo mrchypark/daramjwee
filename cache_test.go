@@ -522,3 +522,46 @@ func TestCache_ReturnsError_AfterClose(t *testing.T) {
 		}
 	}
 }
+
+// mockCloser는 Close 호출 여부를 추적하고, 설정에 따라 에러를 반환하는 Mock 구현체입니다.
+type mockCloser struct {
+	isClosed    bool
+	shouldError bool
+	closeErr    error
+}
+
+func (mc *mockCloser) Close() error {
+	mc.isClosed = true
+	if mc.shouldError {
+		if mc.closeErr != nil {
+			return mc.closeErr
+		}
+		return errors.New("mock closer failed as intended")
+	}
+	return nil
+}
+
+// TestMultiCloser_ClosesAll_EvenIfOneFails는 multiCloser에 포함된 Closer 중
+// 하나가 에러를 반환하더라도, 나머지 모든 Closer들의 Close가 호출되는 것을 보장하는지 검증합니다.
+func TestMultiCloser_ClosesAll_EvenIfOneFails(t *testing.T) {
+	// 1. 3개의 mockCloser를 준비합니다.
+	closer1 := &mockCloser{}
+	// 두 번째 closer는 에러를 반환하도록 설정합니다.
+	closer2 := &mockCloser{shouldError: true}
+	closer3 := &mockCloser{}
+
+	// 2. 이들을 multiCloser로 묶습니다.
+	multi := newMultiCloser(nil, closer1, closer2, closer3)
+
+	// 3. multiCloser의 Close를 호출합니다.
+	err := multi.Close()
+
+	// 4. 결과 검증
+	// 4.1. 에러가 정상적으로 반환되었는지 확인합니다.
+	require.Error(t, err, "multiCloser should return the error from the failing closer")
+
+	// 4.2. (가장 중요) 에러 발생 여부와 상관없이 모든 Closer가 호출되었는지 확인합니다.
+	assert.True(t, closer1.isClosed, "The first closer should have been closed")
+	assert.True(t, closer2.isClosed, "The failing closer should have been attempted to close")
+	assert.True(t, closer3.isClosed, "The third closer should have been closed despite the previous error")
+}

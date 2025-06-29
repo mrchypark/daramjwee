@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -233,4 +234,76 @@ func TestObjstoreAdapter_MetadataFields(t *testing.T) {
 	assert.Equal(t, originalMeta.ETag, retrievedMetaFromStat.ETag)
 	assert.True(t, originalMeta.CachedAt.Equal(retrievedMetaFromStat.CachedAt), "GraceUntil from Stat should be equal")
 	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
+}
+
+// TestObjstoreAdapter_GoroutineLeakOnContextCancel는 스트리밍 업로드 중 컨텍스트가
+// 취소되었을 때, 백그라운드 업로드 고루틴이 정상적으로 종료되어 누수되지 않는지 검증합니다.
+func TestObjstoreAdapter_GoroutineLeakOnContextCancel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping leak test in short mode")
+	}
+
+	// 1. 테스트 시작 전의 고루틴 수를 기록합니다.
+	initialGoroutines := runtime.NumGoroutine()
+
+	// 2. 업로드가 시작되었음을 알릴 채널만 준비합니다. (종료 채널은 제거)
+	uploadStarted := make(chan struct{})
+	mockBucket := &errorBucketWithFunc{
+		uploadFunc: func(ctx context.Context, name string, r io.Reader) error {
+			close(uploadStarted) // 업로드 시작 신호
+			// 컨텍스트가 취소될 때까지 대기
+			<-ctx.Done()
+			// 컨텍스트 에러를 반환하여, writer.Close()가 이 에러를 받을 수 있도록 함
+			return ctx.Err()
+		},
+	}
+	// errorBucket의 Upload 메서드를 커스텀 함수로 교체합니다.
+	originalBucket := testStore.(*objstoreAdapter).bucket
+	testStore.(*objstoreAdapter).bucket = mockBucket
+	defer func() {
+		testStore.(*objstoreAdapter).bucket = originalBucket
+	}()
+
+	// 3. 취소 가능한 컨텍스트를 생성합니다.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// 4. SetWithWriter를 호출하여 백그라운드 업로드 고루틴을 실행시킵니다.
+	writer, err := testStore.SetWithWriter(ctx, "leak-test-key", &daramjwee.Metadata{})
+	require.NoError(t, err)
+	require.NotNil(t, writer)
+
+	// 업로드 고루틴이 실행될 때까지 대기
+	<-uploadStarted
+
+	// 5. 컨텍스트를 즉시 취소하여 고루틴 종료를 트리거합니다.
+	cancel()
+
+	// 6. writer를 닫습니다. 이 함수는 내부적으로 wg.Wait()를 통해
+	//    백그라운드 고루틴이 종료될 때까지 안전하게 기다립니다.
+	//    백그라운드 고루틴은 ctx.Err()를 반환하므로, Close()는 그 에러를 최종적으로 반환합니다.
+	closeErr := writer.Close()
+	assert.ErrorIs(t, closeErr, context.Canceled, "writer.Close() should propagate the context cancellation error")
+
+	// 7. 테스트 종료 후, 고루틴 수가 테스트 시작 전과 비슷한 수준인지 확인하여 누수 여부를 최종 검증합니다.
+	//    GC와 스케줄러가 안정화될 시간을 잠시 줍니다.
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
+	finalGoroutines := runtime.NumGoroutine()
+
+	assert.InDelta(t, initialGoroutines, finalGoroutines, 2, "Number of goroutines should not significantly increase after test")
+}
+
+// errorBucket을 수정하여 커스텀 Upload 함수를 주입할 수 있도록 합니다.
+type errorBucketWithFunc struct {
+	objstore.Bucket
+	uploadFunc func(ctx context.Context, name string, r io.Reader) error
+}
+
+func (b *errorBucketWithFunc) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+	if b.uploadFunc != nil {
+		return b.uploadFunc(ctx, name, r)
+	}
+	// 기본 동작: 즉시 에러 반환
+	_, _ = io.ReadAll(r)
+	return errors.New("simulated upload error")
 }
