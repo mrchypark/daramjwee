@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 (Unreleased)
+## v0.2.0
 
 ### 🚀 Features & Enhancements
 
