@@ -232,12 +232,19 @@ func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher F
 func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStream io.ReadCloser, coldMeta *Metadata) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
 
-	// Hot 캐시로 승격 시, CachedAt을 현재 시간으로 설정
+	// ✅ [핵심 수정] Hot 캐시로 승격할 메타데이터의 복사본을 만듭니다.
+	// 이렇게 하면 여러 고루틴이 동시에 Cold Hit을 처리하더라도
+	// 원본 coldMeta 객체를 직접 수정하지 않아 데이터 경쟁을 방지할 수 있습니다.
+	metaToPromote := &Metadata{}
 	if coldMeta != nil {
-		coldMeta.CachedAt = time.Now()
+		// 기존 메타데이터의 값을 복사합니다.
+		*metaToPromote = *coldMeta
 	}
+	// 복사본의 CachedAt 필드만 현재 시간으로 갱신합니다.
+	metaToPromote.CachedAt = time.Now()
 
-	return c.promoteAndTeeStream(ctx, key, coldMeta, coldStream)
+	// 수정된 복사본을 승격 로직으로 전달합니다.
+	return c.promoteAndTeeStream(ctx, key, metaToPromote, coldStream)
 }
 
 // handleMiss는 Hot/Cold 캐시에서 모두 객체를 찾지 못했을 때의 로직을 처리합니다.
