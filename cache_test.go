@@ -55,6 +55,7 @@ type mockStore struct {
 	meta           map[string]*Metadata
 	err            error
 	writeCompleted chan string
+	forceSetError  bool // 이 필드를 추가합니다.
 }
 
 func newMockStore() *mockStore {
@@ -86,9 +87,17 @@ func (s *mockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 }
 
 func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
+	// 에러를 강제하는 경우, 에러만 반환합니다.
+	if s.forceSetError {
+		return nil, errors.New("simulated set error")
+	}
+
+	// 기존의 일반적인 에러 처리 로직은 그대로 둡니다.
 	if s.err != nil {
 		return nil, s.err
 	}
+
+	// 정상적인 쓰기 로직 (기존 테스트들이 의존하는 부분)
 	var buf bytes.Buffer
 	return &mockWriteCloser{
 		onClose: func() error {
@@ -98,6 +107,8 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Met
 			if !metadata.IsNegative {
 				s.data[key] = buf.Bytes()
 			}
+			// ✅ 이 부분이 중요합니다.
+			// 성공적인 쓰기에서는 반드시 writeCompleted 채널에 신호를 보내야 합니다.
 			s.writeCompleted <- key
 			return nil
 		},
@@ -564,4 +575,37 @@ func TestMultiCloser_ClosesAll_EvenIfOneFails(t *testing.T) {
 	assert.True(t, closer1.isClosed, "The first closer should have been closed")
 	assert.True(t, closer2.isClosed, "The failing closer should have been attempted to close")
 	assert.True(t, closer3.isClosed, "The third closer should have been closed despite the previous error")
+}
+
+// TestCache_Get_ColdHit_PromotionFails는 콜드 캐시 히트 후
+// Hot Tier로의 승격(promotion)이 실패하는 엣지 케이스를 검증합니다.
+func TestCache_Get_ColdHit_PromotionFails(t *testing.T) {
+	// 1. 테스트 환경 설정
+	hot := newMockStore()
+	hot.forceSetError = true // Hot Store에 쓰기 실패를 강제합니다.
+
+	cold := newMockStore()
+	key, content, etag := "promotion-fail-key", "cold content only", "v-cold"
+	cold.setData(key, content, &Metadata{ETag: etag})
+
+	cache, err := New(log.NewNopLogger(), WithHotStore(hot), WithColdStore(cold))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	// 2. Get 호출 실행
+	stream, err := cache.Get(context.Background(), key, &mockFetcher{})
+
+	// 3. 결과 검증
+	require.NoError(t, err, "Get should not fail even if promotion fails")
+	require.NotNil(t, stream, "A valid stream should be returned from the cold cache")
+
+	readBytes, readErr := io.ReadAll(stream)
+	require.NoError(t, readErr)
+	assert.Equal(t, content, string(readBytes), "The content from the cold cache should be served")
+	stream.Close()
+
+	hot.mu.RLock()
+	_, exists := hot.data[key]
+	hot.mu.RUnlock()
+	assert.False(t, exists, "Data should not be promoted to the hot store on failure")
 }

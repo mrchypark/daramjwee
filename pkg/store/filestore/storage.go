@@ -188,8 +188,16 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 // --- 내부 헬퍼 및 타입 ---
 
 func (fs *FileStore) toDataPath(key string) string {
-	// Path Traversal 공격을 막기 위한 간단한 조치
+	// Path Traversal 공격을 막기 위한 강화된 조치
+	// 1. 키에서 상위 디렉토리 이동(..) 문자를 완전히 제거합니다.
 	safeKey := strings.ReplaceAll(key, "..", "")
+
+	// 2. (핵심 수정) 키의 맨 앞에 있는 경로 구분자를 제거하여
+	//    절대 경로로 해석되는 것을 원천적으로 방지합니다.
+	//    (예: "/etc/passwd" -> "etc/passwd")
+	safeKey = strings.TrimPrefix(safeKey, string(os.PathSeparator))
+
+	// 이제 safeKey는 절대 경로가 아니므로, 항상 baseDir 내부에 안전하게 결합됩니다.
 	return filepath.Join(fs.baseDir, safeKey)
 }
 

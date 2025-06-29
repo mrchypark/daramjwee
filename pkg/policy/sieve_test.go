@@ -3,8 +3,10 @@ package policy
 
 import (
 	"fmt"
+	"math/rand"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -198,4 +200,67 @@ func TestSievePolicy_Churn(t *testing.T) {
 		// 내부 상태 검증 (패닉이 발생하지 않고, 리스트 길이가 일정하게 유지되는지)
 		assert.Equal(t, 10, p.(*SievePolicy).ll.Len(), "Churn 테스트 중 리스트 길이는 일정해야 합니다.")
 	}
+}
+
+// TestSievePolicy_Churn은 잦은 추가/삭제/접근 상황에서 SIEVE 정책의
+// 내부 상태가 일관성을 유지하는지 검증하는 무작위 부하 테스트입니다.
+func TestSievePolicy_Churn_Randomized(t *testing.T) {
+	p := NewSievePolicy().(*SievePolicy)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	const cacheSize = 100    // 캐시의 최대 아이템 수
+	const iterations = 10000 // 총 연산 횟수
+
+	keys := make([]string, 0, cacheSize)
+
+	for i := 0; i < iterations; i++ {
+		// 30% 확률로 새 아이템 추가
+		if rng.Intn(10) < 3 || p.ll.Len() < cacheSize {
+			// 캐시가 꽉 찼으면, 가장 오래된 아이템을 축출
+			if p.ll.Len() >= cacheSize {
+				evicted := p.Evict()
+				if evicted != nil {
+					// 추적 리스트에서 축출된 키를 제거
+					for i, k := range keys {
+						if k == evicted[0] {
+							keys = append(keys[:i], keys[i+1:]...)
+							break
+						}
+					}
+				}
+			}
+
+			// 새 키 추가
+			newKey := "key" + strconv.Itoa(i)
+			p.Add(newKey, 1)
+			keys = append(keys, newKey)
+
+		} else if len(keys) > 0 {
+			// 70% 확률로 기존 아이템에 대한 연산 수행
+
+			// 무작위로 키를 선택
+			randomKey := keys[rng.Intn(len(keys))]
+
+			// 50% 확률로 Touch, 50% 확률로 Remove
+			if rng.Intn(2) == 0 {
+				p.Touch(randomKey)
+			} else {
+				p.Remove(randomKey)
+				// 추적 리스트에서 키 제거
+				for i, k := range keys {
+					if k == randomKey {
+						keys = append(keys[:i], keys[i+1:]...)
+						break
+					}
+				}
+			}
+		}
+
+		// ✅ 핵심 검증: 매 연산마다 SIEVE 정책의 내부 상태(맵과 리스트의 길이)가 일치하는지 검증
+		if p.ll.Len() != len(p.cache) {
+			t.Fatalf("inconsistent state: list length (%d) != cache map length (%d)", p.ll.Len(), len(p.cache))
+		}
+	}
+
+	t.Logf("SIEVE Churn test completed with final cache size: %d", p.ll.Len())
 }

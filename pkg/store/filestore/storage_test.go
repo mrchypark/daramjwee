@@ -485,3 +485,50 @@ func TestFileStore_SetWithCopyAndTruncate_OrphanFileOnMetaWriteFail(t *testing.T
 		assert.False(t, strings.HasPrefix(file.Name(), "daramjwee-tmp-"), "임시 파일(%s)이 남아있습니다.", file.Name())
 	}
 }
+
+// TestFileStore_InvalidKeys는 파일 시스템에서 문제를 일으킬 수 있는
+// 비정상적인 키 값에 대한 FileStore의 동작을 검증합니다.
+func TestFileStore_InvalidKeys(t *testing.T) {
+	invalidKeys := map[string]string{
+		"EmptyKey":          "",
+		"AbsoluteLinuxPath": "/etc/passwd",
+		"ContainsSlash":     "some/dir/key",
+		"ContainsBackslash": `some\dir\key`,
+		"ContainsColon":     "file:name",
+		"ContainsNullByte":  "key\x00with\x00null",
+	}
+
+	for testName, key := range invalidKeys {
+		t.Run(testName, func(t *testing.T) {
+			fs := setupTestStore(t)
+			ctx := context.Background()
+
+			writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+			if err != nil {
+				t.Logf("Successfully caught error on SetWithWriter: %v", err)
+				return // Set 단계에서 에러 발생 시 정상 종료
+			}
+
+			_, writeErr := writer.Write([]byte("some data"))
+			require.NoError(t, writeErr)
+
+			closeErr := writer.Close()
+
+			// ✅ 핵심 수정: 테스트 케이스에 따라 기대되는 실패를 명시적으로 검증합니다.
+			// 절대 경로, 슬래시 포함 경로, 빈 경로는 Close 시점에서 에러가 발생해야 합니다.
+			// 이는 없는 디렉토리에 파일을 생성하려 하거나, 디렉토리에 파일을 덮어쓰려 하기 때문이며,
+			// 이것이 바로 "안전한 실패"입니다.
+			switch testName {
+			case "AbsoluteLinuxPath", "ContainsSlash", "EmptyKey":
+				require.Error(t, closeErr, "Close() should fail for paths that need non-existent parent directories or overwrite a dir")
+				t.Logf("Successfully caught expected error on Close: %v", closeErr)
+			default:
+				// 다른 케이스들은 에러가 발생할 수도, 안 할 수도 있습니다 (OS 따라 다름).
+				// 중요한 것은 패닉이 발생하지 않는 것입니다.
+				if closeErr != nil {
+					t.Logf("Caught error on Close as expected for this OS: %v", closeErr)
+				}
+			}
+		})
+	}
+}

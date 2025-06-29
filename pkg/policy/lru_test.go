@@ -1,7 +1,10 @@
 package policy
 
 import (
+	"math/rand"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // TestLRU_AddAndEvict tests the basic Add and Evict functionality.
@@ -129,4 +132,64 @@ func TestLRU_EdgeCases(t *testing.T) {
 	if evictedKeys != nil {
 		t.Errorf("Evict after removing the only item should return nil, but got %v", evictedKeys)
 	}
+}
+
+// TestLRU_Churn은 잦은 추가/삭제/접근 상황에서 LRU 정책의
+// 내부 상태가 일관성을 유지하는지 검증하는 무작위 부하 테스트입니다.
+func TestLRU_Churn(t *testing.T) {
+	p := NewLRUPolicy().(*LRUPolicy)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	const cacheSize = 100    // 캐시의 최대 아이템 수
+	const iterations = 10000 // 총 연산 횟수
+
+	keys := make([]string, 0, cacheSize)
+
+	for i := 0; i < iterations; i++ {
+		// 30% 확률로 새 아이템 추가
+		if rng.Intn(10) < 3 || p.ll.Len() < cacheSize {
+			// 캐시가 꽉 찼으면, 가장 오래된 아이템을 축출
+			if p.ll.Len() >= cacheSize {
+				evicted := p.Evict()
+				// Evict는 축출된 키를 반환하며, 이 키를 추적 리스트에서 제거
+				for i, k := range keys {
+					if k == evicted[0] {
+						keys = append(keys[:i], keys[i+1:]...)
+						break
+					}
+				}
+			}
+
+			// 새 키 추가
+			newKey := "key" + strconv.Itoa(i)
+			p.Add(newKey, 1)
+			keys = append(keys, newKey)
+		} else if len(keys) > 0 {
+			// 70% 확률로 기존 아이템에 대한 연산 수행
+
+			// 무작위로 키를 선택
+			randomKey := keys[rng.Intn(len(keys))]
+
+			// 50% 확률로 Touch, 50% 확률로 Remove
+			if rng.Intn(2) == 0 {
+				p.Touch(randomKey)
+			} else {
+				p.Remove(randomKey)
+				// 추적 리스트에서 키 제거
+				for i, k := range keys {
+					if k == randomKey {
+						keys = append(keys[:i], keys[i+1:]...)
+						break
+					}
+				}
+			}
+		}
+
+		// 매 연산마다 캐시의 내부 상태(맵과 리스트의 길이)가 일치하는지 검증
+		if p.ll.Len() != len(p.cache) {
+			t.Fatalf("inconsistent state: list length (%d) != cache map length (%d)", p.ll.Len(), len(p.cache))
+		}
+	}
+
+	t.Logf("Churn test completed with final cache size: %d", p.ll.Len())
 }

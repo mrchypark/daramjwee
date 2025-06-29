@@ -1,7 +1,10 @@
 package policy
 
 import (
+	"math/rand"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // helper function to check if a key exists in the policy's internal cache
@@ -189,4 +192,70 @@ func TestS3FIFO_EdgeCases(t *testing.T) {
 	if p.mainSize != 20 {
 		t.Errorf("Expected mainSize to be 20 after update, got %d", p.mainSize)
 	}
+}
+
+// TestS3FIFO_Churn은 잦은 추가/삭제/접근 상황에서 S3-FIFO 정책의
+// 내부 상태가 일관성을 유지하는지 검증하는 무작위 부하 테스트입니다.
+func TestS3FIFO_Churn(t *testing.T) {
+	// S3-FIFO 정책 생성 (총 용량 100, small 큐 비율 20%)
+	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	const cacheSize = 100    // 캐시의 최대 아이템 수 (용량과 무관하게 아이템 개수로 제한)
+	const iterations = 10000 // 총 연산 횟수
+
+	keys := make([]string, 0, cacheSize)
+
+	for i := 0; i < iterations; i++ {
+		// 30% 확률로 새 아이템 추가
+		if rng.Intn(10) < 3 || (p.smallQueue.Len()+p.mainQueue.Len()) < cacheSize {
+			// 캐시가 꽉 찼으면, 아이템을 축출
+			if (p.smallQueue.Len() + p.mainQueue.Len()) >= cacheSize {
+				evicted := p.Evict()
+				if evicted != nil {
+					// 추적 리스트에서 축출된 키를 제거
+					for i, k := range keys {
+						if k == evicted[0] {
+							keys = append(keys[:i], keys[i+1:]...)
+							break
+						}
+					}
+				}
+			}
+
+			// 새 키 추가
+			newKey := "key" + strconv.Itoa(i)
+			p.Add(newKey, 1) // 모든 아이템의 사이즈는 1로 가정
+			keys = append(keys, newKey)
+
+		} else if len(keys) > 0 {
+			// 70% 확률로 기존 아이템에 대한 연산 수행
+
+			// 무작위로 키를 선택
+			randomKey := keys[rng.Intn(len(keys))]
+
+			// 50% 확률로 Touch, 50% 확률로 Remove
+			if rng.Intn(2) == 0 {
+				p.Touch(randomKey)
+			} else {
+				p.Remove(randomKey)
+				// 추적 리스트에서 키 제거
+				for i, k := range keys {
+					if k == randomKey {
+						keys = append(keys[:i], keys[i+1:]...)
+						break
+					}
+				}
+			}
+		}
+
+		// ✅ 핵심 검증: 매 연산마다 S3-FIFO의 내부 상태 일관성을 확인합니다.
+		// 두 큐의 아이템 개수의 합이 캐시 맵의 전체 아이템 개수와 일치해야 합니다.
+		totalItemsInQueues := p.smallQueue.Len() + p.mainQueue.Len()
+		if totalItemsInQueues != len(p.cache) {
+			t.Fatalf("inconsistent state: total items in queues (%d) != cache map length (%d)", totalItemsInQueues, len(p.cache))
+		}
+	}
+
+	t.Logf("S3-FIFO Churn test completed with final cache size: %d", len(p.cache))
 }
