@@ -11,6 +11,21 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
+var (
+	writerPool = sync.Pool{
+		New: func() interface{} {
+			return &memStoreWriter{
+				buf: bytes.NewBuffer(make([]byte, 0, 1024)), // Pre-allocate buffer
+			}
+		},
+	}
+	bufferPool = sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
+)
+
 // entry holds the value and metadata for a single cache item.
 type entry struct {
 	value    []byte
@@ -66,12 +81,11 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 // SetWithWriter returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
 func (ms *MemStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
-	return &memStoreWriter{
-		ms:       ms,
-		key:      key,
-		metadata: metadata,
-		buf:      &bytes.Buffer{},
-	}, nil
+	w := writerPool.Get().(*memStoreWriter)
+	w.ms = ms
+	w.key = key
+	w.metadata = metadata
+	return w, nil
 }
 
 // Delete removes an object from the in-memory map.
@@ -172,5 +186,13 @@ func (w *memStoreWriter) Close() error {
 			}
 		}
 	}
+
+	// Reset the writer and put it back in the pool
+	w.buf.Reset()
+	w.ms = nil
+	w.key = ""
+	w.metadata = nil
+	writerPool.Put(w)
+
 	return nil
 }
