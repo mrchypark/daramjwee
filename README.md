@@ -200,9 +200,6 @@ func main() {
 goos: linux
 ```
 
-## Benchmarks
-
-```
 === RUN   TestCache_Get_FullMiss
 --- PASS: TestCache_Get_FullMiss (0.00s)
 === RUN   TestCache_Get_ColdHit
@@ -482,4 +479,50 @@ BenchmarkMemStore_ConcurrentReadWrite
 BenchmarkMemStore_ConcurrentReadWrite-4   	 6665968	       179.2 ns/op	      64 B/op	       2 allocs/op
 PASS
 ok  	github.com/mrchypark/daramjwee/pkg/store/memstore	1.384s
+```
+
+## Benchmarks
+
+```
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkCache_Get_HotHit-4    	  539539	      2106 ns/op	    1476 B/op	      26 allocs/op
+BenchmarkCache_Get_ColdHit-4   	  535533	      2159 ns/op	    1476 B/op	      26 allocs/op
+BenchmarkCache_Get_Miss-4      	  314084	      3692 ns/op	    2085 B/op	      36 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee	3.851s
+?   	github.com/mrchypark/daramjwee/cmd/daramjwee	[no test files]
+?   	github.com/mrchypark/daramjwee/examples	[no test files]
+PASS
+ok  	github.com/mrchypark/daramjwee/internal/worker	0.275s
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/policy
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkLRU_Churn-4      	 6989918	       158.7 ns/op	      57 B/op	       2 allocs/op
+BenchmarkS3FIFO_Churn-4   	 6558708	       169.6 ns/op	      64 B/op	       3 allocs/op
+BenchmarkSieve_Churn-4    	 6900952	       181.7 ns/op	      61 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/policy	4.031s
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/adapter	0.106s
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/store/filestore
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkFileStore_Set_RenameStrategy-4   	   13894	     84548 ns/op	    1209 B/op	      22 allocs/op
+BenchmarkFileStore_Set_CopyStrategy-4     	   11193	    107884 ns/op	    1048 B/op	      26 allocs/op
+BenchmarkFileStore_Get_RenameStrategy-4   	  116302	     10159 ns/op	     549 B/op	      16 allocs/op
+BenchmarkFileStore_Get_CopyStrategy-4     	  114871	     10093 ns/op	     549 B/op	      16 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/filestore	8.461s
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/store/memstore
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkMemStore_ConcurrentReadWrite-4   	 6852753	       181.7 ns/op	      64 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/memstore	1.429s
 ```
