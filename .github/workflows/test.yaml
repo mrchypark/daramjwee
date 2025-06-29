@@ -47,7 +47,7 @@ jobs:
     - name: Update README.md
       run: |
         # Remove existing benchmark section if it exists
-        sed -i '/^## Benchmarks$/,/```$/d' README.md
+        awk '/^## Benchmarks$/{p=1;next}/^``` *$/{p=0;next}!p' README.md > temp_README.md && mv temp_README.md README.md
         
         # Append new benchmark results
         echo -e "\n## Benchmarks\n" >> README.md
