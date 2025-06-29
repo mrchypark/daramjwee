@@ -197,8 +197,289 @@ func main() {
 }
 ```
 
+goos: linux
+```
+
 ## Benchmarks
 
 ```
+=== RUN   TestCache_Get_FullMiss
+--- PASS: TestCache_Get_FullMiss (0.00s)
+=== RUN   TestCache_Get_ColdHit
+--- PASS: TestCache_Get_ColdHit (0.00s)
+=== RUN   TestCache_StaleHit_ServesStaleWhileRefreshing
+--- PASS: TestCache_StaleHit_ServesStaleWhileRefreshing (0.00s)
+=== RUN   TestCache_NegativeCache_On_ErrCacheableNotFound
+--- PASS: TestCache_NegativeCache_On_ErrCacheableNotFound (0.00s)
+=== RUN   TestCache_NegativeCache_StaleHit
+--- PASS: TestCache_NegativeCache_StaleHit (0.00s)
+=== RUN   TestCache_Get_FetcherError
+--- PASS: TestCache_Get_FetcherError (0.00s)
+=== RUN   TestCache_Get_ContextCancellation
+--- PASS: TestCache_Get_ContextCancellation (0.05s)
+=== RUN   TestCache_Set_Directly
+--- PASS: TestCache_Set_Directly (0.00s)
+=== RUN   TestCache_Delete
+--- PASS: TestCache_Delete (0.00s)
+=== RUN   TestCache_Close
+--- PASS: TestCache_Close (0.05s)
+=== RUN   TestCache_Get_NotModified_ButEvictedRace_Deterministic
+--- PASS: TestCache_Get_NotModified_ButEvictedRace_Deterministic (0.00s)
+=== RUN   TestCache_Concurrent_GetAndDelete
+--- PASS: TestCache_Concurrent_GetAndDelete (0.00s)
+=== RUN   TestCache_ReturnsError_AfterClose
+--- PASS: TestCache_ReturnsError_AfterClose (0.00s)
+=== RUN   TestMultiCloser_ClosesAll_EvenIfOneFails
+--- PASS: TestMultiCloser_ClosesAll_EvenIfOneFails (0.00s)
+=== RUN   TestCache_Get_ColdHit_PromotionFails
+--- PASS: TestCache_Get_ColdHit_PromotionFails (0.00s)
+=== RUN   TestCache_FreshForZero_AlwaysTriggersRefresh
+=== RUN   TestCache_FreshForZero_AlwaysTriggersRefresh/PositiveCacheWithFreshForZero
+=== RUN   TestCache_FreshForZero_AlwaysTriggersRefresh/NegativeCacheWithFreshForZero
+--- PASS: TestCache_FreshForZero_AlwaysTriggersRefresh (0.20s)
+    --- PASS: TestCache_FreshForZero_AlwaysTriggersRefresh/PositiveCacheWithFreshForZero (0.10s)
+    --- PASS: TestCache_FreshForZero_AlwaysTriggersRefresh/NegativeCacheWithFreshForZero (0.10s)
+=== RUN   TestNew_OptionValidation
+=== RUN   TestNew_OptionValidation/Success_with_only_mandatory_hot_store
+=== RUN   TestNew_OptionValidation/Success_with_all_options_valid
+=== RUN   TestNew_OptionValidation/Success_with_positive_cache_TTL_of_zero
+=== RUN   TestNew_OptionValidation/Success_with_negative_cache_TTL_of_zero
+=== RUN   TestNew_OptionValidation/Failure_without_any_options
+=== RUN   TestNew_OptionValidation/Failure_with_nil_HotStore
+=== RUN   TestNew_OptionValidation/Failure_with_empty_worker_strategy
+=== RUN   TestNew_OptionValidation/Failure_with_zero_worker_pool_size
+=== RUN   TestNew_OptionValidation/Failure_with_negative_worker_pool_size
+=== RUN   TestNew_OptionValidation/Failure_with_zero_worker_job_timeout
+=== RUN   TestNew_OptionValidation/Failure_with_zero_default_timeout
+=== RUN   TestNew_OptionValidation/Failure_with_negative_default_timeout
+=== RUN   TestNew_OptionValidation/Failure_with_zero_shutdown_timeout
+=== RUN   TestNew_OptionValidation/Failure_with_negative_shutdown_timeout
+=== RUN   TestNew_OptionValidation/Failure_with_negative_value_for_positive_cache
+=== RUN   TestNew_OptionValidation/Failure_with_negative_value_for_negative_cache
+--- PASS: TestNew_OptionValidation (0.00s)
+    --- PASS: TestNew_OptionValidation/Success_with_only_mandatory_hot_store (0.00s)
+    --- PASS: TestNew_OptionValidation/Success_with_all_options_valid (0.00s)
+    --- PASS: TestNew_OptionValidation/Success_with_positive_cache_TTL_of_zero (0.00s)
+    --- PASS: TestNew_OptionValidation/Success_with_negative_cache_TTL_of_zero (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_without_any_options (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_nil_HotStore (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_empty_worker_strategy (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_zero_worker_pool_size (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_negative_worker_pool_size (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_zero_worker_job_timeout (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_zero_default_timeout (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_negative_default_timeout (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_zero_shutdown_timeout (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_negative_shutdown_timeout (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_negative_value_for_positive_cache (0.00s)
+    --- PASS: TestNew_OptionValidation/Failure_with_negative_value_for_negative_cache (0.00s)
+=== RUN   TestNew_OptionOverrides
+--- PASS: TestNew_OptionOverrides (0.00s)
+=== RUN   TestNew_NilColdStoreIsValid
+--- PASS: TestNew_NilColdStoreIsValid (0.00s)
 goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkCache_Get_HotHit
+BenchmarkCache_Get_HotHit-4    	  528465	      2105 ns/op	    1476 B/op	      26 allocs/op
+BenchmarkCache_Get_ColdHit
+BenchmarkCache_Get_ColdHit-4   	  508917	      2091 ns/op	    1477 B/op	      26 allocs/op
+BenchmarkCache_Get_Miss
+BenchmarkCache_Get_Miss-4      	  307986	      3746 ns/op	    2082 B/op	      36 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee	3.733s
+?   	github.com/mrchypark/daramjwee/cmd/daramjwee	[no test files]
+?   	github.com/mrchypark/daramjwee/examples	[no test files]
+=== RUN   TestWorkerManager_NewManager
+=== RUN   TestWorkerManager_NewManager/Pool_Strategy
+=== RUN   TestWorkerManager_NewManager/All_Strategy
+=== RUN   TestWorkerManager_NewManager/Invalid_Strategy_Should_Default_to_Pool
+--- PASS: TestWorkerManager_NewManager (0.00s)
+    --- PASS: TestWorkerManager_NewManager/Pool_Strategy (0.00s)
+    --- PASS: TestWorkerManager_NewManager/All_Strategy (0.00s)
+    --- PASS: TestWorkerManager_NewManager/Invalid_Strategy_Should_Default_to_Pool (0.00s)
+=== RUN   TestWorkerManager_SubmitAndRun
+--- PASS: TestWorkerManager_SubmitAndRun (0.00s)
+=== RUN   TestWorkerManager_Shutdown_Success
+--- PASS: TestWorkerManager_Shutdown_Success (0.05s)
+=== RUN   TestWorkerManager_Shutdown_Timeout
+--- PASS: TestWorkerManager_Shutdown_Timeout (0.10s)
+=== RUN   TestWorkerManager_JobTimeout
+--- PASS: TestWorkerManager_JobTimeout (0.01s)
+=== RUN   TestWorkerPool_JobDroppingOnFullQueue
+--- PASS: TestWorkerPool_JobDroppingOnFullQueue (0.06s)
+=== RUN   TestShutdown_WithFullQueue
+--- PASS: TestShutdown_WithFullQueue (0.00s)
+=== RUN   TestPoolStrategy_DropsJob_WhenQueueIsFull_And_LogsIt
+--- PASS: TestPoolStrategy_DropsJob_WhenQueueIsFull_And_LogsIt (0.05s)
+PASS
+ok  	github.com/mrchypark/daramjwee/internal/worker	0.275s
+=== RUN   TestLRU_AddAndEvict
+--- PASS: TestLRU_AddAndEvict (0.00s)
+=== RUN   TestLRU_Touch
+--- PASS: TestLRU_Touch (0.00s)
+=== RUN   TestLRU_Remove
+--- PASS: TestLRU_Remove (0.00s)
+=== RUN   TestLRU_AddExisting
+--- PASS: TestLRU_AddExisting (0.00s)
+=== RUN   TestLRU_EdgeCases
+--- PASS: TestLRU_EdgeCases (0.00s)
+=== RUN   TestLRU_Churn
+    lru_test.go:194: Churn test completed with final cache size: 100
+--- PASS: TestLRU_Churn (0.00s)
+=== RUN   TestS3FIFO_AddAndPromotion
+--- PASS: TestS3FIFO_AddAndPromotion (0.00s)
+=== RUN   TestS3FIFO_SecondChance
+--- PASS: TestS3FIFO_SecondChance (0.00s)
+=== RUN   TestS3FIFO_EvictFromSmallQueue
+--- PASS: TestS3FIFO_EvictFromSmallQueue (0.00s)
+=== RUN   TestS3FIFO_EvictFromMainQueue
+--- PASS: TestS3FIFO_EvictFromMainQueue (0.00s)
+=== RUN   TestS3FIFO_EvictFromMainWithSecondChance
+--- PASS: TestS3FIFO_EvictFromMainWithSecondChance (0.00s)
+=== RUN   TestS3FIFO_Remove
+--- PASS: TestS3FIFO_Remove (0.00s)
+=== RUN   TestS3FIFO_EdgeCases
+--- PASS: TestS3FIFO_EdgeCases (0.00s)
+=== RUN   TestS3FIFO_Churn
+    s3fifo_test.go:260: S3-FIFO Churn test completed with final cache size: 100
+--- PASS: TestS3FIFO_Churn (0.00s)
+=== RUN   TestSievePolicy_BasicAddAndTouch
+--- PASS: TestSievePolicy_BasicAddAndTouch (0.00s)
+=== RUN   TestSievePolicy_AddExisting
+--- PASS: TestSievePolicy_AddExisting (0.00s)
+=== RUN   TestSievePolicy_Remove
+--- PASS: TestSievePolicy_Remove (0.00s)
+=== RUN   TestSievePolicy_Evict_MainScenario
+--- PASS: TestSievePolicy_Evict_MainScenario (0.00s)
+=== RUN   TestSievePolicy_Evict_FullRotation
+--- PASS: TestSievePolicy_Evict_FullRotation (0.00s)
+=== RUN   TestSievePolicy_EvictEmpty
+--- PASS: TestSievePolicy_EvictEmpty (0.00s)
+=== RUN   TestSievePolicy_EvictSingleItem
+--- PASS: TestSievePolicy_EvictSingleItem (0.00s)
+=== RUN   TestSievePolicy_RemoveHandledElement
+--- PASS: TestSievePolicy_RemoveHandledElement (0.00s)
+=== RUN   TestSievePolicy_Churn
+--- PASS: TestSievePolicy_Churn (0.00s)
+=== RUN   TestSievePolicy_Churn_Randomized
+    sieve_test.go:265: SIEVE Churn test completed with final cache size: 100
+--- PASS: TestSievePolicy_Churn_Randomized (0.00s)
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/policy
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkLRU_Churn
+BenchmarkLRU_Churn-4      	 6991587	       157.9 ns/op	      57 B/op	       2 allocs/op
+BenchmarkS3FIFO_Churn
+BenchmarkS3FIFO_Churn-4   	 6661212	       169.7 ns/op	      64 B/op	       3 allocs/op
+BenchmarkSieve_Churn
+BenchmarkSieve_Churn-4    	 6845193	       180.4 ns/op	      61 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/policy	4.024s
+=== RUN   TestObjstoreAdapter_SetAndGetStream
+--- PASS: TestObjstoreAdapter_SetAndGetStream (0.00s)
+=== RUN   TestObjstoreAdapter_Stat
+--- PASS: TestObjstoreAdapter_Stat (0.00s)
+=== RUN   TestObjstoreAdapter_Delete
+--- PASS: TestObjstoreAdapter_Delete (0.00s)
+=== RUN   TestObjstoreAdapter_StreamingWriter_UploadError
+--- PASS: TestObjstoreAdapter_StreamingWriter_UploadError (0.00s)
+=== RUN   TestObjstoreAdapter_NegativeCache_NoBody
+--- PASS: TestObjstoreAdapter_NegativeCache_NoBody (0.00s)
+=== RUN   TestObjstoreAdapter_MetadataFields
+--- PASS: TestObjstoreAdapter_MetadataFields (0.00s)
+=== RUN   TestObjstoreAdapter_GoroutineLeakOnContextCancel
+--- PASS: TestObjstoreAdapter_GoroutineLeakOnContextCancel (0.10s)
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/adapter	0.107s
+=== RUN   TestFileStore_SetAndGet
+--- PASS: TestFileStore_SetAndGet (0.00s)
+=== RUN   TestFileStore_Get_NotFound
+--- PASS: TestFileStore_Get_NotFound (0.00s)
+=== RUN   TestFileStore_Stat
+--- PASS: TestFileStore_Stat (0.00s)
+=== RUN   TestFileStore_Delete
+--- PASS: TestFileStore_Delete (0.00s)
+=== RUN   TestFileStore_Overwrite
+--- PASS: TestFileStore_Overwrite (0.00s)
+=== RUN   TestFileStore_PathTraversal
+--- PASS: TestFileStore_PathTraversal (0.00s)
+=== RUN   TestFileStore_SetWithCopyAndTruncate
+--- PASS: TestFileStore_SetWithCopyAndTruncate (0.00s)
+=== RUN   TestFileStore_Set_ErrorOnFinalize_Rename
+--- PASS: TestFileStore_Set_ErrorOnFinalize_Rename (0.00s)
+=== RUN   TestFileStore_Set_ErrorOnFinalize_Copy
+--- PASS: TestFileStore_Set_ErrorOnFinalize_Copy (0.00s)
+=== RUN   TestFileStore_MetadataFields
+--- PASS: TestFileStore_MetadataFields (0.00s)
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/store/filestore
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkFileStore_Set_RenameStrategy
+BenchmarkFileStore_Set_RenameStrategy-4   	   13948	     83787 ns/op	    1209 B/op	      22 allocs/op
+BenchmarkFileStore_Set_CopyStrategy
+BenchmarkFileStore_Set_CopyStrategy-4     	   10000	    107948 ns/op	    1049 B/op	      26 allocs/op
+BenchmarkFileStore_Get_RenameStrategy
+BenchmarkFileStore_Get_RenameStrategy-4   	  114181	     10317 ns/op	     549 B/op	      16 allocs/op
+BenchmarkFileStore_Get_CopyStrategy
+BenchmarkFileStore_Get_CopyStrategy-4     	  113448	     10178 ns/op	     549 B/op	      16 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/filestore	7.176s
+=== RUN   TestMemStore_SetAndGetStream
+--- PASS: TestMemStore_SetAndGetStream (0.00s)
+=== RUN   TestMemStore_Get_NotFound
+--- PASS: TestMemStore_Get_NotFound (0.00s)
+=== RUN   TestMemStore_Stat
+--- PASS: TestMemStore_Stat (0.00s)
+=== RUN   TestMemStore_Delete
+--- PASS: TestMemStore_Delete (0.00s)
+=== RUN   TestMemStore_Overwrite
+--- PASS: TestMemStore_Overwrite (0.00s)
+=== RUN   TestMemStore_Eviction
+--- PASS: TestMemStore_Eviction (0.00s)
+=== RUN   TestMemStore_PolicyIntegration
+--- PASS: TestMemStore_PolicyIntegration (0.00s)
+=== RUN   TestMemStore_Concurrency
+--- PASS: TestMemStore_Concurrency (0.00s)
+=== RUN   TestMemStore_Parallel
+=== PAUSE TestMemStore_Parallel
+=== RUN   TestMemStore_NegativeCache_NoBody
+--- PASS: TestMemStore_NegativeCache_NoBody (0.00s)
+=== RUN   TestMemStore_SetEmptyValue
+--- PASS: TestMemStore_SetEmptyValue (0.00s)
+=== RUN   TestMemStore_MetadataFields
+--- PASS: TestMemStore_MetadataFields (0.00s)
+=== RUN   TestMemStore_EvictionLoop_WithBadPolicy
+--- PASS: TestMemStore_EvictionLoop_WithBadPolicy (0.00s)
+=== CONT  TestMemStore_Parallel
+=== RUN   TestMemStore_Parallel/group
+=== RUN   TestMemStore_Parallel/group/Set-Get
+=== PAUSE TestMemStore_Parallel/group/Set-Get
+=== RUN   TestMemStore_Parallel/group/Stat
+=== PAUSE TestMemStore_Parallel/group/Stat
+=== RUN   TestMemStore_Parallel/group/Delete
+=== PAUSE TestMemStore_Parallel/group/Delete
+=== RUN   TestMemStore_Parallel/group/Set-New
+=== PAUSE TestMemStore_Parallel/group/Set-New
+=== CONT  TestMemStore_Parallel/group/Set-Get
+=== CONT  TestMemStore_Parallel/group/Stat
+=== CONT  TestMemStore_Parallel/group/Delete
+=== CONT  TestMemStore_Parallel/group/Set-New
+--- PASS: TestMemStore_Parallel (0.00s)
+    --- PASS: TestMemStore_Parallel/group (0.00s)
+        --- PASS: TestMemStore_Parallel/group/Set-Get (0.00s)
+        --- PASS: TestMemStore_Parallel/group/Stat (0.00s)
+        --- PASS: TestMemStore_Parallel/group/Delete (0.00s)
+        --- PASS: TestMemStore_Parallel/group/Set-New (0.00s)
+goos: linux
+goarch: amd64
+pkg: github.com/mrchypark/daramjwee/pkg/store/memstore
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkMemStore_ConcurrentReadWrite
+BenchmarkMemStore_ConcurrentReadWrite-4   	 6665968	       179.2 ns/op	      64 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/memstore	1.384s
 ```
