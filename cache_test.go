@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -621,4 +622,98 @@ func TestCache_Get_ColdHit_PromotionFails(t *testing.T) {
 	_, exists := hot.data[key]
 	hot.mu.RUnlock()
 	assert.False(t, exists, "Data should not be promoted to the hot store on failure")
+}
+
+// setupBenchmarkCache는 벤치마크(*testing.B)를 위한 전용 헬퍼 함수입니다.
+func setupBenchmarkCache(b *testing.B, opts ...Option) (Cache, *mockStore, *mockStore) {
+	b.Helper()
+	hot := newMockStore()
+	cold := newMockStore()
+	finalOpts := []Option{
+		WithHotStore(hot),
+		WithColdStore(cold),
+		WithDefaultTimeout(2 * time.Second),
+		WithShutdownTimeout(2 * time.Second),
+		WithWorker("pool", 5, 20, 1*time.Second),
+	}
+	finalOpts = append(finalOpts, opts...)
+	cache, err := New(log.NewNopLogger(), finalOpts...)
+	if err != nil {
+		b.Fatalf("Failed to create cache for benchmark: %v", err)
+	}
+	b.Cleanup(cache.Close)
+	return cache, hot, cold
+}
+
+// BenchmarkCache_Get_HotHit는 Hot Tier에서 캐시 히트가 발생했을 때의
+// 종단 간 Get 성능을 측정합니다. 가장 이상적이고 빠른 시나리오입니다.
+func BenchmarkCache_Get_HotHit(b *testing.B) {
+	cache, hot, _ := setupBenchmarkCache(b)
+	key, content := "hot-hit-key", "this is hot content"
+	hot.setData(key, content, &Metadata{})
+
+	// Fetcher는 호출되지 않아야 합니다.
+	fetcher := &mockFetcher{}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			stream, err := cache.Get(context.Background(), key, fetcher)
+			if err != nil {
+				b.Errorf("Get failed: %v", err)
+				continue
+			}
+			// 실제 스트림 데이터를 소비(consume)해야 정확한 측정이 가능합니다.
+			io.Copy(io.Discard, stream)
+			stream.Close()
+		}
+	})
+}
+
+// BenchmarkCache_Get_ColdHit는 Cold Tier에서 캐시 히트가 발생하고
+// Hot Tier로 데이터가 승격(promotion)되는 시나리오의 성능을 측정합니다.
+func BenchmarkCache_Get_ColdHit(b *testing.B) {
+	cache, _, cold := setupBenchmarkCache(b)
+	key, content := "cold-hit-key", "this is cold content"
+	cold.setData(key, content, &Metadata{})
+	fetcher := &mockFetcher{}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			stream, err := cache.Get(context.Background(), key, fetcher)
+			if err != nil {
+				b.Errorf("Get failed: %v", err)
+				continue
+			}
+			io.Copy(io.Discard, stream)
+			stream.Close()
+		}
+	})
+}
+
+// BenchmarkCache_Get_Miss는 캐시에 데이터가 전혀 없어 원본에서 가져오는
+// 시나리오의 성능을 측정합니다. 가장 비용이 큰 작업입니다.
+func BenchmarkCache_Get_Miss(b *testing.B) {
+	cache, _, _ := setupBenchmarkCache(b)
+	content := "this is fresh content from origin"
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		// 매번 다른 키를 사용하여 캐시 히트를 방지하고 Miss를 유도합니다.
+		var i int
+		for pb.Next() {
+			key := fmt.Sprintf("miss-key-%d", i)
+			fetcher := &mockFetcher{content: content, etag: "v-fresh"}
+
+			stream, err := cache.Get(context.Background(), key, fetcher)
+			if err != nil {
+				b.Errorf("Get failed: %v", err)
+				continue
+			}
+			io.Copy(io.Discard, stream)
+			stream.Close()
+			i++
+		}
+	})
 }

@@ -3,6 +3,7 @@ package filestore
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -10,9 +11,8 @@ import (
 	"strings"
 
 	"github.com/goccy/go-json"
-
 	"github.com/go-kit/log"
-	"github.com/go-kit/log/level" // Added import
+	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee"
 )
 
@@ -21,15 +21,15 @@ type FileStore struct {
 	baseDir            string
 	logger             log.Logger
 	lockManager        *FileLockManager
-	useCopyAndTruncate bool // 추가: rename 대신 copy를 사용할지 여부
+	useCopyAndTruncate bool // Re-added for NFS compatibility
 }
 
-// Option은 FileStore의 동작을 변경하는 함수 타입입니다.
+// Option configures the FileStore.
 type Option func(*FileStore)
 
-// WithCopyAndTruncate는 원자적인 os.Rename 대신,
-// 파일을 복사하는 방식을 사용하도록 설정합니다.
-// 일부 네트워크 파일 시스템과의 호환성을 위해 필요할 수 있습니다.
+// WithCopyAndTruncate sets the store to use a copy-and-truncate strategy
+// instead of an atomic rename. This can be necessary for compatibility with
+// some network filesystems like NFS.
 func WithCopyAndTruncate() Option {
 	return func(fs *FileStore) {
 		fs.useCopyAndTruncate = true
@@ -37,7 +37,7 @@ func WithCopyAndTruncate() Option {
 }
 
 // New creates a new FileStore.
-func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) { // 변경: opts 파라미터 추가
+func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
 	}
@@ -46,27 +46,19 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) { //
 		logger:      logger,
 		lockManager: NewFileLockManager(2048),
 	}
-
-	// 사용자가 제공한 옵션들을 적용합니다.
 	for _, opt := range opts {
 		opt(fs)
 	}
-
 	return fs, nil
 }
 
 // 컴파일 타임에 인터페이스 만족 확인
 var _ daramjwee.Store = (*FileStore)(nil)
 
+// GetStream reads an object from the store.
 func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
-
-	meta, err := fs.readMetaFile(path)
-	if err != nil {
-		fs.lockManager.RUnlock(path)
-		return nil, nil, err
-	}
 
 	file, err := os.Open(path)
 	if err != nil {
@@ -77,77 +69,66 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 		return nil, nil, err
 	}
 
+	meta, dataOffset, err := readMetadata(file)
+	if err != nil {
+		file.Close()
+		fs.lockManager.RUnlock(path)
+		return nil, nil, err
+	}
+
+	if _, err := file.Seek(dataOffset, io.SeekStart); err != nil {
+		file.Close()
+		fs.lockManager.RUnlock(path)
+		return nil, nil, fmt.Errorf("failed to seek to data section: %w", err)
+	}
+
 	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
 }
 
-// SetWithWriter returns a WriteCloser for writing to the FileStore.
-// To ensure atomicity and prevent data corruption from partial writes,
-// data is first written to a temporary file. When the writer is closed,
-// the temporary file is atomically renamed to its final destination.
+// SetWithWriter returns a writer that streams data to the store.
 func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 
-	// 임시 파일에 먼저 써서 원자성(atomicity)을 보장
 	tmpFile, err := os.CreateTemp(fs.baseDir, "daramjwee-tmp-*.data")
 	if err != nil {
 		fs.lockManager.Unlock(path)
 		return nil, err
 	}
 
+	// Write metadata to the temporary file first.
+	if err := writeMetadata(tmpFile, metadata); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		fs.lockManager.Unlock(path)
+		return nil, err
+	}
+
 	onClose := func() (err error) {
+		defer fs.lockManager.Unlock(path)
+
+		// The temporary file must be cleaned up.
+		// In the rename strategy, it's removed after a successful rename.
+		// In the copy strategy, it's removed after a successful copy.
+		// If any step fails, we also attempt to remove it.
 		defer func() {
-			// 임시 파일이 이미 rename 등으로 존재하지 않을 수 있으므로 IsNotExist 에러는 무시합니다.
 			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil && !os.IsNotExist(errRemove) {
 				level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
-				// 만약 주 로직이 성공했는데 정리 작업만 실패했다면, 이 에러를 반환해야 합니다.
 				if err == nil {
-					err = errRemove
+					err = errRemove // If the main logic succeeded, report the cleanup failure.
 				}
 			}
 		}()
 
-		defer fs.lockManager.Unlock(path)
-
-		// Based on the selected strategy, either use atomic rename or copy.
-		// The copy strategy (WithCopyAndTruncate) is less atomic but provides
-		// better compatibility with some network filesystems (e.g., NFS)
-		// where rename operations across different devices can fail.
 		if fs.useCopyAndTruncate {
-			// 비원자적 복사 방식
-			// 1. 데이터 파일을 먼저 최종 경로로 복사
+			// Non-atomic copy strategy for NFS compatibility.
 			if err := copyFile(tmpFile.Name(), path); err != nil {
-				if errRemove := os.Remove(tmpFile.Name()); errRemove != nil {
-					level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
-				}
-				return fmt.Errorf("임시 파일에서 최종 파일로 복사 실패: %w", err)
-			}
-			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil {
-				level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
-			}
-
-			// 2. 데이터가 완전히 쓰인 후 메타데이터 파일 쓰기
-			if err := fs.writeMetaFile(path, metadata); err != nil {
-				// 데이터는 쓰였지만 메타데이터 쓰기에 실패한 경우
-				return fmt.Errorf("데이터 복사 후 메타데이터 쓰기 실패: %w", err)
+				return fmt.Errorf("failed to copy temp file to final path: %w", err)
 			}
 		} else {
-			// 기존의 원자적 rename 방식
-			// 1. 메타데이터 파일 먼저 쓰기
-			if err := fs.writeMetaFile(path, metadata); err != nil {
-				if errRemove := os.Remove(tmpFile.Name()); errRemove != nil {
-					level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
-				}
-				return err
-			}
-			// 2. 임시 데이터 파일을 최종 경로로 변경 (원자적)
+			// Atomic rename strategy.
 			if err := os.Rename(tmpFile.Name(), path); err != nil {
-				// 실패 시 롤백: 방금 쓴 메타 파일 정리
-				// 롤백 중 발생하는 에러는 로그로 남기되, 원래의 에러를 반환합니다.
-				if removeErr := os.Remove(fs.toMetaPath(path)); removeErr != nil {
-					level.Warn(fs.logger).Log("msg", "failed to remove meta file during rollback", "path", fs.toMetaPath(path), "err", removeErr)
-				}
-				return err
+				return fmt.Errorf("failed to rename temporary file: %w", err)
 			}
 		}
 		return nil
@@ -156,93 +137,103 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 	return newLockedWriteCloser(tmpFile, onClose), nil
 }
 
+// Delete removes an object from the store.
 func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 	defer fs.lockManager.Unlock(path)
 
-	errData := os.Remove(path)
-	errMeta := os.Remove(fs.toMetaPath(path))
-
-	if os.IsNotExist(errData) {
-		// 이미 없으면 성공으로 처리
-		return nil
+	err := os.Remove(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	if errData != nil {
-		return errData
-	}
-	if errMeta != nil && !os.IsNotExist(errMeta) {
-		return errMeta
-	}
-
 	return nil
 }
 
+// Stat reads the metadata of an object without reading the data.
 func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
 	defer fs.lockManager.RUnlock(path)
-	return fs.readMetaFile(path)
-}
 
-// --- 내부 헬퍼 및 타입 ---
-
-func (fs *FileStore) toDataPath(key string) string {
-	// Path Traversal 공격을 막기 위한 강화된 조치
-	// 1. 키에서 상위 디렉토리 이동(..) 문자를 완전히 제거합니다.
-	safeKey := strings.ReplaceAll(key, "..", "")
-
-	// 2. (핵심 수정) 키의 맨 앞에 있는 경로 구분자를 제거하여
-	//    절대 경로로 해석되는 것을 원천적으로 방지합니다.
-	//    (예: "/etc/passwd" -> "etc/passwd")
-	safeKey = strings.TrimPrefix(safeKey, string(os.PathSeparator))
-
-	// 이제 safeKey는 절대 경로가 아니므로, 항상 baseDir 내부에 안전하게 결합됩니다.
-	return filepath.Join(fs.baseDir, safeKey)
-}
-
-func (fs *FileStore) toMetaPath(dataPath string) string {
-	return dataPath + ".meta.json"
-}
-
-func (fs *FileStore) readMetaFile(dataPath string) (*daramjwee.Metadata, error) {
-	metaPath := fs.toMetaPath(dataPath)
-	metaBytes, err := os.ReadFile(metaPath)
+	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, daramjwee.ErrNotFound
 		}
 		return nil, err
 	}
-	var metadata daramjwee.Metadata
-	if err := json.Unmarshal(metaBytes, &metadata); err != nil {
-		return nil, err
-	}
-	return &metadata, nil
+	defer file.Close()
+
+	meta, _, err := readMetadata(file)
+	return meta, err
 }
 
-func (fs *FileStore) writeMetaFile(dataPath string, metadata *daramjwee.Metadata) error {
-	metaPath := fs.toMetaPath(dataPath)
-	metaBytes, err := json.Marshal(metadata)
+// --- Internal Helpers ---
+
+func (fs *FileStore) toDataPath(key string) string {
+	safeKey := strings.ReplaceAll(key, "..", "")
+	safeKey = strings.TrimPrefix(safeKey, string(os.PathSeparator))
+	return filepath.Join(fs.baseDir, safeKey)
+}
+
+// writeMetadata serializes metadata, prefixes it with its length, and writes it.
+func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
+	metaBytes, err := json.Marshal(meta)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
-	return os.WriteFile(metaPath, metaBytes, 0644)
+
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(metaBytes)))
+
+	if _, err := w.Write(lenBuf); err != nil {
+		return fmt.Errorf("failed to write metadata length: %w", err)
+	}
+	if _, err := w.Write(metaBytes); err != nil {
+		return fmt.Errorf("failed to write metadata: %w", err)
+	}
+	return nil
 }
 
-// copyFile은 src 경로의 파일을 dst 경로로 복사합니다. dst 파일이 이미 존재하면 덮어씁니다.
-// 에러 처리를 개선하여, io.Copy와 같은 주요 작업의 에러가 defer된 Close() 에러에 의해
-// 덮어써지지 않도록 보장합니다.
+// readMetadata reads metadata from a reader.
+func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(r, lenBuf); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
+		}
+		return nil, 0, fmt.Errorf("failed to read metadata length: %w", err)
+	}
+
+	metaLen := binary.BigEndian.Uint32(lenBuf)
+	// Add a sanity check for metaLen to avoid allocating huge buffers
+	if metaLen > 10*1024*1024 { // 10MB limit for metadata
+		return nil, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
+	}
+
+	metaBytes := make([]byte, metaLen)
+	if _, err := io.ReadFull(r, metaBytes); err != nil {
+		return nil, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
+	}
+
+	var meta daramjwee.Metadata
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return nil, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
+	}
+
+	dataOffset := int64(4 + metaLen)
+	return &meta, dataOffset, nil
+}
+
+// copyFile copies a file from src to dst.
 func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		closeErr := in.Close()
-		// 주 로직에서 이미 에러가 발생한 경우, close 에러가 더 중요한
-		// 원본 에러를 덮어쓰지 않도록 합니다.
-		if err == nil {
+		if closeErr := in.Close(); err == nil {
 			err = closeErr
 		}
 	}()
@@ -252,20 +243,17 @@ func copyFile(src, dst string) (err error) {
 		return err
 	}
 	defer func() {
-		closeErr := out.Close()
-		// 마찬가지로, 원본 에러를 보존합니다.
-		if err == nil {
+		if closeErr := out.Close(); err == nil {
 			err = closeErr
 		}
 	}()
 
-	// 데이터 복사를 수행하고 에러를 반환합니다.
-	// defer 문들은 이 return 이후, 함수가 완전히 종료되기 전에 실행됩니다.
 	_, err = io.Copy(out, in)
 	return err
 }
 
-// ... (lockedReadCloser, lockedWriteCloser는 변경 없음)
+// --- I/O Wrappers for Locking ---
+
 type lockedReadCloser struct {
 	*os.File
 	unlockFunc func()
@@ -274,6 +262,7 @@ type lockedReadCloser struct {
 func newLockedReadCloser(f *os.File, unlockFunc func()) io.ReadCloser {
 	return &lockedReadCloser{File: f, unlockFunc: unlockFunc}
 }
+
 func (lrc *lockedReadCloser) Close() error {
 	defer lrc.unlockFunc()
 	return lrc.File.Close()
@@ -288,22 +277,17 @@ func newLockedWriteCloser(f *os.File, onClose func() error) io.WriteCloser {
 	return &lockedWriteCloser{File: f, onClose: onClose}
 }
 
-// Close는 임시 파일을 닫고, onClose 콜백을 실행하여
-// 원자적 쓰기(rename 또는 copy)를 완료하고 락을 해제합니다.
-// onClose가 항상 호출되도록 수정하여 락 누수를 방지합니다.
 func (lwc *lockedWriteCloser) Close() error {
-	// 먼저 임시 파일을 닫습니다.
+	// Close the underlying file first.
 	closeErr := lwc.File.Close()
 
-	// 그 다음, 항상 onClose를 호출하여 원자적 연산과 락 해제를 보장합니다.
+	// Then, execute the onClose logic (rename/copy and cleanup).
 	onCloseErr := lwc.onClose()
 
-	// 두 작업 중 더 중요한 것은 원자적 연산의 성공 여부이므로,
-	// onClose 에러를 우선적으로 반환합니다.
+	// The error from the atomic operation (onClose) is more critical.
 	if onCloseErr != nil {
 		return onCloseErr
 	}
-
-	// 원자적 연산이 성공했다면, 임시 파일 닫기 에러를 반환합니다.
+	// If the atomic op was fine, return any error from closing the file.
 	return closeErr
 }

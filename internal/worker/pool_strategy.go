@@ -64,20 +64,13 @@ func (p *PoolStrategy) start() {
 }
 
 // Submit은 큐가 찼을 때 작업을 버립니다.
-func (p *PoolStrategy) Submit(job Job) {
-	// 닫힌 채널에 전송 시 발생하는 패닉을 방지합니다.
-	defer func() {
-		if r := recover(); r != nil {
-			level.Warn(p.logger).Log("msg", "job submitted to a closed worker pool", "err", r)
-		}
-	}()
-
+func (s *PoolStrategy) Submit(job Job) bool {
 	select {
-	case p.jobs <- job:
-		// 작업 전송 성공
+	case s.jobs <- job:
+		return true
 	default:
-		// 큐가 가득 찼으면 작업을 버립니다.
-		level.Warn(p.logger).Log("msg", "worker queue is full, dropping job")
+		level.Warn(s.logger).Log("msg", "worker queue is full, dropping job")
+		return false
 	}
 }
 

@@ -259,3 +259,31 @@ func TestS3FIFO_Churn(t *testing.T) {
 
 	t.Logf("S3-FIFO Churn test completed with final cache size: %d", len(p.cache))
 }
+
+// BenchmarkS3FIFO_Churn은 잦은 추가/삭제/접근 상황에서 S3-FIFO 정책의
+// 전반적인 처리 성능을 측정합니다.
+func BenchmarkS3FIFO_Churn(b *testing.B) {
+	// 벤치마크를 위해 충분한 용량을 가진 정책을 생성합니다.
+	// 용량 자체보다는 연산 속도에 초점을 맞춥니다.
+	p := NewS3FIFOPolicy(100000, 0.1).(*S3FIFOPolicy)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	const cacheSize = 1000
+
+	for i := 0; i < cacheSize; i++ {
+		p.Add("key"+strconv.Itoa(i), 1)
+	}
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		if rng.Intn(2) == 0 {
+			keyIndex := rng.Intn(cacheSize)
+			p.Touch("key" + strconv.Itoa(keyIndex))
+		} else {
+			p.Evict()
+			newKey := "key" + strconv.Itoa(i+cacheSize)
+			p.Add(newKey, 1)
+		}
+	}
+}

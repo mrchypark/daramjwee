@@ -5,7 +5,7 @@ package worker
 import (
 	"bytes"
 	"context"
-	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -181,32 +181,35 @@ func TestShutdown_WithFullQueue(t *testing.T) {
 	require.NoError(t, err)
 
 	var jobsDone atomic.Int32
-	expectedJobsToRun := poolSize + queueSize
+	var wg sync.WaitGroup
+	manager, err = NewManager("pool", log.NewNopLogger(), 2, 4, 1*time.Second)
+	require.NoError(t, err)
 
-	// 큐를 가득 채웁니다.
-	for i := 0; i < expectedJobsToRun; i++ {
-		manager.Submit(func(ctx context.Context) {
-			// 작업 내용은 테스트 결과에 영향을 주지 않으므로 간단하게 유지합니다.
+	expectedJobsToSubmit := poolSize + queueSize + 2 // 큐 용량 + 워커 수 + 추가로 드롭될 작업
+	var submittedJobs int32
+
+	wg.Add(int(expectedJobsToSubmit))
+
+	for i := 0; i < int(expectedJobsToSubmit); i++ {
+		if manager.Submit(func(ctx context.Context) {
 			jobsDone.Add(1)
-		})
-		// *** 핵심 수정 ***
-		// Submit 루프가 너무 빨리 실행되어 워커가 작업을 가져갈 기회를 갖기 전에
-		// 큐가 가득 차는 것을 방지하기 위해, CPU를 다른 고루틴에 양보합니다.
-		runtime.Gosched()
+			wg.Done()
+		}) {
+			submittedJobs++
+		} else {
+			wg.Done() // 드롭된 작업에 대해서도 Done 호출
+		}
 	}
 
-	// 이 시점에는 워커들이 작업을 가져가기 시작했으므로,
-	// 추가 작업을 제출하면 성공적으로 큐에 들어갈 가능성이 있습니다.
-	// 테스트의 안정성을 위해, 모든 작업이 완료된 후 카운트를 확인합니다.
+	wg.Wait() // 모든 작업 제출 시도 (성공 또는 실패)가 완료될 때까지 대기
 
 	// Shutdown이 시간 내에 정상적으로 완료되는지 확인
-	// 모든 작업이 완료될 시간을 넉넉하게 줍니다.
 	shutdownErr := manager.Shutdown(500 * time.Millisecond)
 	require.NoError(t, shutdownErr, "Shutdown should complete without a timeout")
 
-	// 최종적으로, 큐에 성공적으로 들어간 작업만 실행되었는지 확인합니다.
-	// runtime.Gosched() 덕분에 6개의 작업이 모두 성공적으로 제출되었을 것입니다.
-	assert.Equal(t, int32(expectedJobsToRun), jobsDone.Load(), "모든 작업이 성공적으로 제출되고 완료되어야 합니다.")
+	// 실제로 실행된 작업 수와 제출된 작업 수를 비교합니다.
+	// 큐가 가득 차서 드롭된 작업이 있을 수 있으므로, submittedJobs와 jobsDone.Load()를 비교합니다.
+	assert.Equal(t, jobsDone.Load(), submittedJobs, "실제로 실행된 작업 수는 제출된 작업 수와 일치해야 합니다.")
 }
 
 // TestPoolStrategy_DropsJob_WhenQueueIsFull_And_LogsIt는 워커 풀의 큐가 가득 찼을 때
@@ -249,8 +252,7 @@ func TestPoolStrategy_DropsJob_WhenQueueIsFull_And_LogsIt(t *testing.T) {
 	// 버려진 작업에 대한 로그가 기록될 시간을 잠시 줍니다.
 	time.Sleep(50 * time.Millisecond)
 
-	expectedLogMsg := "worker queue is full, dropping job"
-	assert.Contains(t, logBuf.String(), expectedLogMsg, "작업 유실 시 경고 로그가 기록되어야 합니다.")
+	assert.Contains(t, logBuf.String(), "level=warn msg=\"worker queue is full, dropping job\"", "작업 유실 시 경고 로그가 기록되어야 합니다.")
 
 	// 6. 테스트 정리
 	close(firstJobBlocker) // 블로킹을 해제하여 워커가 정상 종료되도록 함

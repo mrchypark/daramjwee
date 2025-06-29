@@ -193,3 +193,35 @@ func TestLRU_Churn(t *testing.T) {
 
 	t.Logf("Churn test completed with final cache size: %d", p.ll.Len())
 }
+
+// BenchmarkLRU_Churn은 잦은 추가/삭제/접근 상황에서 LRU 정책의
+// 내부 상태가 일관성을 유지하는지 검증하고, 전반적인 처리 성능을 측정합니다.
+func BenchmarkLRU_Churn(b *testing.B) {
+	// 벤치마크 실행 전 초기 설정을 합니다.
+	p := NewLRUPolicy().(*LRUPolicy)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	const cacheSize = 1000 // 실제 부하와 유사하도록 캐시 크기를 늘립니다.
+
+	// 벤치마크 루프 전에 캐시를 미리 채워둡니다.
+	for i := 0; i < cacheSize; i++ {
+		p.Add("key"+strconv.Itoa(i), 1)
+	}
+
+	// 실제 측정을 시작하기 전에 타이머를 리셋합니다.
+	b.ResetTimer()
+
+	// b.N번 반복하며 성능을 측정합니다.
+	for i := 0; i < b.N; i++ {
+		// 50% 확률로 기존 아이템 접근 (Touch)
+		if rng.Intn(2) == 0 {
+			keyIndex := rng.Intn(cacheSize)
+			p.Touch("key" + strconv.Itoa(keyIndex))
+		} else {
+			// 50% 확률로 아이템 교체 (Evict + Add)
+			p.Evict()
+			newKey := "key" + strconv.Itoa(i+cacheSize)
+			p.Add(newKey, 1)
+		}
+	}
+}

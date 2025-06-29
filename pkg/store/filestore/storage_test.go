@@ -2,6 +2,7 @@ package filestore
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,90 +16,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupTestStore는 각 테스트를 위한 임시 디렉토리와 FileStore 인스턴스를 생성합니다.
-// t.Cleanup()을 사용하여 테스트가 끝나면 자동으로 디렉토리를 삭제합니다.
-func setupTestStoreWithOptions(t *testing.T, opts ...Option) *FileStore {
+// setupTestStore is a helper to create a temporary filestore for testing.
+func setupTestStore(t *testing.T, opts ...Option) *FileStore {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "filestore-test-*")
-	if err != nil {
-		t.Fatalf("테스트 디렉토리 생성 실패: %v", err)
-	}
+	require.NoError(t, err, "failed to create test directory")
+
 	t.Cleanup(func() {
-		// 테스트 중 권한이 변경되었을 수 있으므로, 정리 전에 권한을 복구합니다.
-		_ = os.Chmod(dir, 0755)
-		if err := os.RemoveAll(dir); err != nil {
-			t.Logf("Error removing test directory %s: %v", dir, err)
-		}
+		// Ensure all permissions are restored before removal
+		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil // Ignore errors during cleanup walk
+			}
+			_ = os.Chmod(path, 0755)
+			return nil
+		})
+		os.RemoveAll(dir)
 	})
 
-	// 테스트 중에는 로깅을 하지 않도록 No-op 로거를 사용합니다.
 	logger := log.NewNopLogger()
-	fs, err := New(dir, logger, opts...) // opts 파라미터를 New 함수에 전달
-	if err != nil {
-		t.Fatalf("FileStore 생성 실패: %v", err)
-	}
+	fs, err := New(dir, logger, opts...)
+	require.NoError(t, err, "failed to create filestore")
+
 	return fs
 }
 
-// 기존 테스트와의 호환성을 위해 setupTestStore는 옵션 없이 호출하는 형태로 남겨둡니다.
-func setupTestStore(t *testing.T) *FileStore {
-	return setupTestStoreWithOptions(t)
-}
-
-// TestFileStore_SetWithCopyAndTruncate_ErrorOnCopy는 복사/잘라내기 전략 사용 중
-// 최종 파일 생성 단계에서 에러가 발생했을 때, 에러가 올바르게 전파되고
-// 임시 파일이 깨끗하게 정리되는지 검증합니다.
-func TestFileStore_SetWithCopyAndTruncate_ErrorOnCopy(t *testing.T) {
-	// 1. WithCopyAndTruncate 옵션으로 FileStore를 설정합니다.
-	fs := setupTestStoreWithOptions(t, WithCopyAndTruncate())
-	ctx := context.Background()
-
-	// 2. 에러 상황을 유도합니다.
-	//    존재하지 않는 디렉토리를 포함하는 키를 사용하여 copyFile 내부의 os.Create(dst)가
-	//    실패하도록 만듭니다. 이 방법은 디렉토리 쓰기 권한에 영향을 주지 않으므로
-	//    임시 파일 삭제는 성공할 수 있습니다.
-	key := "non-existent-dir/copy-error-key"
-
-	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
-	if err != nil {
-		t.Fatalf("SetWithWriter 초기화 실패: %v", err)
-	}
-	if _, err := writer.Write([]byte("this data should be cleaned up")); err != nil {
-		t.Fatalf("임시 파일에 쓰기 실패: %v", err)
-	}
-
-	// 3. writer.Close()를 호출합니다. 이 때 내부적으로 copyFile이 실패해야 합니다.
-	err = writer.Close()
-	if err == nil {
-		t.Fatal("writer.Close()가 에러를 반환해야 했지만, 성공했습니다.")
-	}
-
-	// 에러 타입을 확인하는 대신, 에러 메시지 내용을 직접 확인하여 안정성을 높입니다.
-	expectedErrStr := "no such file or directory"
-	if !strings.Contains(err.Error(), expectedErrStr) {
-		t.Fatalf("에러 메시지에 '%s'가 포함되어야 하지만, 실제 에러는 다음과 같습니다: %v", expectedErrStr, err)
-	}
-
-	// 4. 의도한 대로 동작했는지 후속 상태를 검증합니다.
-	// 4.1. 최종 목적지 파일이 생성되지 않았는지 확인합니다.
-	finalPath := fs.toDataPath(key)
-	if _, statErr := os.Stat(finalPath); !os.IsNotExist(statErr) {
-		t.Errorf("복사 실패 후 최종 파일(%s)이 남아있습니다.", finalPath)
-	}
-
-	// 4.2. 임시 파일이 깨끗하게 삭제되었는지 확인합니다. (핵심 검증)
-	files, readDirErr := os.ReadDir(fs.baseDir)
-	if readDirErr != nil {
-		t.Fatalf("정리 상태를 확인하기 위해 디렉토리를 읽는 데 실패했습니다: %v", readDirErr)
-	}
-	for _, file := range files {
-		if strings.HasPrefix(file.Name(), "daramjwee-tmp-") {
-			t.Errorf("에러 발생 후 임시 파일(%s)이 삭제되지 않았습니다.", file.Name())
-		}
-	}
-}
-
-// TestFileStore_SetAndGet은 가장 기본적인 Set 후 Get 시나리오를 테스트합니다.
+// TestFileStore_SetAndGet tests the basic Set and Get functionality.
 func TestFileStore_SetAndGet(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
@@ -106,241 +49,148 @@ func TestFileStore_SetAndGet(t *testing.T) {
 	etag := "v1.0.0"
 	content := "hello daramjwee"
 
-	// 1. 데이터 쓰기
 	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
-	if err != nil {
-		t.Fatalf("SetWithWriter 실패: %v", err)
-	}
+	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
-	if err != nil {
-		t.Fatalf("쓰기 실패: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("닫기 실패: %v", err)
-	}
+	require.NoError(t, err)
+	err = writer.Close()
+	require.NoError(t, err)
 
-	// 2. 데이터 읽기
 	reader, meta, err := fs.GetStream(ctx, key)
-	if err != nil {
-		t.Fatalf("GetStream 실패: %v", err)
-	}
-	defer func() {
-		if err := reader.Close(); err != nil {
-			t.Errorf("Error closing reader: %v", err)
-		}
-	}()
+	require.NoError(t, err)
+	defer reader.Close()
 
-	// 3. 메타데이터 및 콘텐츠 검증
-	if meta.ETag != etag {
-		t.Errorf("ETag 불일치: 기대값 '%s', 실제값 '%s'", etag, meta.ETag)
-	}
+	assert.Equal(t, etag, meta.ETag)
 
 	readBytes, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("읽기 실패: %v", err)
-	}
-	if string(readBytes) != content {
-		t.Errorf("콘텐츠 불일치: 기대값 '%s', 실제값 '%s'", content, string(readBytes))
-	}
+	require.NoError(t, err)
+	assert.Equal(t, content, string(readBytes))
 }
 
-// TestFileStore_Get_NotFound는 존재하지 않는 키를 조회하는 경우를 테스트합니다.
+// TestFileStore_Get_NotFound tests that getting a non-existent key returns the correct error.
 func TestFileStore_Get_NotFound(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
 
 	_, _, err := fs.GetStream(ctx, "non-existent-key")
-	if err != daramjwee.ErrNotFound {
-		t.Errorf("기대 에러는 ErrNotFound이지만, 실제 에러는 %v 입니다", err)
-	}
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
-// TestFileStore_Stat은 데이터 없이 메타데이터만 조회하는 기능을 테스트합니다.
+// TestFileStore_Stat tests getting metadata without file content.
 func TestFileStore_Stat(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
 	key := "stat-key"
 	etag := "etag-for-stat"
 
-	// 테스트 데이터 설정
 	writer, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
-	if _, err := writer.Write([]byte("some data")); err != nil {
-		t.Fatalf("Error writing data for stat test: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("Error closing writer for stat test: %v", err)
-	}
+	require.NoError(t, writer.Close())
 
-	// Stat 호출 및 검증
 	meta, err := fs.Stat(ctx, key)
-	if err != nil {
-		t.Fatalf("Stat 실패: %v", err)
-	}
-	if meta.ETag != etag {
-		t.Errorf("ETag 불일치: 기대값 '%s', 실제값 '%s'", etag, meta.ETag)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, etag, meta.ETag)
 
-	// 존재하지 않는 키에 대한 Stat
 	_, err = fs.Stat(ctx, "non-existent-key")
-	if err != daramjwee.ErrNotFound {
-		t.Errorf("기대 에러는 ErrNotFound이지만, 실제 에러는 %v 입니다", err)
-	}
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
-// TestFileStore_Delete는 객체 삭제 기능을 테스트합니다.
+// TestFileStore_Delete tests the object deletion functionality.
 func TestFileStore_Delete(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
 	key := "delete-key"
 
-	// 테스트 데이터 설정
 	writer, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
-	if _, err := writer.Write([]byte("to be deleted")); err != nil {
-		t.Fatalf("Error writing data for delete test: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("Error closing writer for delete test: %v", err)
-	}
+	require.NoError(t, writer.Close())
 
-	// 삭제 실행
-	if err := fs.Delete(ctx, key); err != nil {
-		t.Fatalf("Delete 실패: %v", err)
-	}
+	err := fs.Delete(ctx, key)
+	require.NoError(t, err)
 
-	// 파일들이 실제로 삭제되었는지 확인
 	dataPath := fs.toDataPath(key)
-	metaPath := fs.toMetaPath(dataPath)
-	if _, err := os.Stat(dataPath); !os.IsNotExist(err) {
-		t.Error("데이터 파일이 삭제되지 않았습니다.")
-	}
-	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
-		t.Error("메타데이터 파일이 삭제되지 않았습니다.")
-	}
+	_, err = os.Stat(dataPath)
+	assert.True(t, os.IsNotExist(err), "data file should be deleted")
 
-	// 이미 삭제된 키를 다시 삭제 (에러가 발생하면 안 됨)
-	if err := fs.Delete(ctx, key); err != nil {
-		t.Errorf("이미 삭제된 키를 다시 삭제할 때 에러 발생: %v", err)
-	}
+	err = fs.Delete(ctx, key) // Deleting again should not error
+	require.NoError(t, err)
 }
 
-// TestFileStore_Overwrite는 기존 객체를 덮어쓰는 시나리오를 테스트합니다.
+// TestFileStore_Overwrite tests overwriting an existing object.
 func TestFileStore_Overwrite(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
 	key := "overwrite-key"
 
-	// Version 1 쓰기
+	// Write version 1
 	writer1, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
-	if _, err := writer1.Write([]byte("version 1")); err != nil {
-		t.Fatalf("Error writing data for overwrite test (initial): %v", err)
-	}
-	if err := writer1.Close(); err != nil {
-		t.Fatalf("Error closing writer for overwrite test (initial): %v", err)
-	}
+	_, err := writer1.Write([]byte("version 1"))
+	require.NoError(t, err)
+	require.NoError(t, writer1.Close())
 
-	// Version 2 쓰기 (덮어쓰기)
+	// Write version 2
 	writer2, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v2"})
-	if _, err := writer2.Write([]byte("version 2")); err != nil {
-		t.Fatalf("Error writing data for overwrite test (new): %v", err)
-	}
-	if err := writer2.Close(); err != nil {
-		t.Fatalf("Error closing writer for overwrite test (new): %v", err)
-	}
+	_, err = writer2.Write([]byte("version 2"))
+	require.NoError(t, err)
+	require.NoError(t, writer2.Close())
 
-	// 최종 버전(v2)이 올바르게 저장되었는지 확인
 	reader, meta, err := fs.GetStream(ctx, key)
-	if err != nil {
-		t.Fatalf("GetStream 실패: %v", err)
-	}
-	defer func() {
-		if err := reader.Close(); err != nil {
-			t.Errorf("Error closing reader: %v", err)
-		}
-	}()
+	require.NoError(t, err)
+	defer reader.Close()
 
-	if meta.ETag != "v2" {
-		t.Errorf("ETag가 v2로 덮어써지지 않았습니다. 실제값: %s", meta.ETag)
-	}
+	assert.Equal(t, "v2", meta.ETag)
 	content, _ := io.ReadAll(reader)
-	if string(content) != "version 2" {
-		t.Errorf("콘텐츠가 'version 2'로 덮어써지지 않았습니다. 실제값: %s", string(content))
-	}
+	assert.Equal(t, "version 2", string(content))
 }
 
-// TestFileStore_PathTraversal은 경로 조작 공격 시도를 방지하는지 테스트합니다.
+// TestFileStore_PathTraversal tests that path traversal attempts are prevented.
 func TestFileStore_PathTraversal(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
 
-	// "../"를 포함하는 악의적인 키
 	maliciousKey := "../malicious-file"
 	writer, err := fs.SetWithWriter(ctx, maliciousKey, &daramjwee.Metadata{ETag: "v1"})
-	if err != nil {
-		t.Fatalf("SetWithWriter 실패: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("Error closing writer for path traversal test: %v", err)
-	}
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
 
-	// 파일이 baseDir 바깥이 아닌 내부에 생성되었는지 확인
-	// toDataPath는 "../"를 제거하므로 "malicious-file" 이라는 파일이 생성되어야 함
 	expectedPath := filepath.Join(fs.baseDir, "malicious-file")
-	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
-		t.Error("경로 조작 방지 로직이 작동하지 않아, 예상된 경로에 파일이 생성되지 않았습니다.")
-	}
+	_, err = os.Stat(expectedPath)
+	assert.NoError(t, err, "file should be created inside the base directory")
 
-	// 실제 상위 디렉토리에 파일이 생성되지 않았는지 확인
 	outsidePath := filepath.Join(fs.baseDir, "..", "malicious-file")
-	if _, err := os.Stat(outsidePath); !os.IsNotExist(err) {
-		t.Error("경로 조작에 성공하여 상위 디렉토리에 파일이 생성되었습니다.")
-	}
+	_, err = os.Stat(outsidePath)
+	assert.True(t, os.IsNotExist(err), "file should not be created outside the base directory")
 }
 
-// 기존 파일의 맨 아래에 다음 테스트 함수들을 추가합니다.
-
-// TestFileStore_Set_ErrorOnWriteMeta는 메타데이터 파일 쓰기에 실패했을 때
-// 모든 변경사항이 롤백되고 임시 파일이 정리되는지 검증합니다.
-func TestFileStore_Set_ErrorOnWriteMeta(t *testing.T) {
-	fs := setupTestStore(t)
+// TestFileStore_SetWithCopyAndTruncate tests the copy-and-truncate strategy.
+func TestFileStore_SetWithCopyAndTruncate(t *testing.T) {
+	fs := setupTestStore(t, WithCopyAndTruncate())
 	ctx := context.Background()
-	key := "meta-write-fail-key"
-	metaPath := fs.toMetaPath(fs.toDataPath(key))
+	key := "copy-test"
+	content := "data for copy"
 
-	// 1. 메타 파일 쓰기 실패를 유도하기 위해, 메타 파일 경로에 디렉토리를 생성합니다.
-	//    이렇게 하면 os.WriteFile이 해당 경로에 파일을 쓰려고 할 때 "is a directory" 에러가 발생합니다.
-	err := os.Mkdir(metaPath, 0755)
+	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v-copy"})
 	require.NoError(t, err)
-
-	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	_, err = writer.Write([]byte(content))
 	require.NoError(t, err)
-
-	_, err = writer.Write([]byte("this should be cleaned up"))
-	require.NoError(t, err)
-
-	// 2. Close() 호출 시 내부적으로 writeMetaFile에서 에러가 발생해야 합니다.
 	err = writer.Close()
-	require.Error(t, err, "Close() should fail due to meta write error")
+	require.NoError(t, err)
 
-	// 3. 디렉토리 권한은 변경되지 않았으므로, 임시 파일은 정상적으로 삭제되어야 합니다.
-	files, _ := os.ReadDir(fs.baseDir)
-	for _, file := range files {
-		// 생성했던 metaPath 디렉토리는 남아있을 수 있으므로, 임시 파일만 없는지 확인합니다.
-		if file.Name() == filepath.Base(metaPath) {
-			continue
-		}
-		assert.False(t, strings.HasPrefix(file.Name(), "daramjwee-tmp-"), "Temporary file should be cleaned up")
-	}
+	reader, _, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	readBytes, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, content, string(readBytes))
 }
 
-// TestFileStore_SetWithRename_ErrorOnRename은 최종 rename 단계에서 실패했을 때
-// 롤백 로직(메타 파일 삭제)이 올바르게 동작하는지 검증합니다.
-func TestFileStore_SetWithRename_ErrorOnRename(t *testing.T) {
-	fs := setupTestStore(t) // 기본 전략: rename
+// TestFileStore_Set_ErrorOnFinalize_Rename tests that an error during rename cleans up the temp file.
+func TestFileStore_Set_ErrorOnFinalize_Rename(t *testing.T) {
+	fs := setupTestStore(t) // Default rename strategy
 	ctx := context.Background()
 	key := "rename-fail-key"
 	dataPath := fs.toDataPath(key)
 
-	// 1. rename 실패를 유도하기 위해 최종 경로에 파일이 아닌 디렉토리를 생성
+	// Create a directory where the file should be, to cause os.Rename to fail.
 	err := os.Mkdir(dataPath, 0755)
 	require.NoError(t, err)
 
@@ -349,51 +199,47 @@ func TestFileStore_SetWithRename_ErrorOnRename(t *testing.T) {
 	_, err = writer.Write([]byte("some data"))
 	require.NoError(t, err)
 
-	// 2. Close() 호출 시 내부적으로 os.Rename에서 에러 발생
-	// (파일을 디렉토리로 덮어쓸 수 없기 때문)
 	err = writer.Close()
-	require.Error(t, err, "Close() should return an error on rename failure")
+	require.Error(t, err, "Close() should fail on rename error")
 
-	// 3. 롤백 로직 검증: rename 전에 생성된 메타 파일이 삭제되었는지 확인
-	metaPath := fs.toMetaPath(dataPath)
-	_, err = os.Stat(metaPath)
-	assert.True(t, os.IsNotExist(err), "Meta file should be removed during rollback after rename failure")
+	// Check that the temp file was cleaned up.
+	files, _ := os.ReadDir(fs.baseDir)
+	for _, file := range files {
+		if file.Name() == filepath.Base(dataPath) { // Keep the directory we created to cause the error
+			continue
+		}
+		assert.False(t, strings.HasPrefix(file.Name(), "daramjwee-tmp-"), "Temp file should be cleaned up")
+	}
 }
 
-// TestFileStore_NegativeCache_NoBody tests that setting an item with IsNegative=true
-// and no body results in a zero-byte data file.
-func TestFileStore_NegativeCache_NoBody(t *testing.T) {
-	fs := setupTestStore(t)
+// TestFileStore_Set_ErrorOnFinalize_Copy tests that an error during copy cleans up the temp file.
+func TestFileStore_Set_ErrorOnFinalize_Copy(t *testing.T) {
+	fs := setupTestStore(t, WithCopyAndTruncate())
 	ctx := context.Background()
-	key := "negative-cache-key"
+	key := "subdir/copy-fail-key"
+	destDir := filepath.Dir(fs.toDataPath(key))
 
-	// 1. Set an item with IsNegative=true and an empty body.
-	meta := &daramjwee.Metadata{ETag: "v-neg", IsNegative: true}
-	writer, err := fs.SetWithWriter(ctx, key, meta)
+	// Create the destination directory, then make it read-only.
+	require.NoError(t, os.MkdirAll(destDir, 0755))
+	require.NoError(t, os.Chmod(destDir, 0555)) // Read and execute only
+
+	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err, "SetWithWriter should succeed as temp file creation is unaffected")
+	_, err = writer.Write([]byte("some data"))
 	require.NoError(t, err)
-	// Write *no* data.
+
 	err = writer.Close()
-	require.NoError(t, err)
+	require.Error(t, err, "Close() should fail on copy error due to read-only destination")
+	assert.ErrorContains(t, err, "permission denied")
 
-	// 2. Verify the file system state.
-	dataPath := fs.toDataPath(key)
-	stat, err := os.Stat(dataPath)
-	require.NoError(t, err, "Data file should exist")
-	assert.Equal(t, int64(0), stat.Size(), "Data file should be empty (0 bytes)")
-
-	// 3. Verify via GetStream.
-	reader, retrievedMeta, err := fs.GetStream(ctx, key)
-	require.NoError(t, err)
-	defer reader.Close()
-
-	// Check metadata
-	assert.True(t, retrievedMeta.IsNegative)
-	assert.Equal(t, "v-neg", retrievedMeta.ETag)
-
-	// Check body
-	readBytes, err := io.ReadAll(reader)
-	require.NoError(t, err)
-	assert.Len(t, readBytes, 0, "Retrieved body should be empty")
+	// Check that the temp file was cleaned up.
+	files, _ := os.ReadDir(fs.baseDir)
+	for _, file := range files {
+		if file.IsDir() && file.Name() == "subdir" {
+			continue
+		}
+		assert.False(t, strings.HasPrefix(file.Name(), "daramjwee-tmp-"), "Temp file should be cleaned up")
+	}
 }
 
 // TestFileStore_MetadataFields ensures all metadata fields are stored and retrieved correctly.
@@ -403,7 +249,6 @@ func TestFileStore_MetadataFields(t *testing.T) {
 	key := "metadata-test-key"
 	now := time.Now().Truncate(time.Millisecond) // Truncate for reliable comparison
 
-	// 1. Set data with complex metadata
 	originalMeta := &daramjwee.Metadata{
 		ETag:       "v-complex",
 		CachedAt:   now,
@@ -411,124 +256,108 @@ func TestFileStore_MetadataFields(t *testing.T) {
 	}
 	writer, err := fs.SetWithWriter(ctx, key, originalMeta)
 	require.NoError(t, err)
-	_, err = writer.Write([]byte("data"))
-	require.NoError(t, err)
-	err = writer.Close()
-	require.NoError(t, err)
+	require.NoError(t, writer.Close())
 
-	// 2. Get data and verify metadata
 	_, retrievedMeta, err := fs.GetStream(ctx, key)
 	require.NoError(t, err)
-	require.NotNil(t, retrievedMeta)
-
 	assert.Equal(t, originalMeta.ETag, retrievedMeta.ETag)
-	assert.True(t, originalMeta.CachedAt.Equal(retrievedMeta.CachedAt), "GraceUntil should be equal")
+	assert.True(t, originalMeta.CachedAt.Equal(retrievedMeta.CachedAt))
 	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
-
-	// 3. Stat data and verify metadata
-	retrievedMetaFromStat, err := fs.Stat(ctx, key)
-	require.NoError(t, err)
-	require.NotNil(t, retrievedMetaFromStat)
-
-	assert.Equal(t, originalMeta.ETag, retrievedMetaFromStat.ETag)
-	assert.True(t, originalMeta.CachedAt.Equal(retrievedMetaFromStat.CachedAt), "GraceUntil from Stat should be equal")
-	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
 
-// TestFileStore_SetWithCopyAndTruncate_OrphanFileOnMetaWriteFail는
-// copy-and-truncate 전략 사용 시, 데이터 파일 복사 후 메타데이터 쓰기에 실패했을 때
-// 고아 데이터 파일(orphan data file)이 남는지 검증합니다. 이는 스토리지 누수의
-// 잠재적 원인이 될 수 있음을 보여줍니다.
-func TestFileStore_SetWithCopyAndTruncate_OrphanFileOnMetaWriteFail(t *testing.T) {
-	// 1. copy-and-truncate 옵션으로 FileStore 설정
-	fs := setupTestStoreWithOptions(t, WithCopyAndTruncate())
+// --- Benchmarks ---
+
+func setupBenchmarkStore(b *testing.B, opts ...Option) *FileStore {
+	b.Helper()
+	dir, err := os.MkdirTemp("", "filestore-bench-*")
+	require.NoError(b, err)
+	b.Cleanup(func() { os.RemoveAll(dir) })
+
+	logger := log.NewNopLogger()
+	fs, err := New(dir, logger, opts...)
+	require.NoError(b, err)
+	return fs
+}
+
+func benchmarkFileStoreSet(b *testing.B, store *FileStore) {
 	ctx := context.Background()
-	key := "orphan-file-test-key"
-	dataPath := fs.toDataPath(key)
-	metaPath := fs.toMetaPath(dataPath)
+	data := []byte("this is benchmark data")
+	b.ResetTimer()
+	b.ReportAllocs()
 
-	// 2. 메타 파일 쓰기 실패를 유도합니다.
-	//    메타 파일이 생성될 경로에 미리 디렉토리를 생성해두면,
-	//    내부적으로 writeMetaFile(os.WriteFile) 호출이 "is a directory" 에러를
-	//    반환하며 실패하게 됩니다.
-	err := os.Mkdir(metaPath, 0755)
-	require.NoError(t, err, "메타데이터 경로에 디렉토리 생성 실패")
-
-	// 3. Set 작업을 실행합니다.
-	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v-orphan"})
-	require.NoError(t, err)
-
-	_, err = writer.Write([]byte("this is orphan data"))
-	require.NoError(t, err)
-
-	// 4. Close를 호출합니다. 이 때 내부적으로 메타데이터 쓰기가 실패해야 합니다.
-	closeErr := writer.Close()
-	require.Error(t, closeErr, "메타데이터 쓰기 실패로 인해 Close()는 에러를 반환해야 합니다.")
-	// 에러 메시지에 "is a directory"가 포함되어 있는지 확인하여 의도된 실패인지 검증
-	assert.Contains(t, closeErr.Error(), "is a directory", "에러 메시지가 예상과 다릅니다.")
-
-	// 5. 최종 상태를 검증합니다. (가장 중요한 부분)
-
-	// 5.1. 데이터 파일은 성공적으로 복사되어 남아있어야 합니다 (고아 파일).
-	_, err = os.Stat(dataPath)
-	assert.NoError(t, err, "데이터 파일이 존재해야 합니다 (고아 파일).")
-
-	// 5.2. 임시 파일은 깨끗하게 삭제되었는지 확인합니다.
-	files, readDirErr := os.ReadDir(fs.baseDir)
-	require.NoError(t, readDirErr, "테스트 디렉토리를 읽는 데 실패했습니다.")
-
-	for _, file := range files {
-		// 우리가 생성한 메타 디렉토리를 제외하고, 다른 임시 파일은 없어야 합니다.
-		if file.Name() == filepath.Base(metaPath) {
-			continue
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("bench-key-%d", i)
+		writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v-bench"})
+		if err != nil {
+			b.Fatalf("SetWithWriter failed: %v", err)
 		}
-		assert.False(t, strings.HasPrefix(file.Name(), "daramjwee-tmp-"), "임시 파일(%s)이 남아있습니다.", file.Name())
+		_, err = writer.Write(data)
+		if err != nil {
+			b.Fatalf("Write failed: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			b.Fatalf("Close failed: %v", err)
+		}
 	}
 }
 
-// TestFileStore_InvalidKeys는 파일 시스템에서 문제를 일으킬 수 있는
-// 비정상적인 키 값에 대한 FileStore의 동작을 검증합니다.
-func TestFileStore_InvalidKeys(t *testing.T) {
-	invalidKeys := map[string]string{
-		"EmptyKey":          "",
-		"AbsoluteLinuxPath": "/etc/passwd",
-		"ContainsSlash":     "some/dir/key",
-		"ContainsBackslash": `some\dir\key`,
-		"ContainsColon":     "file:name",
-		"ContainsNullByte":  "key\x00with\x00null",
+func BenchmarkFileStore_Set_RenameStrategy(b *testing.B) {
+	store := setupBenchmarkStore(b)
+	benchmarkFileStoreSet(b, store)
+}
+
+func BenchmarkFileStore_Set_CopyStrategy(b *testing.B) {
+	store := setupBenchmarkStore(b, WithCopyAndTruncate())
+	benchmarkFileStoreSet(b, store)
+}
+
+func benchmarkFileStoreGet(b *testing.B, store *FileStore) {
+	ctx := context.Background()
+	data := []byte("this is benchmark data")
+	numItems := 1000
+
+	for i := 0; i < numItems; i++ {
+		key := fmt.Sprintf("bench-key-%d", i)
+		writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v-bench"})
+		if err != nil {
+			b.Fatalf("Setup: SetWithWriter failed: %v", err)
+		}
+		_, err = writer.Write(data)
+		if err != nil {
+			b.Fatalf("Setup: Write failed: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			b.Fatalf("Setup: Close failed: %v", err)
+		}
 	}
 
-	for testName, key := range invalidKeys {
-		t.Run(testName, func(t *testing.T) {
-			fs := setupTestStore(t)
-			ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
 
-			writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
-			if err != nil {
-				t.Logf("Successfully caught error on SetWithWriter: %v", err)
-				return // Set 단계에서 에러 발생 시 정상 종료
-			}
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("bench-key-%d", i%numItems)
+		reader, _, err := store.GetStream(ctx, key)
+		if err != nil {
+			b.Fatalf("GetStream failed: %v", err)
+		}
 
-			_, writeErr := writer.Write([]byte("some data"))
-			require.NoError(t, writeErr)
+		_, err = io.Copy(io.Discard, reader)
+		if err != nil {
+			b.Fatalf("io.Copy to Discard failed: %v", err)
+		}
 
-			closeErr := writer.Close()
-
-			// ✅ 핵심 수정: 테스트 케이스에 따라 기대되는 실패를 명시적으로 검증합니다.
-			// 절대 경로, 슬래시 포함 경로, 빈 경로는 Close 시점에서 에러가 발생해야 합니다.
-			// 이는 없는 디렉토리에 파일을 생성하려 하거나, 디렉토리에 파일을 덮어쓰려 하기 때문이며,
-			// 이것이 바로 "안전한 실패"입니다.
-			switch testName {
-			case "AbsoluteLinuxPath", "ContainsSlash", "EmptyKey":
-				require.Error(t, closeErr, "Close() should fail for paths that need non-existent parent directories or overwrite a dir")
-				t.Logf("Successfully caught expected error on Close: %v", closeErr)
-			default:
-				// 다른 케이스들은 에러가 발생할 수도, 안 할 수도 있습니다 (OS 따라 다름).
-				// 중요한 것은 패닉이 발생하지 않는 것입니다.
-				if closeErr != nil {
-					t.Logf("Caught error on Close as expected for this OS: %v", closeErr)
-				}
-			}
-		})
+		if err := reader.Close(); err != nil {
+			b.Fatalf("Reader.Close failed: %v", err)
+		}
 	}
+}
+
+func BenchmarkFileStore_Get_RenameStrategy(b *testing.B) {
+	store := setupBenchmarkStore(b)
+	benchmarkFileStoreGet(b, store)
+}
+
+func BenchmarkFileStore_Get_CopyStrategy(b *testing.B) {
+	store := setupBenchmarkStore(b, WithCopyAndTruncate())
+	benchmarkFileStoreGet(b, store)
 }

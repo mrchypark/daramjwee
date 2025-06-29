@@ -14,7 +14,7 @@ type Job func(ctx context.Context)
 
 // Strategy 인터페이스에 타임아웃이 있는 종료 메서드를 추가합니다.
 type Strategy interface {
-	Submit(job Job)
+	Submit(job Job) bool
 	Shutdown(timeout time.Duration) error // 기존 Shutdown을 대체하거나, 오버로딩합니다.
 }
 
@@ -49,8 +49,8 @@ func NewManager(strategyType string, logger log.Logger, poolSize int, queueSize 
 }
 
 // Submit은 작업을 현재 설정된 전략으로 전달합니다.
-func (m *Manager) Submit(job Job) {
-	m.strategy.Submit(job)
+func (m *Manager) Submit(job Job) bool {
+	return m.strategy.Submit(job)
 }
 
 // Shutdown은 워커 매니저를 안전하게 종료합니다.

@@ -264,3 +264,29 @@ func TestSievePolicy_Churn_Randomized(t *testing.T) {
 
 	t.Logf("SIEVE Churn test completed with final cache size: %d", p.ll.Len())
 }
+
+// BenchmarkSieve_Churn은 잦은 추가/삭제/접근 상황에서 SIEVE 정책의
+// 전반적인 처리 성능을 측정합니다.
+func BenchmarkSieve_Churn(b *testing.B) {
+	p := NewSievePolicy().(*SievePolicy)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	const cacheSize = 1000
+
+	for i := 0; i < cacheSize; i++ {
+		p.Add("key"+strconv.Itoa(i), 1)
+	}
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		if rng.Intn(2) == 0 {
+			keyIndex := rng.Intn(cacheSize)
+			p.Touch("key" + strconv.Itoa(keyIndex))
+		} else {
+			p.Evict()
+			newKey := "key" + strconv.Itoa(i+cacheSize)
+			p.Add(newKey, 1)
+		}
+	}
+}
