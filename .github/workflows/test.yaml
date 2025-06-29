@@ -30,3 +30,29 @@ jobs:
       # -tags=stress 플래그를 추가하여 스트레스 테스트를 실행합니다.
       # 이 테스트들은 시간이 더 오래 걸릴 수 있습니다.
       run: go test -race -tags=race ./...
+
+    - name: Run benchmarks
+      run: make bench
+
+    - name: Read benchmark results
+      id: bench_results
+      run: echo "::set-output name=results::$(cat bench_results.txt)"
+
+    - name: Update README.md
+      run: |
+        # Remove existing benchmark section if it exists
+        sed -i '/^## Benchmarks$/,/```$/d' README.md
+        
+        # Append new benchmark results
+        echo -e "\n## Benchmarks\n" >> README.md
+        echo '```' >> README.md
+        echo "${{ steps.bench_results.outputs.results }}" >> README.md
+        echo '```' >> README.md
+
+    - name: Commit and push changes
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git add README.md
+        git commit -m "Update benchmark results in README.md" || echo "No changes to commit"
+        git push || echo "No changes to push"
