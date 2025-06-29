@@ -142,7 +142,11 @@ func (w *memStoreWriter) Close() error {
 	w.ms.mu.Lock()
 	defer w.ms.mu.Unlock()
 
-	finalData := w.buf.Bytes()
+	// [핵심 수정] 버퍼의 내용을 새로운 바이트 슬라이스로 '복사'합니다.
+	// 이렇게 하면 풀에 반납될 버퍼와 저장소에 저장될 데이터가 완전히 분리됩니다.
+	finalData := make([]byte, w.buf.Len())
+	copy(finalData, w.buf.Bytes())
+
 	newItemSize := int64(len(finalData))
 
 	// 변경: 기존에 아이템이 있었다면, 기존 크기만큼 currentSize에서 뺍니다.
@@ -151,7 +155,7 @@ func (w *memStoreWriter) Close() error {
 	}
 
 	newEntry := entry{
-		value:    finalData,
+		value:    finalData, // 복사된 데이터를 저장합니다.
 		metadata: w.metadata,
 	}
 

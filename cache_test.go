@@ -103,13 +103,26 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Met
 		onClose: func() error {
 			s.mu.Lock()
 			defer s.mu.Unlock()
+
+			// 데이터를 복사하여 저장합니다 (이전 수정 사항).
+			dataBytes := make([]byte, buf.Len())
+			copy(dataBytes, buf.Bytes())
+
 			s.meta[key] = metadata
 			if !metadata.IsNegative {
-				s.data[key] = buf.Bytes()
+				s.data[key] = dataBytes
 			}
-			// ✅ 이 부분이 중요합니다.
-			// 성공적인 쓰기에서는 반드시 writeCompleted 채널에 신호를 보내야 합니다.
-			s.writeCompleted <- key
+
+			// ✅ [핵심 수정] select-default를 사용하여 채널 전송을 non-blocking으로 만듭니다.
+			// Chaos 테스트와 같이 수신자가 없을 수도 있는 고부하 상황에서
+			// 채널이 꽉 차더라도 락을 잡고 무한 대기하는 것을 방지합니다.
+			select {
+			case s.writeCompleted <- key:
+				// 수신자가 있어서 전송에 성공한 경우
+			default:
+				// 수신자가 없거나 채널 버퍼가 꽉 차서 전송에 실패한 경우
+				// (Deadlock 방지를 위해 그냥 넘어갑니다)
+			}
 			return nil
 		},
 		buf: &buf,
