@@ -4,7 +4,7 @@ package worker
 
 import (
 	"context"
-	"errors" // 에러 정의를 위해 추가
+	"errors"
 	"sync"
 	"time"
 
@@ -23,6 +23,10 @@ type PoolStrategy struct {
 	jobs         chan Job
 	wg           sync.WaitGroup
 	shutdownOnce sync.Once
+
+	// [핵심 수정] 제출과 종료의 동시성 문제를 해결하기 위한 뮤텍스와 플래그
+	submitMu   sync.Mutex
+	isShutdown bool
 }
 
 func NewPoolStrategy(logger log.Logger, poolSize int, queueSize int, timeout time.Duration) *PoolStrategy {
@@ -51,8 +55,6 @@ func (p *PoolStrategy) start() {
 			logger := log.With(p.logger, "worker_id", workerID)
 			level.Info(logger).Log("msg", "worker started")
 
-			// **핵심 수정**: for-range는 'jobs' 채널이 닫힐 때까지 큐의 모든 작업을 처리하고,
-			// 채널이 닫히면 루프가 자동으로 안전하게 종료됩니다.
 			for job := range p.jobs {
 				ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 				job(ctx)
@@ -65,6 +67,16 @@ func (p *PoolStrategy) start() {
 
 // Submit은 큐가 찼을 때 작업을 버립니다.
 func (s *PoolStrategy) Submit(job Job) bool {
+	// [핵심 수정] 락을 사용하여 종료 플래그 확인과 채널 전송을 원자적으로 보호합니다.
+	s.submitMu.Lock()
+	defer s.submitMu.Unlock()
+
+	// 락 안에서 종료 여부를 다시 한번 확인합니다.
+	if s.isShutdown {
+		level.Warn(s.logger).Log("msg", "worker is shutdown, dropping job")
+		return false
+	}
+
 	select {
 	case s.jobs <- job:
 		return true
@@ -77,24 +89,24 @@ func (s *PoolStrategy) Submit(job Job) bool {
 // Shutdown은 타임아웃과 함께 우아한 종료를 수행합니다.
 func (p *PoolStrategy) Shutdown(timeout time.Duration) error {
 	p.shutdownOnce.Do(func() {
-		// 1. **(가장 중요)** 'jobs' 채널을 닫습니다.
-		//    이것이 "더 이상 새 일을 받지 말고, 남은 일만 처리하고 퇴근하라"는 신호입니다.
+		// [핵심 수정] 락을 사용하여 isShutdown 플래그 설정과 채널 닫기를 동기화합니다.
+		p.submitMu.Lock()
+		defer p.submitMu.Unlock()
+
+		p.isShutdown = true
 		close(p.jobs)
 	})
 
 	doneCh := make(chan struct{})
 	go func() {
-		// 모든 워커가 for-range 루프를 마치고 종료되면 Wait()가 리턴됩니다.
 		p.wg.Wait()
 		close(doneCh)
 	}()
 
 	select {
 	case <-doneCh:
-		// 시간 내에 정상 종료
 		return nil
 	case <-time.After(timeout):
-		// 타임아웃 발생
 		level.Error(p.logger).Log("msg", "shutdown timed out", "timeout", timeout)
 		return ErrShutdownTimeout
 	}
