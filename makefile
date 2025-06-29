@@ -18,4 +18,4 @@ coverage-text:
 
 bench:
 	@echo "Running benchmarks..."
-	@go test -bench=. -benchmem ./... > bench_results.txt
+	@go test -v -bench=. -benchmem ./... > bench_results.txt

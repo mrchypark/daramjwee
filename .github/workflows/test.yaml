@@ -38,7 +38,7 @@ jobs:
 
     - name: Read benchmark results
       id: bench_results
-      run: echo "::set-output name=results::$(cat bench_results.txt)"
+      run: echo "results=$(cat bench_results.txt)" >> $GITHUB_OUTPUT
 
     - name: Update README.md
       run: |
