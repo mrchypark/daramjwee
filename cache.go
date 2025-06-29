@@ -141,7 +141,10 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 
 		result, err := fetcher.Fetch(jobCtx, oldMetadata)
 		if err != nil {
-			if errors.Is(err, ErrNotModified) {
+			if errors.Is(err, ErrCacheableNotFound) {
+				level.Debug(c.Logger).Log("msg", "re-caching as negative entry during background refresh", "key", key)
+				c.handleNegativeCache(jobCtx, key)
+			} else if errors.Is(err, ErrNotModified) {
 				level.Debug(c.Logger).Log("msg", "background refresh: object not modified", "key", key)
 			} else {
 				level.Error(c.Logger).Log("msg", "background fetch failed", "key", key, "err", err)
@@ -202,15 +205,15 @@ func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher F
 	level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
 
 	var isStale bool
-	// CachedAt과 TTL을 사용한 만료 시간 계산
+	// 메타데이터와 신선도 유지 기간(FreshFor)을 사용한 만료 시간 계산
 	if meta.IsNegative {
-		ttl := c.NegativeFreshFor
-		if ttl > 0 && time.Now().After(meta.CachedAt.Add(ttl)) {
+		freshnessLifetime := c.NegativeFreshFor
+		if freshnessLifetime == 0 || (freshnessLifetime > 0 && time.Now().After(meta.CachedAt.Add(freshnessLifetime))) {
 			isStale = true
 		}
 	} else {
-		ttl := c.PositiveFreshFor
-		if ttl > 0 && time.Now().After(meta.CachedAt.Add(ttl)) {
+		freshnessLifetime := c.PositiveFreshFor
+		if freshnessLifetime == 0 || (freshnessLifetime > 0 && time.Now().After(meta.CachedAt.Add(freshnessLifetime))) {
 			isStale = true
 		}
 	}

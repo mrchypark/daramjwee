@@ -624,6 +624,78 @@ func TestCache_Get_ColdHit_PromotionFails(t *testing.T) {
 	assert.False(t, exists, "Data should not be promoted to the hot store on failure")
 }
 
+// TestCache_FreshForZero_AlwaysTriggersRefresh는 PositiveFreshFor 또는 NegativeFreshFor가 0으로 설정되었을 때,
+// Get()이 호출될 때마다 백그라운드 갱신이 항상 트리거되는지를 검증합니다.
+func TestCache_FreshForZero_AlwaysTriggersRefresh(t *testing.T) {
+	// --- 시나리오 1: Positive 캐시 (WithCache(0)) ---
+	t.Run("PositiveCacheWithFreshForZero", func(t *testing.T) {
+		// 1. FreshFor가 0인 캐시를 설정합니다.
+		cache, hot, _ := setupCache(t, WithCache(0))
+		ctx := context.Background()
+		key := "fresh-for-zero-key"
+		initialContent := "initial data"
+
+		// Fetcher가 호출 횟수를 셀 수 있도록 준비합니다.
+		fetcher := &mockFetcher{content: "new data", etag: "v2"}
+
+		// 2. 캐시에 초기 데이터를 저장합니다.
+		hot.setData(key, initialContent, &Metadata{ETag: "v1", CachedAt: time.Now()})
+
+		// 3. 첫 번째 Get() 호출
+		stream, err := cache.Get(ctx, key, fetcher)
+		require.NoError(t, err)
+		readBytes, _ := io.ReadAll(stream)
+		stream.Close()
+
+		// 반환된 내용은 초기 캐시 데이터여야 합니다.
+		assert.Equal(t, initialContent, string(readBytes))
+		// 잠시 시간을 주어 백그라운드 갱신이 시작될 시간을 확보합니다.
+		time.Sleep(50 * time.Millisecond)
+		// 백그라운드 갱신이 1번 호출되었는지 확인합니다.
+		assert.Equal(t, 1, fetcher.getFetchCount(), "첫 번째 Get() 호출 후 Fetcher는 1번 호출되어야 합니다.")
+
+		// 4. 두 번째 Get() 호출
+		stream, err = cache.Get(ctx, key, fetcher)
+		require.NoError(t, err)
+		stream.Close()
+
+		// 잠시 시간을 주어 백그라운드 갱신이 시작될 시간을 확보합니다.
+		time.Sleep(50 * time.Millisecond)
+		// Get()을 다시 호출했으므로, Fetcher는 총 2번 호출되어야 합니다.
+		assert.Equal(t, 2, fetcher.getFetchCount(), "두 번째 Get() 호출 후 Fetcher는 총 2번 호출되어야 합니다.")
+	})
+
+	// --- 시나리오 2: Negative 캐시 (WithNegativeCache(0)) ---
+	t.Run("NegativeCacheWithFreshForZero", func(t *testing.T) {
+		// 1. NegativeFreshFor가 0인 캐시를 설정합니다.
+		cache, hot, _ := setupCache(t, WithNegativeCache(0))
+		ctx := context.Background()
+		key := "negative-fresh-for-zero-key"
+
+		// Fetcher는 ErrCacheableNotFound를 반환하여 네거티브 캐시를 생성하고 갱신해야 합니다.
+		fetcher := &mockFetcher{err: ErrCacheableNotFound}
+
+		// 2. 캐시에 초기 네거티브 데이터를 저장합니다.
+		hot.setNegativeEntry(key, &Metadata{CachedAt: time.Now()})
+
+		// 3. 첫 번째 Get() 호출
+		_, err := cache.Get(ctx, key, fetcher)
+		require.ErrorIs(t, err, ErrNotFound)
+
+		time.Sleep(50 * time.Millisecond)
+		// 네거티브 캐시가 stale 상태이므로, 백그라운드 갱신이 1번 호출되어야 합니다.
+		assert.Equal(t, 1, fetcher.getFetchCount(), "첫 번째 Get() 호출 후 Fetcher는 1번 호출되어야 합니다.")
+
+		// 4. 두 번째 Get() 호출
+		_, err = cache.Get(ctx, key, fetcher)
+		require.ErrorIs(t, err, ErrNotFound)
+
+		time.Sleep(50 * time.Millisecond)
+		// Get()을 다시 호출했으므로, Fetcher는 총 2번 호출되어야 합니다.
+		assert.Equal(t, 2, fetcher.getFetchCount(), "두 번째 Get() 호출 후 Fetcher는 총 2번 호출되어야 합니다.")
+	})
+}
+
 // setupBenchmarkCache는 벤치마크(*testing.B)를 위한 전용 헬퍼 함수입니다.
 func setupBenchmarkCache(b *testing.B, opts ...Option) (Cache, *mockStore, *mockStore) {
 	b.Helper()
