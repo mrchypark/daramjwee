@@ -296,21 +296,19 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 
 // handleNegativeCache는 네거티브 캐시 항목을 저장하는 로직을 처리합니다.
 func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (io.ReadCloser, error) {
-	if c.NegativeFreshFor > 0 {
-		level.Debug(c.Logger).Log("msg", "caching as negative entry", "key", key, "ttl", c.NegativeFreshFor)
+	level.Debug(c.Logger).Log("msg", "caching as negative entry", "key", key, "NegativeFreshFor", c.NegativeFreshFor)
 
-		meta := &Metadata{
-			IsNegative: true,
-			CachedAt:   time.Now(),
-		}
+	meta := &Metadata{
+		IsNegative: true,
+		CachedAt:   time.Now(),
+	}
 
-		writer, err := c.setStreamToStore(ctx, c.HotStore, key, meta)
-		if err != nil {
-			level.Warn(c.Logger).Log("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
-		} else {
-			if closeErr := writer.Close(); closeErr != nil {
-				level.Warn(c.Logger).Log("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
-			}
+	writer, err := c.setStreamToStore(ctx, c.HotStore, key, meta)
+	if err != nil {
+		level.Warn(c.Logger).Log("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
+	} else {
+		if closeErr := writer.Close(); closeErr != nil {
+			level.Warn(c.Logger).Log("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
 		}
 	}
 	return nil, ErrNotFound
