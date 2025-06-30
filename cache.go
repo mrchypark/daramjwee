@@ -36,7 +36,6 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	if c.isClosed.Load() {
 		return nil, ErrCacheClosed
 	}
-	// ... (이하 동일)
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
 
@@ -131,7 +130,6 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 	}
 
 	job := func(jobCtx context.Context) {
-		// ... (이하 동일)
 		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key)
 
 		var oldMetadata *Metadata
@@ -218,17 +216,19 @@ func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher F
 		}
 	}
 
+	hotStreamCloser := newCloserWithCallback(hotStream, func() {})
+
 	if isStale {
 		level.Debug(c.Logger).Log("msg", "hot cache is stale, scheduling refresh", "key", key)
-		go c.ScheduleRefresh(context.Background(), key, fetcher)
+		hotStreamCloser = newCloserWithCallback(hotStream, func() { c.ScheduleRefresh(context.Background(), key, fetcher) })
 	}
 
 	if meta.IsNegative {
-		hotStream.Close()
+		hotStreamCloser.Close()
 		return nil, ErrNotFound
 	}
 
-	return hotStream, nil
+	return hotStreamCloser, nil
 }
 
 // handleColdHit는 Cold 캐시에서 객체를 찾았을 때의 로직을 처리합니다.
@@ -436,4 +436,27 @@ func newCancelWriteCloser(wc io.WriteCloser, cancel context.CancelFunc) io.Write
 func (cwc *cancelWriteCloser) Close() error {
 	defer cwc.cancel()
 	return cwc.WriteCloser.Close()
+}
+
+type closerWithCallback struct {
+	io.ReadCloser        // 원본 스트림
+	callback      func() // Close 후에 호출될 함수
+}
+
+// newCloserWithCallback은 원본 ReadCloser와 콜백 함수를 받아
+// 새로운 ReadCloser를 생성합니다.
+func newCloserWithCallback(rc io.ReadCloser, cb func()) io.ReadCloser {
+	return &closerWithCallback{
+		ReadCloser: rc,
+		callback:   cb,
+	}
+}
+
+// Close는 먼저 내장된 ReadCloser의 Close를 호출하고, 그 다음에 콜백 함수를 실행합니다.
+// 내장된 Closer의 에러를 반환합니다.
+func (c *closerWithCallback) Close() error {
+	// 콜백 함수는 에러를 반환하지 않으므로, defer를 사용하여
+	// 원본 스트림의 Close가 실패하더라도 콜백이 반드시 실행되도록 보장합니다.
+	defer c.callback()
+	return c.ReadCloser.Close()
 }
