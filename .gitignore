@@ -27,3 +27,5 @@ go.work.sum <mcreference link="https://github.com/github/gitignore/blob/main/Go.
 # IDE / Editor specific files <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 .idea/ <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 .vscode/ <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
+
+examples/**/config_prod.yaml

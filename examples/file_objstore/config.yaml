@@ -1,0 +1,5 @@
+type: azure
+config:
+  storage_account: "<YOUR_AZURE_STORAGE_ACCOUNT>"
+  storage_account_key: "<YOUR_AZURE_STORAGE_KEY>"
+  container: "<YOUR_BLOB_CONTAINER_NAME>"
