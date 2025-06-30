@@ -55,7 +55,7 @@ func main() {
 	}
 	body, _ := io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 
 	// 2. Get the same key again. This should be a cache hit.
 	fmt.Println("--- Second Get (Cache Hit) ---")
@@ -66,7 +66,7 @@ func main() {
 	}
 	body, _ = io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 
 	// 3. Set a new value for the key.
 	fmt.Println("--- Set New Value ---")
@@ -81,7 +81,7 @@ func main() {
 		os.Exit(1)
 	}
 	writer.Close()
-	fmt.Println("Set complete.\n")
+	fmt.Println("Set complete.")
 
 	// 4. Get the key again to see the updated value.
 	fmt.Println("--- Third Get (Cache Hit) ---")
@@ -92,7 +92,7 @@ func main() {
 	}
 	body, _ = io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 
 	// 5. Delete the key.
 	fmt.Println("--- Delete Key ---")
@@ -101,7 +101,7 @@ func main() {
 		logger.Log("msg", "Failed to delete key", "err", err)
 		os.Exit(1)
 	}
-	fmt.Println("Delete complete.\n")
+	fmt.Println("Delete complete.")
 
 	// 6. Get the key one last time. Should be a cache miss again.
 	fmt.Println("--- Fourth Get (Cache Miss) ---")
@@ -112,5 +112,5 @@ func main() {
 	}
 	body, _ = io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 }

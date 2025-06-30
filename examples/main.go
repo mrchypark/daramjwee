@@ -37,7 +37,7 @@ func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 	if oldMetadata != nil {
 		oldETagVal = oldMetadata.ETag
 	}
-	fmt.Printf("[Origin] Fetching key: %s, (old ETag: '%s')\n", f.key, oldETagVal)
+	fmt.Printf("[Origin] Fetching key: %s, (old ETag: '%s')", f.key, oldETagVal)
 	time.Sleep(500 * time.Millisecond) // 원본과의 통신 지연 시뮬레이션
 
 	obj, ok := fakeOrigin[f.key]
@@ -100,7 +100,7 @@ func main() {
 			return
 		}
 
-		fmt.Printf("\n--- Handling request for key: %s ---\n", key)
+		fmt.Printf("--- Handling request for key: %s ---", key)
 
 		// Get 메서드를 호출하여 캐시/원본으로부터 데이터 스트림을 받습니다.
 		stream, err := cache.Get(r.Context(), key, &originFetcher{key: key})
@@ -109,14 +109,14 @@ func main() {
 				fmt.Println("[Handler] Object not found.")
 				http.Error(w, "Object Not Found", http.StatusNotFound)
 			} else {
-				fmt.Printf("[Handler] Error: %v\n", err)
+				fmt.Printf("[Handler] Error: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
 		defer func() {
 			if err := stream.Close(); err != nil {
-				fmt.Printf("[Handler] Error closing stream: %v\n", err)
+				fmt.Printf("[Handler] Error closing stream: %v", err)
 			}
 		}()
 
@@ -124,7 +124,7 @@ func main() {
 		fmt.Println("[Handler] Streaming response to client...")
 		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.Copy(w, stream); err != nil {
-			fmt.Printf("[Handler] Error copying stream to response: %v\n", err)
+			fmt.Printf("[Handler] Error copying stream to response: %v", err)
 			// 이미 헤더가 전송되었을 수 있으므로 http.Error를 사용하지 않고 로깅만 합니다.
 		}
 		fmt.Println("[Handler] Done.")
@@ -136,7 +136,7 @@ func main() {
 	fmt.Println("  http://localhost:8080/objects/world")
 	fmt.Println("  http://localhost:8080/objects/not-exist")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
-		fmt.Printf("Failed to start server: %v\n", err)
+		fmt.Printf("Failed to start server: %v", err)
 		os.Exit(1)
 	}
 }

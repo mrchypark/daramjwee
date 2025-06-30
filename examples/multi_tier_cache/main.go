@@ -74,7 +74,7 @@ func main() {
 	}
 	body, _ := io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 
 	// 2. Get the same key again. This should be a hot cache hit.
 	fmt.Println("--- Second Get (Hot Cache Hit) ---")
@@ -85,7 +85,7 @@ func main() {
 	}
 	body, _ = io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 
 	// 3. Simulate hot cache eviction (e.g., by filling it up with other data).
 	// For simplicity, we'll just delete from hot cache directly.
@@ -95,7 +95,7 @@ func main() {
 		logger.Log("msg", "Failed to delete from hot cache", "err", err)
 		os.Exit(1)
 	}
-	fmt.Println("Key 'multi-key' removed from hot cache.\n")
+	fmt.Println("Key 'multi-key' removed from hot cache.")
 
 	// 4. Get the key again. This should be a cold cache hit.
 	fmt.Println("--- Third Get (Cold Cache Hit) ---")
@@ -106,7 +106,7 @@ func main() {
 	}
 	body, _ = io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 
 	// 5. Set a new value for the key.
 	fmt.Println("--- Set New Value ---")
@@ -121,7 +121,7 @@ func main() {
 		os.Exit(1)
 	}
 	writer.Close()
-	fmt.Println("Set complete.\n")
+	fmt.Println("Set complete.")
 
 	// 6. Get the key again to see the updated value.
 	fmt.Println("--- Fourth Get (Cache Hit) ---")
@@ -132,7 +132,7 @@ func main() {
 	}
 	body, _ = io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 
 	// 7. Delete the key.
 	fmt.Println("--- Delete Key ---")
@@ -141,7 +141,7 @@ func main() {
 		logger.Log("msg", "Failed to delete key", "err", err)
 		os.Exit(1)
 	}
-	fmt.Println("Delete complete.\n")
+	fmt.Println("Delete complete.")
 
 	// 8. Get the key one last time. Should be a cache miss again.
 	fmt.Println("--- Fifth Get (Cache Miss) ---")
@@ -152,5 +152,5 @@ func main() {
 	}
 	body, _ = io.ReadAll(reader)
 	reader.Close()
-	fmt.Printf("Got data: %s\n\n", string(body))
+	fmt.Printf("Got data: %s", string(body))
 }
