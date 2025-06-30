@@ -16,7 +16,7 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 )
 
-// --- 1. 가상 원본(Origin) 서버 시뮬레이션 ---
+// fakeOrigin simulates a virtual origin server with predefined key-value pairs.
 var fakeOrigin = map[string]struct {
 	data string
 	etag string
@@ -25,62 +25,93 @@ var fakeOrigin = map[string]struct {
 	"world": {"World is beautiful. This is the second object.", "v2"},
 }
 
-// --- 2. 커스텀 Fetcher 구현 ---
-
-// originFetcher는 fakeOrigin과 통신하는 Fetcher입니다.
+// originFetcher is a Fetcher implementation that interacts with the fakeOrigin.
 type originFetcher struct {
 	key string
 }
 
+// Fetch retrieves data from the simulated origin.
+// It introduces a delay to simulate network latency and handles ETag-based
+// conditional fetching, returning daramjwee.ErrNotModified if the ETag matches.
 func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	oldETagVal := "none"
 	if oldMetadata != nil {
 		oldETagVal = oldMetadata.ETag
 	}
 	fmt.Printf("[Origin] Fetching key: %s, (old ETag: '%s')", f.key, oldETagVal)
-	time.Sleep(500 * time.Millisecond) // 원본과의 통신 지연 시뮬레이션
+	time.Sleep(500 * time.Millisecond) // Simulate network latency
 
 	obj, ok := fakeOrigin[f.key]
 	if !ok {
 		return nil, daramjwee.ErrNotFound
 	}
 
-	// ETag가 동일하면, 데이터 변경이 없음을 알립니다.
+	// If ETag matches, indicate that the data has not been modified.
 	if oldMetadata != nil && oldMetadata.ETag == obj.etag {
 		return nil, daramjwee.ErrNotModified
 	}
 
-	// 새로운 데이터와 메타데이터를 반환합니다.
+	// Return new data and metadata.
 	return &daramjwee.FetchResult{
 		Body:     io.NopCloser(bytes.NewReader([]byte(obj.data))),
 		Metadata: &daramjwee.Metadata{ETag: obj.etag},
 	}, nil
 }
 
+// ExampleOriginFetcher_Fetch demonstrates how to use originFetcher.
+func ExampleOriginFetcher_Fetch() {
+	fetcher := &originFetcher{key: "hello"}
+	result, err := fetcher.Fetch(context.Background(), nil)
+	if err != nil {
+		fmt.Printf("Error fetching: %v\n", err)
+		return
+	}
+	defer result.Body.Close()
+
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		fmt.Printf("Error reading body: %v\n", err)
+		return
+	}
+	fmt.Printf("Fetched data: %s\n", string(body))
+
+	// Simulate a conditional fetch with a matching ETag
+	fmt.Println("\n--- Conditional Fetch (Not Modified) ---")
+	result, err = fetcher.Fetch(context.Background(), result.Metadata)
+	if err != nil {
+		if err == daramjwee.ErrNotModified {
+			fmt.Println("Data not modified as expected.")
+		} else {
+			fmt.Printf("Error fetching (conditional): %v\n", err)
+		}
+		return
+	}
+	result.Body.Close() // Close if not ErrNotModified
+	fmt.Println("Fetched data again (should not happen if not modified).")
+
+	// Output:
+	// [Origin] Fetching key: hello, (old ETag: 'none')Fetched data: Hello, Daramjwee! This is the first object.
+	//
+	// --- Conditional Fetch (Not Modified) ---
+	// [Origin] Fetching key: hello, (old ETag: 'v1')Data not modified as expected.
+}
+
+// main sets up and runs a daramjwee cache example with a file-based hot store
+// and a simulated origin server, exposing cached content via an HTTP server.
 func main() {
-	// --- 로거 설정 ---
 	logger := log.NewLogfmtLogger(os.Stderr)
 	logger = level.NewFilter(logger, level.AllowDebug())
 
-	// --- 3. daramjwee 캐시 설정 ---
-
-	// Hot Tier: 현재 디렉토리에 filestore 생성
 	hotStoreDir := "./daramjwee-hot-store"
-
-	// Create the directory if it doesn't exist
 	if err := os.MkdirAll(hotStoreDir, 0755); err != nil {
 		panic(err)
 	}
 
-	// 변경: filestore.New 호출 시그니처 변경에 맞게 수정
-	// 기본값(rename 사용)으로 생성하려면 추가 옵션 없이 호출하면 됩니다.
-	// copy 방식을 사용하려면 filestore.WithCopyAndTruncate()를 추가합니다.
 	hotStore, err := filestore.New(hotStoreDir, log.With(logger, "tier", "hot"))
 	if err != nil {
 		panic(err)
 	}
 
-	// daramjwee 인스턴스 생성
 	cache, err := daramjwee.New(
 		logger,
 		daramjwee.WithHotStore(hotStore),
@@ -91,8 +122,6 @@ func main() {
 	}
 	defer cache.Close()
 
-	// --- 4. 웹 서버 실행 ---
-
 	http.HandleFunc("/objects/", func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(r.URL.Path, "/objects/")
 		if key == "" {
@@ -102,7 +131,6 @@ func main() {
 
 		fmt.Printf("--- Handling request for key: %s ---", key)
 
-		// Get 메서드를 호출하여 캐시/원본으로부터 데이터 스트림을 받습니다.
 		stream, err := cache.Get(r.Context(), key, &originFetcher{key: key})
 		if err != nil {
 			if err == daramjwee.ErrNotFound {
@@ -120,12 +148,10 @@ func main() {
 			}
 		}()
 
-		// 받은 스트림을 사용자에게 그대로 전달합니다.
 		fmt.Println("[Handler] Streaming response to client...")
 		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.Copy(w, stream); err != nil {
 			fmt.Printf("[Handler] Error copying stream to response: %v", err)
-			// 이미 헤더가 전송되었을 수 있으므로 http.Error를 사용하지 않고 로깅만 합니다.
 		}
 		fmt.Println("[Handler] Done.")
 	})

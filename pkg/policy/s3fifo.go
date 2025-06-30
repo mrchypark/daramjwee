@@ -1,4 +1,3 @@
-// Package policy provides implementations of the daramjwee.EvictionPolicy interface.
 package policy
 
 import (
@@ -7,36 +6,41 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
-// s3fifoEntry는 S3-FIFO 정책에서 캐시의 각 아이템을 나타냅니다.
+// s3fifoEntry represents an item in the cache for the S3-FIFO policy.
 type s3fifoEntry struct {
 	key    string
 	size   int64
-	isMain bool // 아이템이 메인 큐에 있는지, 아니면 작은 큐에 있는지 여부
-	wasHit bool // 메인 큐에 있는 동안 접근되었는지 (두 번째 기회를 받았는지)
+	isMain bool // Indicates if the item is in the main queue or the small queue.
+	wasHit bool // Indicates if the item has been accessed while in the main queue (given a second chance).
 }
 
-// S3FIFOPolicy는 S3-FIFO 알고리즘의 핵심 아이디어를 차용한
-// Second-Chance FIFO 교체 정책입니다.
-// 이 구현은 스레드 안전하지 않으며, 외부(Store)에서 동기화를 관리해야 합니다.
+// S3FIFOPolicy implements the S3-FIFO (Second-Chance FIFO) eviction policy.
+// This implementation is not thread-safe; external synchronization (e.g., by the Store) is required.
+//
+// Key ideas:
+// - Items are initially added to a 'small' queue.
+// - Items accessed in the small queue are promoted to a 'main' queue.
+// - Items in the main queue get a 'second chance': if accessed, their `wasHit` flag is set.
+// - Eviction prioritizes the small queue if it exceeds its capacity.
+// - Otherwise, eviction scans the main queue, evicting items with `wasHit` false,
+//   and resetting `wasHit` to false for items with `wasHit` true.
 type S3FIFOPolicy struct {
-	smallQueue *list.List               // 새로 추가된 아이템을 위한 '작은' 큐
-	mainQueue  *list.List               // 한 번 이상 접근된 아이템을 위한 '메인' 큐
-	cache      map[string]*list.Element // 빠른 조회를 위한 맵
+	smallQueue *list.List               // Small queue for newly added items.
+	mainQueue  *list.List               // Main queue for frequently accessed items.
+	cache      map[string]*list.Element // Map for fast lookup of list elements by key.
 
-	// smallQueue와 mainQueue의 현재 크기 (바이트)
-	smallSize int64
-	mainSize  int64
+	smallSize int64 // Current size of the small queue in bytes.
+	mainSize  int64 // Current size of the main queue in bytes.
 
-	// smallQueue가 가질 수 있는 최대 크기. 나머지는 mainQueue가 사용합니다.
-	smallCapacity int64
+	smallCapacity int64 // Maximum capacity of the small queue in bytes.
 }
 
-// NewS3FIFOPolicy는 새로운 S3-FIFO 정책을 생성합니다.
-// totalCapacity는 캐시의 총 용량(바이트)이며,
-// smallRatio는 전체 용량 중 smallQueue에 할당할 비율입니다 (예: 0.1은 10%).
+// NewS3FIFOPolicy creates a new S3-FIFO policy.
+// totalCapacity is the total capacity of the cache in bytes.
+// smallRatio is the proportion of the total capacity allocated to the small queue (e.g., 0.1 for 10%).
 func NewS3FIFOPolicy(totalCapacity int64, smallRatio float64) daramjwee.EvictionPolicy {
 	if smallRatio <= 0 || smallRatio >= 1.0 {
-		smallRatio = 0.1 // 기본값 10%
+		smallRatio = 0.1 // Default to 10% if invalid ratio is provided.
 	}
 	smallCap := int64(float64(totalCapacity) * smallRatio)
 	return &S3FIFOPolicy{
@@ -47,13 +51,11 @@ func NewS3FIFOPolicy(totalCapacity int64, smallRatio float64) daramjwee.Eviction
 	}
 }
 
-// 컴파일 타임에 EvictionPolicy 인터페이스를 만족하는지 확인합니다.
-var _ daramjwee.EvictionPolicy = (*S3FIFOPolicy)(nil)
-
-// Add는 새로운 아이템을 캐시에 추가합니다. 아이템은 항상 smallQueue로 먼저 들어갑니다.
+// Add adds a new item to the cache. Items are always initially added to the smallQueue.
+// If the item already exists, its size is updated.
 func (p *S3FIFOPolicy) Add(key string, size int64) {
 	if elem, ok := p.cache[key]; ok {
-		// 이미 존재하는 아이템이면 사이즈만 업데이트합니다.
+		// Item already exists, update its size.
 		entry := elem.Value.(*s3fifoEntry)
 		if entry.isMain {
 			p.mainSize -= entry.size
@@ -66,16 +68,16 @@ func (p *S3FIFOPolicy) Add(key string, size int64) {
 		return
 	}
 
-	// 새 아이템 추가
+	// Add new item to the front of the small queue.
 	entry := &s3fifoEntry{key: key, size: size, isMain: false, wasHit: false}
 	elem := p.smallQueue.PushFront(entry)
 	p.cache[key] = elem
 	p.smallSize += size
 }
 
-// Touch는 아이템이 접근되었을 때 호출됩니다.
-// smallQueue에 있던 아이템은 mainQueue로 승급(promote)됩니다.
-// mainQueue에 있던 아이템은 'wasHit' 플래그가 true로 설정됩니다.
+// Touch is called when an item is accessed.
+// If the item is in the smallQueue, it is promoted to the mainQueue.
+// If the item is already in the mainQueue, its 'wasHit' flag is set to true.
 func (p *S3FIFOPolicy) Touch(key string) {
 	elem, ok := p.cache[key]
 	if !ok {
@@ -85,7 +87,7 @@ func (p *S3FIFOPolicy) Touch(key string) {
 	entry := elem.Value.(*s3fifoEntry)
 
 	if !entry.isMain {
-		// Small -> Main 큐로 승급
+		// Promote from Small to Main queue.
 		p.smallQueue.Remove(elem)
 		p.smallSize -= entry.size
 
@@ -94,19 +96,23 @@ func (p *S3FIFOPolicy) Touch(key string) {
 		p.cache[key] = newElem
 		p.mainSize += entry.size
 	} else {
-		// Main 큐 내에서 접근된 경우, 히트 플래그 설정
+		// Item already in Main queue, set hit flag.
 		entry.wasHit = true
 	}
 }
 
-// Remove는 캐시에서 아이템을 제거합니다.
+// Remove removes an item from the cache.
 func (p *S3FIFOPolicy) Remove(key string) {
 	if elem, ok := p.cache[key]; ok {
 		p.removeElement(elem)
 	}
 }
+
+// Evict determines which item(s) should be evicted and returns their keys.
+// It prioritizes eviction from the small queue if it exceeds its capacity.
+// Otherwise, it scans the main queue, applying the second-chance mechanism.
 func (p *S3FIFOPolicy) Evict() []string {
-	// 1. Small 큐가 용량을 초과하면, 가장 오래된 아이템을 축출합니다.
+	// 1. If the small queue exceeds its capacity, evict the oldest item from it.
 	if p.smallSize > p.smallCapacity {
 		elem := p.smallQueue.Back()
 		if elem != nil {
@@ -115,31 +121,32 @@ func (p *S3FIFOPolicy) Evict() []string {
 		}
 	}
 
-	// 2. Main 큐에서 축출 대상을 찾습니다. (수정된 로직)
+	// 2. Scan the main queue for eviction candidates.
 	if p.mainQueue.Len() > 0 {
-		// 루프 시작 전에 가장 뒤쪽(가장 오래된) 요소를 가져옵니다.
+		// Get the oldest element in the main queue.
 		elem := p.mainQueue.Back()
 		for elem != nil {
-			// 현재 요소를 수정하기 전에, 다음 순회할 요소를 미리 저장합니다.
+			// Store the previous element before potentially modifying `elem`.
 			prevElem := elem.Prev()
 
 			entry := elem.Value.(*s3fifoEntry)
 			if entry.wasHit {
-				// 두 번째 기회를 줍니다. 히트 플래그를 내리고 큐의 앞으로 보냅니다.
+				// Give it a second chance: reset hit flag and move to front of main queue.
 				entry.wasHit = false
 				p.mainQueue.MoveToFront(elem)
 			} else {
-				// 축출 대상 발견
+				// Evict candidate found.
 				victim := p.removeElement(elem)
 				return []string{victim.key}
 			}
-			// 미리 저장해둔 다음 요소로 이동합니다.
+			// Move to the next element in the scan.
 			elem = prevElem
 		}
-		// 루프가 끝났다는 것은 main 큐의 모든 아이템에 기회를 줬다는 의미입니다.
+		// If the loop finishes, all items in the main queue were given a second chance.
 	}
 
-	// 3. Main 큐가 비어있거나, Small 큐가 용량을 초과했을 때만 Small 큐에서 축출합니다.
+	// 3. If the main queue is empty, or if the small queue still exceeds capacity
+	//    (after trying to evict from main), evict from the small queue again.
 	if p.mainQueue.Len() == 0 || p.smallSize > p.smallCapacity {
 		if p.smallQueue.Len() > 0 {
 			elem := p.smallQueue.Back()
@@ -151,7 +158,8 @@ func (p *S3FIFOPolicy) Evict() []string {
 	return nil
 }
 
-// removeElement는 내부 헬퍼 함수로, 주어진 list.Element를 제거하고 정리합니다.
+// removeElement is an internal helper function that removes a given list.Element
+// from its respective queue and the cache map, and updates queue sizes.
 func (p *S3FIFOPolicy) removeElement(e *list.Element) *s3fifoEntry {
 	entry := e.Value.(*s3fifoEntry)
 	if entry.isMain {

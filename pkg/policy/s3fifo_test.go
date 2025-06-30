@@ -194,26 +194,26 @@ func TestS3FIFO_EdgeCases(t *testing.T) {
 	}
 }
 
-// TestS3FIFO_Churn은 잦은 추가/삭제/접근 상황에서 S3-FIFO 정책의
-// 내부 상태가 일관성을 유지하는지 검증하는 무작위 부하 테스트입니다.
+// TestS3FIFO_Churn is a randomized load test that verifies the internal state consistency
+// of the S3-FIFO policy during frequent Add/Remove/Touch operations.
 func TestS3FIFO_Churn(t *testing.T) {
-	// S3-FIFO 정책 생성 (총 용량 100, small 큐 비율 20%)
+	// Create S3-FIFO policy (total capacity 100, small queue ratio 20%)
 	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	const cacheSize = 100    // 캐시의 최대 아이템 수 (용량과 무관하게 아이템 개수로 제한)
-	const iterations = 10000 // 총 연산 횟수
+	const cacheSize = 100    // Max number of items in cache (regardless of capacity)
+	const iterations = 10000 // Total number of operations
 
 	keys := make([]string, 0, cacheSize)
 
 	for i := 0; i < iterations; i++ {
-		// 30% 확률로 새 아이템 추가
+		// 30% chance to add a new item
 		if rng.Intn(10) < 3 || (p.smallQueue.Len()+p.mainQueue.Len()) < cacheSize {
-			// 캐시가 꽉 찼으면, 아이템을 축출
+			// If cache is full, evict an item
 			if (p.smallQueue.Len() + p.mainQueue.Len()) >= cacheSize {
 				evicted := p.Evict()
 				if evicted != nil {
-					// 추적 리스트에서 축출된 키를 제거
+					// Remove evicted key from tracking list
 					for i, k := range keys {
 						if k == evicted[0] {
 							keys = append(keys[:i], keys[i+1:]...)
@@ -223,23 +223,23 @@ func TestS3FIFO_Churn(t *testing.T) {
 				}
 			}
 
-			// 새 키 추가
+			// Add new key
 			newKey := "key" + strconv.Itoa(i)
-			p.Add(newKey, 1) // 모든 아이템의 사이즈는 1로 가정
+			p.Add(newKey, 1) // Assume all items have size 1
 			keys = append(keys, newKey)
 
 		} else if len(keys) > 0 {
-			// 70% 확률로 기존 아이템에 대한 연산 수행
+			// 70% chance to perform an operation on an existing item
 
-			// 무작위로 키를 선택
+			// Select a random key
 			randomKey := keys[rng.Intn(len(keys))]
 
-			// 50% 확률로 Touch, 50% 확률로 Remove
+			// 50% chance for Touch, 50% chance for Remove
 			if rng.Intn(2) == 0 {
 				p.Touch(randomKey)
 			} else {
 				p.Remove(randomKey)
-				// 추적 리스트에서 키 제거
+				// Remove key from tracking list
 				for i, k := range keys {
 					if k == randomKey {
 						keys = append(keys[:i], keys[i+1:]...)
@@ -249,8 +249,8 @@ func TestS3FIFO_Churn(t *testing.T) {
 			}
 		}
 
-		// ✅ 핵심 검증: 매 연산마다 S3-FIFO의 내부 상태 일관성을 확인합니다.
-		// 두 큐의 아이템 개수의 합이 캐시 맵의 전체 아이템 개수와 일치해야 합니다.
+		// Critical verification: ensure internal state consistency after each operation.
+		// The sum of items in both queues must match the total items in the cache map.
 		totalItemsInQueues := p.smallQueue.Len() + p.mainQueue.Len()
 		if totalItemsInQueues != len(p.cache) {
 			t.Fatalf("inconsistent state: total items in queues (%d) != cache map length (%d)", totalItemsInQueues, len(p.cache))
@@ -260,11 +260,11 @@ func TestS3FIFO_Churn(t *testing.T) {
 	t.Logf("S3-FIFO Churn test completed with final cache size: %d", len(p.cache))
 }
 
-// BenchmarkS3FIFO_Churn은 잦은 추가/삭제/접근 상황에서 S3-FIFO 정책의
-// 전반적인 처리 성능을 측정합니다.
+// BenchmarkS3FIFO_Churn measures the overall performance of the S3-FIFO policy
+// under frequent Add/Remove/Touch operations.
 func BenchmarkS3FIFO_Churn(b *testing.B) {
-	// 벤치마크를 위해 충분한 용량을 가진 정책을 생성합니다.
-	// 용량 자체보다는 연산 속도에 초점을 맞춥니다.
+	// Create a policy with sufficient capacity for the benchmark.
+	// Focus is on operation speed rather than capacity limits.
 	p := NewS3FIFOPolicy(100000, 0.1).(*S3FIFOPolicy)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 

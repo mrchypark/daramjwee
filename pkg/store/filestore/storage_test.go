@@ -265,8 +265,7 @@ func TestFileStore_MetadataFields(t *testing.T) {
 	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
 }
 
-// --- Benchmarks ---
-
+// setupBenchmarkStore is a helper for benchmarks.
 func setupBenchmarkStore(b *testing.B, opts ...Option) *FileStore {
 	b.Helper()
 	dir, err := os.MkdirTemp("", "filestore-bench-*")
@@ -279,6 +278,7 @@ func setupBenchmarkStore(b *testing.B, opts ...Option) *FileStore {
 	return fs
 }
 
+// benchmarkFileStoreSet benchmarks the Set operation for FileStore.
 func benchmarkFileStoreSet(b *testing.B, store *FileStore) {
 	ctx := context.Background()
 	data := []byte("this is benchmark data")
@@ -301,16 +301,19 @@ func benchmarkFileStoreSet(b *testing.B, store *FileStore) {
 	}
 }
 
+// BenchmarkFileStore_Set_RenameStrategy benchmarks the Set operation using the rename strategy.
 func BenchmarkFileStore_Set_RenameStrategy(b *testing.B) {
 	store := setupBenchmarkStore(b)
 	benchmarkFileStoreSet(b, store)
 }
 
+// BenchmarkFileStore_Set_CopyStrategy benchmarks the Set operation using the copy-and-truncate strategy.
 func BenchmarkFileStore_Set_CopyStrategy(b *testing.B) {
 	store := setupBenchmarkStore(b, WithCopyAndTruncate())
 	benchmarkFileStoreSet(b, store)
 }
 
+// benchmarkFileStoreGet benchmarks the Get operation for FileStore.
 func benchmarkFileStoreGet(b *testing.B, store *FileStore) {
 	ctx := context.Background()
 	data := []byte("this is benchmark data")
@@ -352,11 +355,13 @@ func benchmarkFileStoreGet(b *testing.B, store *FileStore) {
 	}
 }
 
+// BenchmarkFileStore_Get_RenameStrategy benchmarks the Get operation using the rename strategy.
 func BenchmarkFileStore_Get_RenameStrategy(b *testing.B) {
 	store := setupBenchmarkStore(b)
 	benchmarkFileStoreGet(b, store)
 }
 
+// BenchmarkFileStore_Get_CopyStrategy benchmarks the Get operation using the copy-and-truncate strategy.
 func BenchmarkFileStore_Get_CopyStrategy(b *testing.B) {
 	store := setupBenchmarkStore(b, WithCopyAndTruncate())
 	benchmarkFileStoreGet(b, store)

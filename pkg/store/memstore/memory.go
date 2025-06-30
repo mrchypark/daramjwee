@@ -1,5 +1,3 @@
-// Package memstore provides a simple, in-memory implementation of the daramjwee.Store interface.
-// It is thread-safe and implements the stream-based interface contracts.
 package memstore
 
 import (
@@ -36,15 +34,15 @@ type entry struct {
 type MemStore struct {
 	mu          sync.RWMutex
 	data        map[string]entry
-	capacity    int64 // 변경: int -> int64, 바이트 단위 용량
-	currentSize int64 // 추가: 현재 저장된 총 바이트 크기
+	capacity    int64 // Capacity in bytes
+	currentSize int64 // Current total size of stored items in bytes
 	policy      daramjwee.EvictionPolicy
 }
 
 // New creates a new, empty in-memory store with a given capacity and eviction policy.
 // If capacity is 0 or less, the store has no limit.
 // If policy is nil, a no-op policy is used (no eviction).
-func New(capacity int64, policy daramjwee.EvictionPolicy) *MemStore { // 변경: capacity 타입을 int64로
+func New(capacity int64, policy daramjwee.EvictionPolicy) *MemStore {
 	if policy == nil {
 		policy = daramjwee.NewNullEvictionPolicy()
 	}
@@ -52,16 +50,12 @@ func New(capacity int64, policy daramjwee.EvictionPolicy) *MemStore { // 변경:
 		data:     make(map[string]entry),
 		capacity: capacity,
 		policy:   policy,
-		// currentSize는 자동으로 0으로 초기화됩니다.
 	}
 }
 
-// 컴파일 타임에 MemStore가 daramjwee.Store 인터페이스를 만족하는지 확인합니다.
-var _ daramjwee.Store = (*MemStore)(nil)
-
 // GetStream retrieves an object as a stream from the in-memory map.
 func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	ms.mu.Lock() // RLock -> Lock. policy.Touch might modify internal state.
+	ms.mu.Lock() // Use Lock because policy.Touch might modify internal state.
 	defer ms.mu.Unlock()
 
 	e, ok := ms.data[key]
@@ -94,7 +88,6 @@ func (ms *MemStore) Delete(ctx context.Context, key string) error {
 	defer ms.mu.Unlock()
 
 	if e, ok := ms.data[key]; ok {
-		// 변경: 삭제 전에 크기를 구해서 currentSize를 업데이트합니다.
 		size := int64(len(e.value))
 		ms.currentSize -= size
 
@@ -108,7 +101,7 @@ func (ms *MemStore) Delete(ctx context.Context, key string) error {
 
 // Stat retrieves metadata for an object from the in-memory map.
 func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	ms.mu.Lock() // RLock -> Lock for policy.Touch
+	ms.mu.Lock() // Use Lock for policy.Touch
 	defer ms.mu.Unlock()
 
 	e, ok := ms.data[key]
@@ -122,9 +115,7 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 	return e.metadata, nil
 }
 
-// --- SetWithWriter를 위한 헬퍼 구조체 ---
-
-// memStoreWriter는 io.WriteCloser 인터페이스를 만족하는 헬퍼 타입입니다.
+// memStoreWriter is a helper type that satisfies the io.WriteCloser interface.
 type memStoreWriter struct {
 	ms       *MemStore
 	key      string
@@ -132,45 +123,43 @@ type memStoreWriter struct {
 	buf      *bytes.Buffer
 }
 
-// Write는 받은 데이터를 내부 버퍼에 씁니다.
+// Write writes the provided data to the internal buffer.
 func (w *memStoreWriter) Write(p []byte) (n int, err error) {
 	return w.buf.Write(p)
 }
 
-// Close는 쓰기 작업이 완료되었을 때 호출됩니다.
+// Close is called when the write operation is complete.
+// It commits the buffered data to the MemStore and handles eviction if capacity is exceeded.
 func (w *memStoreWriter) Close() error {
 	w.ms.mu.Lock()
 	defer w.ms.mu.Unlock()
 
-	// [핵심 수정] 버퍼의 내용을 새로운 바이트 슬라이스로 '복사'합니다.
-	// 이렇게 하면 풀에 반납될 버퍼와 저장소에 저장될 데이터가 완전히 분리됩니다.
 	finalData := make([]byte, w.buf.Len())
 	copy(finalData, w.buf.Bytes())
 
 	newItemSize := int64(len(finalData))
 
-	// 변경: 기존에 아이템이 있었다면, 기존 크기만큼 currentSize에서 뺍니다.
+	// If the item already exists, subtract its old size from currentSize.
 	if oldEntry, ok := w.ms.data[w.key]; ok {
 		w.ms.currentSize -= int64(len(oldEntry.value))
 	}
 
 	newEntry := entry{
-		value:    finalData, // 복사된 데이터를 저장합니다.
+		value:    finalData,
 		metadata: w.metadata,
 	}
 
 	w.ms.data[w.key] = newEntry
-	// 변경: 새로 추가된 아이템의 크기만큼 currentSize를 더합니다.
+	// Add the new item's size to currentSize.
 	w.ms.currentSize += newItemSize
 	w.ms.policy.Add(w.key, newItemSize)
 
-	// 변경: 용량 기반 축출 로직
-	// capacity가 0보다 크고, 현재 크기가 용량을 초과하면 반복적으로 축출을 수행합니다.
+	// Eviction logic: if capacity is positive and exceeded, evict items.
 	if w.ms.capacity > 0 {
 		for w.ms.currentSize > w.ms.capacity {
 			keysToEvict := w.ms.policy.Evict()
 			if len(keysToEvict) == 0 {
-				// 더 이상 축출할 후보가 없으면 중단
+				// No more candidates for eviction, break to prevent infinite loop.
 				break
 			}
 
@@ -184,14 +173,13 @@ func (w *memStoreWriter) Close() error {
 			}
 
 			if !actuallyEvicted {
-				// 정책이 유효하지 않은 키만 계속 반환하는 경우,
-				// 무한 루프를 방지하기 위해 중단합니다.
+				// If the policy keeps returning non-existent keys, break to prevent infinite loop.
 				break
 			}
 		}
 	}
 
-	// Reset the writer and put it back in the pool
+	// Reset the writer and return it to the pool.
 	w.buf.Reset()
 	w.ms = nil
 	w.key = ""

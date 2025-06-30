@@ -5,17 +5,18 @@ import (
 	"time"
 )
 
-// ConfigError는 설정 과정에서 발생하는 에러를 나타냅니다.
+// ConfigError represents an error that occurs during the configuration process.
 type ConfigError struct {
 	Message string
 }
 
+// Error returns the error message for ConfigError.
 func (e *ConfigError) Error() string {
 	return fmt.Sprintf("daramjwee: configuration error: %s", e.Message)
 }
 
-// Config는 daramjwee 캐시의 모든 설정을 담는 구조체입니다.
-// Option 함수들은 이 구조체의 필드를 변경합니다.
+// Config holds all the configurable settings for the daramjwee cache.
+// Option functions modify fields within this struct.
 type Config struct {
 	HotStore  Store
 	ColdStore Store
@@ -32,11 +33,11 @@ type Config struct {
 	NegativeFreshFor time.Duration
 }
 
-// Option은 Config를 수정하는 함수 타입입니다.
+// Option is a function type that modifies the Config.
 type Option func(cfg *Config) error
 
-// WithHotStore는 Hot Tier로 사용할 Store를 설정합니다.
-// 이 옵션은 필수적으로 제공되어야 합니다.
+// WithHotStore sets the Store to be used as the Hot Tier.
+// This option is mandatory.
 func WithHotStore(store Store) Option {
 	return func(cfg *Config) error {
 		if store == nil {
@@ -47,8 +48,8 @@ func WithHotStore(store Store) Option {
 	}
 }
 
-// WithColdStore는 Cold Tier로 사용할 Store를 설정합니다.
-// 이 옵션은 선택 사항입니다.
+// WithColdStore sets the Store to be used as the Cold Tier.
+// This option is optional.
 func WithColdStore(store Store) Option {
 	return func(cfg *Config) error {
 		cfg.ColdStore = store
@@ -56,8 +57,8 @@ func WithColdStore(store Store) Option {
 	}
 }
 
-// WithWorker는 백그라운드 작업을 위한 워커의 전략과 상세 설정을 지정합니다.
-// 설정하지 않으면 합리적인 기본값("pool", size 10)이 사용됩니다.
+// WithWorker specifies the worker strategy and detailed settings for background tasks.
+// If not set, reasonable defaults ("pool", size 10) are used.
 func WithWorker(strategyType string, poolSize int, queueSize int, jobTimeout time.Duration) Option {
 	return func(cfg *Config) error {
 		if strategyType == "" {
@@ -77,7 +78,7 @@ func WithWorker(strategyType string, poolSize int, queueSize int, jobTimeout tim
 	}
 }
 
-// WithDefaultTimeout은 Get, Set 등 캐시 작업에 적용될 기본 타임아웃을 설정합니다.
+// WithDefaultTimeout sets the default timeout for cache operations like Get and Set.
 func WithDefaultTimeout(timeout time.Duration) Option {
 	return func(cfg *Config) error {
 		if timeout <= 0 {
@@ -88,6 +89,7 @@ func WithDefaultTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithShutdownTimeout sets the timeout for graceful shutdown of the cache.
 func WithShutdownTimeout(timeout time.Duration) Option {
 	return func(cfg *Config) error {
 		if timeout <= 0 {
@@ -98,10 +100,11 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithCache sets the freshness duration for positive cache entries.
+// If freshFor is 0, the cache entry is considered stale immediately and a background refresh will be triggered on access.
 func WithCache(freshFor time.Duration) Option {
 	return func(cfg *Config) error {
 		if freshFor < 0 {
-			// 혼동을 막기 위해 음수 및 0값은 에러 처리
 			return &ConfigError{"positive cache TTL cannot be a negative value"}
 		}
 		cfg.PositiveFreshFor = freshFor
@@ -109,10 +112,11 @@ func WithCache(freshFor time.Duration) Option {
 	}
 }
 
+// WithNegativeCache sets the freshness duration for negative cache entries (e.g., for ErrNotFound).
+// If freshFor is 0, the negative cache entry is considered stale immediately and a background refresh will be triggered on access.
 func WithNegativeCache(freshFor time.Duration) Option {
 	return func(cfg *Config) error {
 		if freshFor < 0 {
-			// 혼동을 막기 위해 음수 값은 에러 처리
 			return &ConfigError{"negative cache TTL cannot be a negative value"}
 		}
 		cfg.NegativeFreshFor = freshFor

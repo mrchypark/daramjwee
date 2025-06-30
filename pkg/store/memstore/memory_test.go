@@ -1,4 +1,3 @@
-// Filename: pkg/store/memstore/memory_test.go
 package memstore
 
 import (
@@ -14,8 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- Mock Eviction Policy for precise testing ---
-
+// mockPolicy is a mock implementation of EvictionPolicy for testing purposes.
 type mockPolicy struct {
 	mu          sync.Mutex
 	touched     []string
@@ -24,30 +22,35 @@ type mockPolicy struct {
 	keysToEvict []string
 }
 
+// newMockPolicy creates a new mockPolicy.
 func newMockPolicy() *mockPolicy {
 	return &mockPolicy{
 		added: make(map[string]int64),
 	}
 }
 
+// Touch records the touched key.
 func (m *mockPolicy) Touch(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.touched = append(m.touched, key)
 }
 
+// Add records the added key and its size.
 func (m *mockPolicy) Add(key string, size int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.added[key] = size
 }
 
+// Remove records the removed key.
 func (m *mockPolicy) Remove(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.removed = append(m.removed, key)
 }
 
+// Evict returns a predefined key to evict.
 func (m *mockPolicy) Evict() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -59,12 +62,14 @@ func (m *mockPolicy) Evict() []string {
 	return []string{key}
 }
 
+// setKeysToEvict sets the keys that the Evict method should return.
 func (m *mockPolicy) setKeysToEvict(keys ...string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.keysToEvict = keys
 }
 
+// clear resets the recorded calls.
 func (m *mockPolicy) clear() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -74,8 +79,6 @@ func (m *mockPolicy) clear() {
 	m.keysToEvict = nil
 }
 
-// --- Test Cases ---
-
 // TestMemStore_SetAndGetStream tests the basic happy path for setting and getting data.
 func TestMemStore_SetAndGetStream(t *testing.T) {
 	ctx := context.Background()
@@ -84,7 +87,7 @@ func TestMemStore_SetAndGetStream(t *testing.T) {
 	etag := "v1"
 	content := "hello world"
 
-	// 1. Set data
+	// Set data
 	writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
@@ -92,14 +95,14 @@ func TestMemStore_SetAndGetStream(t *testing.T) {
 	err = writer.Close()
 	require.NoError(t, err)
 
-	// 2. Get data
+	// Get data
 	reader, meta, err := store.GetStream(ctx, key)
 	require.NoError(t, err)
 	require.NotNil(t, reader)
 	require.NotNil(t, meta)
 	defer reader.Close()
 
-	// 3. Verify content and metadata
+	// Verify content and metadata
 	readBytes, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, content, string(readBytes))
@@ -123,22 +126,22 @@ func TestMemStore_Stat(t *testing.T) {
 	key := "stat-key"
 	etag := "etag-for-stat"
 
-	// 1. Stat non-existent key
+	// Stat non-existent key
 	_, err := store.Stat(ctx, "non-existent-key")
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 
-	// 2. Set data
+	// Set data
 	writer, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	writer.Write([]byte("data"))
 	writer.Close()
 
-	// 3. Stat existing key
+	// Stat existing key
 	meta, err := store.Stat(ctx, key)
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	assert.Equal(t, etag, meta.ETag)
 
-	// 4. Verify policy was touched
+	// Verify policy was touched
 	assert.Contains(t, policy.touched, key, "Stat should touch the policy")
 }
 
@@ -150,7 +153,7 @@ func TestMemStore_Delete(t *testing.T) {
 	key := "delete-key"
 	content := "some data"
 
-	// 1. Set data
+	// Set data
 	writer, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	writer.Write([]byte(content))
 	writer.Close()
@@ -159,11 +162,11 @@ func TestMemStore_Delete(t *testing.T) {
 	assert.Equal(t, int64(len(content)), initialSize)
 	assert.Contains(t, policy.added, key)
 
-	// 2. Delete the object
+	// Delete the object
 	err := store.Delete(ctx, key)
 	require.NoError(t, err)
 
-	// 3. Verify it's gone
+	// Verify it's gone
 	_, _, err = store.GetStream(ctx, key)
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 	assert.Equal(t, int64(0), store.currentSize, "currentSize should be updated after delete")
@@ -274,8 +277,6 @@ func TestMemStore_PolicyIntegration(t *testing.T) {
 	writer3.Write([]byte("data3-long")) // Exceeds capacity
 	writer3.Close()
 
-	// In this scenario, Evict() will be called, but since the mock returns "key2",
-	// the test should verify that key2 is gone.
 	_, _, err := store.GetStream(ctx, key2)
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound, "key2 should have been evicted")
 }
@@ -346,23 +347,23 @@ func TestMemStore_Parallel(t *testing.T) {
 				r.Close()
 			}
 		})
-		t.Run("Stat", func(t *testing.T) {
-			t.Parallel()
-			_, err := store.Stat(ctx, "keyB")
-			assert.NoError(t, err)
+			t.Run("Stat", func(t *testing.T) {
+				t.Parallel()
+				_, err := store.Stat(ctx, "keyB")
+				assert.NoError(t, err)
+			})
+			t.Run("Delete", func(t *testing.T) {
+				t.Parallel()
+				err := store.Delete(ctx, "keyC")
+				assert.NoError(t, err)
+			})
+			t.Run("Set-New", func(t *testing.T) {
+				t.Parallel()
+				writer, _ := store.SetWithWriter(ctx, "keyE", &daramjwee.Metadata{ETag: "v_new"})
+				writer.Write([]byte("new key"))
+				writer.Close()
+			})
 		})
-		t.Run("Delete", func(t *testing.T) {
-			t.Parallel()
-			err := store.Delete(ctx, "keyC")
-			assert.NoError(t, err)
-		})
-		t.Run("Set-New", func(t *testing.T) {
-			t.Parallel()
-			writer, _ := store.SetWithWriter(ctx, "keyE", &daramjwee.Metadata{ETag: "v_new"})
-			writer.Write([]byte("new key"))
-			writer.Close()
-		})
-	})
 
 	// Final state verification
 	store.mu.RLock()
@@ -381,7 +382,6 @@ func TestMemStore_Parallel(t *testing.T) {
 	assert.True(t, keyE_ok)
 }
 
-// TestMemStore_SetEmptyValue tests setting an empty value.
 // TestMemStore_NegativeCache_NoBody tests that setting an item with IsNegative=true
 // and writing no data results in a zero-byte entry.
 func TestMemStore_NegativeCache_NoBody(t *testing.T) {
@@ -389,7 +389,7 @@ func TestMemStore_NegativeCache_NoBody(t *testing.T) {
 	store := New(100, nil)
 	key := "negative-cache-key"
 
-	// 1. Set an item with IsNegative=true and an empty body.
+	// Set an item with IsNegative=true and an empty body.
 	meta := &daramjwee.Metadata{ETag: "v-neg", IsNegative: true}
 	writer, err := store.SetWithWriter(ctx, key, meta)
 	require.NoError(t, err)
@@ -397,14 +397,14 @@ func TestMemStore_NegativeCache_NoBody(t *testing.T) {
 	err = writer.Close()
 	require.NoError(t, err)
 
-	// 2. Verify internal state.
+	// Verify internal state.
 	store.mu.RLock()
 	entry, ok := store.data[key]
 	require.True(t, ok, "Entry should exist in the map")
 	assert.Len(t, entry.value, 0, "Internal value should be a zero-length byte slice")
 	store.mu.RUnlock()
 
-	// 3. Verify via GetStream.
+	// Verify via GetStream.
 	reader, retrievedMeta, err := store.GetStream(ctx, key)
 	require.NoError(t, err)
 	defer reader.Close()
@@ -419,6 +419,7 @@ func TestMemStore_NegativeCache_NoBody(t *testing.T) {
 	assert.Len(t, readBytes, 0, "Retrieved body should be empty for a negative cache entry")
 }
 
+// TestMemStore_SetEmptyValue tests setting an empty value.
 func TestMemStore_SetEmptyValue(t *testing.T) {
 	ctx := context.Background()
 	store := New(100, nil)
@@ -481,15 +482,21 @@ func TestMemStore_MetadataFields(t *testing.T) {
 	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
 
-// --- 비정상 정책 테스트를 위한 Mock Policy ---
+// badPolicy is a mock EvictionPolicy that can be configured to return non-existent keys.
 type badPolicy struct {
-	// Evict는 항상 존재하지 않는 키를 반환합니다.
 	EvictFunc func() []string
 }
 
+// Touch does nothing.
 func (p *badPolicy) Touch(key string)           {}
+
+// Add does nothing.
 func (p *badPolicy) Add(key string, size int64) {}
+
+// Remove does nothing.
 func (p *badPolicy) Remove(key string)          {}
+
+// Evict returns a predefined list of keys, or non-existent keys by default.
 func (p *badPolicy) Evict() []string {
 	if p.EvictFunc != nil {
 		return p.EvictFunc()
@@ -497,18 +504,14 @@ func (p *badPolicy) Evict() []string {
 	return []string{"non-existent-key-1", "non-existent-key-2"}
 }
 
-// TestMemStore_EvictionLoop_WithBadPolicy는 EvictionPolicy가
-// 유효하지 않은 (존재하지 않는) 키를 계속 반환할 때, MemStore가
-// 무한 루프나 교착 상태에 빠지지 않는지 검증합니다.
+// TestMemStore_EvictionLoop_WithBadPolicy verifies that MemStore does not enter an infinite loop
+// or deadlock when the EvictionPolicy continuously returns invalid (non-existent) keys.
 func TestMemStore_EvictionLoop_WithBadPolicy(t *testing.T) {
 	ctx := context.Background()
-	// 1. 비정상적으로 동작하는 정책을 생성합니다.
 	policy := &badPolicy{}
-	// 용량이 100바이트인 저장소 생성
 	store := New(100, policy)
 
-	// 2. 용량을 초과하는 첫 번째 아이템을 추가합니다.
-	// 이 아이템 자체는 정상적으로 추가되어야 합니다.
+	// Add a first item that fits within capacity.
 	writer1, err := store.SetWithWriter(ctx, "key1", &daramjwee.Metadata{})
 	require.NoError(t, err)
 	_, err = writer1.Write(make([]byte, 80)) // 80 bytes
@@ -516,34 +519,28 @@ func TestMemStore_EvictionLoop_WithBadPolicy(t *testing.T) {
 	err = writer1.Close()
 	require.NoError(t, err)
 
-	// 3. 용량을 초과하게 만드는 두 번째 아이템을 추가합니다.
-	// 이로 인해 Close() 내부에서 축출 루프가 시작됩니다.
+	// Add a second item that exceeds capacity, triggering the eviction loop.
 	writer2, err := store.SetWithWriter(ctx, "key2", &daramjwee.Metadata{})
 	require.NoError(t, err)
 	_, err = writer2.Write(make([]byte, 80)) // 80 bytes. Total=160, Capacity=100
 	require.NoError(t, err)
 
-	// 4. Close() 호출이 무한 루프에 빠지지 않고 일정 시간 내에 완료되는지 검증합니다.
-	// 이 채널은 Close()가 성공적으로 리턴되면 닫힙니다.
+	// Verify that Close() completes within a reasonable time, without looping indefinitely.
 	closeDone := make(chan struct{})
 	go func() {
-		// badPolicy가 존재하지 않는 키만 반환하므로,
-		// 방어 코드가 없다면 이 호출은 영원히 끝나지 않을 것입니다.
 		err = writer2.Close()
-		require.NoError(t, err) // 에러 없이 정상 종료되어야 함
+		require.NoError(t, err) // Should complete without error
 		close(closeDone)
 	}()
 
 	select {
 	case <-closeDone:
-		// 테스트 성공. Close()가 정상적으로 리턴되었습니다.
+		// Test passed: Close() returned successfully.
 	case <-time.After(500 * time.Millisecond):
-		// 500ms 동안 Close()가 리턴되지 않으면 테스트 실패.
 		t.Fatal("writer.Close() did not complete in time, potential infinite loop detected.")
 	}
 
-	// 5. 최종 상태 검증
-	// 축출이 일어나지 않았으므로, 현재 크기는 160이어야 합니다.
+	// Final state verification
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	assert.Equal(t, int64(160), store.currentSize, "Eviction should have failed, so size should be the sum of both items.")
@@ -553,32 +550,26 @@ func TestMemStore_EvictionLoop_WithBadPolicy(t *testing.T) {
 	assert.True(t, key2Exists, "key2 should still exist")
 }
 
-// BenchmarkMemStore_ConcurrentReadWrite는 높은 동시성 환경에서 MemStore의
-// 읽기/쓰기 처리 성능을 측정합니다. 이 벤치마크는 락 경합(lock contention)이
-// 성능에 미치는 영향을 파악하는 데 도움이 됩니다.
+// BenchmarkMemStore_ConcurrentReadWrite measures the read/write performance of MemStore
+// under high concurrency. This benchmark helps identify lock contention issues.
 func BenchmarkMemStore_ConcurrentReadWrite(b *testing.B) {
-	// 1. 벤치마크를 위한 저장소 설정
-	store := New(0, nil) // 용량 제한 없음
+	store := New(0, nil) // No capacity limit
 	ctx := context.Background()
 	key := "benchmark-key"
 	data := []byte("benchmark-data")
 
-	// 벤치마크 시작 전 초기 데이터 하나를 써둡니다.
+	// Pre-populate with one item before starting the benchmark.
 	writer, _ := store.SetWithWriter(ctx, key, &daramjwee.Metadata{})
 	writer.Write(data)
 	writer.Close()
 
-	// 2. 병렬로 벤치마크 실행
-	// b.N은 벤치마크 프레임워크에 의해 결정되는 반복 횟수입니다.
+	// Run the benchmark in parallel.
 	b.RunParallel(func(pb *testing.PB) {
-		// 각 병렬 고루틴은 자신만의 난수 생성기를 가집니다.
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-		// pb.Next()가 true인 동안 루프를 계속 실행합니다.
 		for pb.Next() {
-			// 50% 확률로 읽기 또는 쓰기 연산을 수행합니다.
 			if r.Intn(2) == 0 {
-				// 읽기 연산
+				// Read operation
 				reader, _, err := store.GetStream(ctx, key)
 				if err == nil {
 					// 실제 읽는 동작을 시뮬레이션
@@ -586,7 +577,7 @@ func BenchmarkMemStore_ConcurrentReadWrite(b *testing.B) {
 					reader.Close()
 				}
 			} else {
-				// 쓰기 연산
+				// Write operation
 				writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{})
 				if err == nil {
 					writer.Write(data)

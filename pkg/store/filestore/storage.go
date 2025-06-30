@@ -1,4 +1,3 @@
-// Package filestore provides a disk-based implementation of the daramjwee.Store interface.
 package filestore
 
 import (
@@ -21,7 +20,7 @@ type FileStore struct {
 	baseDir            string
 	logger             log.Logger
 	lockManager        *FileLockManager
-	useCopyAndTruncate bool // Re-added for NFS compatibility
+	useCopyAndTruncate bool // useCopyAndTruncate, if true, uses a copy-and-truncate strategy for writing files.
 }
 
 // Option configures the FileStore.
@@ -37,6 +36,7 @@ func WithCopyAndTruncate() Option {
 }
 
 // New creates a new FileStore.
+// It ensures the base directory exists and initializes the file locking mechanism.
 func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
@@ -52,10 +52,8 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 	return fs, nil
 }
 
-// 컴파일 타임에 인터페이스 만족 확인
-var _ daramjwee.Store = (*FileStore)(nil)
-
 // GetStream reads an object from the store.
+// It returns an io.ReadCloser, the object's metadata, and an error if any.
 func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.RLock(path)
@@ -86,6 +84,8 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 }
 
 // SetWithWriter returns a writer that streams data to the store.
+// The data is written to a temporary file and then atomically moved to the final location
+// upon closing the writer, or copied if WithCopyAndTruncate option is used.
 func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
@@ -107,15 +107,11 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 	onClose := func() (err error) {
 		defer fs.lockManager.Unlock(path)
 
-		// The temporary file must be cleaned up.
-		// In the rename strategy, it's removed after a successful rename.
-		// In the copy strategy, it's removed after a successful copy.
-		// If any step fails, we also attempt to remove it.
 		defer func() {
 			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil && !os.IsNotExist(errRemove) {
 				level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
 				if err == nil {
-					err = errRemove // If the main logic succeeded, report the cleanup failure.
+					err = errRemove
 				}
 			}
 		}()
@@ -169,15 +165,15 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 	return meta, err
 }
 
-// --- Internal Helpers ---
-
+// toDataPath converts a key into a safe file path within the base directory.
+// It prevents path traversal by stripping ".." and leading path separators.
 func (fs *FileStore) toDataPath(key string) string {
 	safeKey := strings.ReplaceAll(key, "..", "")
 	safeKey = strings.TrimPrefix(safeKey, string(os.PathSeparator))
 	return filepath.Join(fs.baseDir, safeKey)
 }
 
-// writeMetadata serializes metadata, prefixes it with its length, and writes it.
+// writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
 func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 	metaBytes, err := json.Marshal(meta)
 	if err != nil {
@@ -197,6 +193,8 @@ func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 }
 
 // readMetadata reads metadata from a reader.
+// It expects the metadata length as a uint32 prefix, followed by the JSON-encoded metadata.
+// It returns the metadata, the offset where the data begins, and an error if any.
 func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(r, lenBuf); err != nil {
@@ -252,42 +250,43 @@ func copyFile(src, dst string) (err error) {
 	return err
 }
 
-// --- I/O Wrappers for Locking ---
-
+// lockedReadCloser wraps an os.File and executes an unlock function on Close.
 type lockedReadCloser struct {
 	*os.File
 	unlockFunc func()
 }
 
+// newLockedReadCloser creates a new lockedReadCloser.
 func newLockedReadCloser(f *os.File, unlockFunc func()) io.ReadCloser {
 	return &lockedReadCloser{File: f, unlockFunc: unlockFunc}
 }
 
+// Close closes the underlying file and executes the unlock function.
 func (lrc *lockedReadCloser) Close() error {
 	defer lrc.unlockFunc()
 	return lrc.File.Close()
 }
 
+// lockedWriteCloser wraps an os.File and executes an onClose function on Close.
 type lockedWriteCloser struct {
 	*os.File
 	onClose func() error
 }
 
+// newLockedWriteCloser creates a new lockedWriteCloser.
 func newLockedWriteCloser(f *os.File, onClose func() error) io.WriteCloser {
 	return &lockedWriteCloser{File: f, onClose: onClose}
 }
 
+// Close closes the underlying file and then executes the onClose callback.
+// It prioritizes the error from the onClose callback.
 func (lwc *lockedWriteCloser) Close() error {
-	// Close the underlying file first.
 	closeErr := lwc.File.Close()
 
-	// Then, execute the onClose logic (rename/copy and cleanup).
 	onCloseErr := lwc.onClose()
 
-	// The error from the atomic operation (onClose) is more critical.
 	if onCloseErr != nil {
 		return onCloseErr
 	}
-	// If the atomic op was fine, return any error from closing the file.
 	return closeErr
 }

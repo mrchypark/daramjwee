@@ -1,4 +1,3 @@
-// Filename: policy/sieve.go
 package policy
 
 import (
@@ -7,108 +6,106 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
-// sieveEntry는 Sieve 정책에서 캐시의 각 아이템을 나타냅니다.
+// sieveEntry represents an item in the cache for the Sieve policy.
 type sieveEntry struct {
 	key     string
 	size    int64
-	visited bool // 아이템이 최근에 접근되었는지 여부
+	visited bool // Indicates if the item has been recently accessed.
 }
 
-// SievePolicy는 SIEVE 캐시 교체 알고리즘을 구현합니다.
-// 이 구현은 스레드 안전하지 않으며, 외부(Store)에서 동기화를 관리해야 합니다.
+// SievePolicy implements the SIEVE cache eviction algorithm.
+// This implementation is not thread-safe; external synchronization (e.g., by the Store) is required.
 //
-// 핵심 아이디어:
-// - 모든 아이템은 양방향 연결 리스트에 저장됩니다.
-// - 'hand'라는 포인터가 리스트의 아이템을 가리킵니다.
-// - 축출 시, 'hand'부터 리스트의 오래된 아이템 방향(뒤쪽)으로 스캔합니다.
-// - 'visited' 플래그가 true인 아이템을 만나면, false로 바꾸고 기회를 한 번 더 줍니다. (살려둠)
-// - 'visited' 플래그가 false인 아이템을 만나면, 해당 아이템을 축출합니다.
-// - 아이템에 접근('Touch')하면 'visited' 플래그가 true가 됩니다.
+// Key ideas:
+// - All items are stored in a doubly linked list.
+// - A 'hand' pointer scans the list.
+// - During eviction, the 'hand' scans from its current position towards the older items.
+// - If an item with `visited` flag true is encountered, its `visited` flag is set to false, and it gets another chance.
+// - If an item with `visited` flag false is encountered, it is evicted.
+// - Accessing an item (`Touch`) sets its `visited` flag to true.
 type SievePolicy struct {
-	ll    *list.List               // 아이템을 순서대로 저장하는 연결 리스트
-	cache map[string]*list.Element // 빠른 조회를 위한 맵
-	hand  *list.Element            // 축출 대상을 스캔하기 위한 '시계침(hand)' 포인터
+	ll    *list.List               // Doubly linked list storing items in order.
+	cache map[string]*list.Element // Map for fast lookup of list elements by key.
+	hand  *list.Element            // Pointer to the current position in the list for scanning.
 }
 
-// NewSievePolicy는 새로운 SIEVE 정책을 생성합니다.
+// NewSievePolicy creates a new SIEVE eviction policy.
 func NewSievePolicy() daramjwee.EvictionPolicy {
 	return &SievePolicy{
 		ll:    list.New(),
 		cache: make(map[string]*list.Element),
-		hand:  nil, // 처음에는 hand가 설정되지 않음
+		hand:  nil,
 	}
 }
 
-// 컴파일 타임에 EvictionPolicy 인터페이스를 만족하는지 확인합니다.
-var _ daramjwee.EvictionPolicy = (*SievePolicy)(nil)
-
-// Add는 새로운 아이템을 캐시에 추가합니다. 아이템은 리스트의 맨 앞에 추가됩니다.
+// Add adds a new item to the cache. If the item already exists, its size is updated,
+// it's moved to the front of the list, and its visited flag is set to true.
+// If it's a new item, it's added to the front with visited set to false.
 func (p *SievePolicy) Add(key string, size int64) {
 	if elem, ok := p.cache[key]; ok {
-		// 이미 존재하는 아이템이면 사이즈를 업데이트하고 맨 앞으로 이동시킵니다.
+		// Item already exists, update and move to front.
 		p.ll.MoveToFront(elem)
 		entry := elem.Value.(*sieveEntry)
 		entry.size = size
-		// 접근으로 간주하여 visited 플래그를 설정할 수도 있으나,
-		// 원본 SIEVE 논문에서는 Add 시에는 visited를 설정하지 않습니다.
-		// 여기서는 LRU와 유사하게 처리하여 업데이트 시 최근 사용으로 간주합니다.
-		entry.visited = true
+		entry.visited = true // Treat as recently accessed on update.
 		return
 	}
 
-	// 새 아이템 추가 (visited = false 상태로)
+	// Add new item with visited = false.
 	entry := &sieveEntry{key: key, size: size, visited: false}
 	elem := p.ll.PushFront(entry)
 	p.cache[key] = elem
 }
 
-// Touch는 아이템이 접근되었을 때 호출됩니다. 해당 아이템의 visited 플래그를 true로 설정합니다.
+// Touch is called when an item is accessed. It sets the item's visited flag to true.
 func (p *SievePolicy) Touch(key string) {
 	if elem, ok := p.cache[key]; ok {
 		elem.Value.(*sieveEntry).visited = true
 	}
 }
 
-// Remove는 캐시에서 아이템을 제거합니다.
+// Remove removes an item from the cache.
 func (p *SievePolicy) Remove(key string) {
 	if elem, ok := p.cache[key]; ok {
 		p.removeElement(elem)
 	}
 }
 
-// Evict는 축출할 아이템을 결정하여 키를 반환합니다.
+// Evict determines which item(s) should be evicted and returns their keys.
+// It scans the list starting from the 'hand' pointer, evicting items with
+// `visited` flag false, and resetting `visited` to false for items with `visited` true.
 func (p *SievePolicy) Evict() []string {
 	if p.ll.Len() == 0 {
 		return nil
 	}
 
-	// hand가 가리키는 위치부터 스캔 시작
+	// Start scanning from the hand position.
 	victimElem := p.hand
 	if victimElem == nil {
-		// hand가 초기화되지 않았다면, 리스트의 맨 뒤(가장 오래된 아이템)에서 시작
+		// If hand is not initialized, start from the back (oldest item).
 		victimElem = p.ll.Back()
 	}
 
-	// visited가 false인 아이템을 찾을 때까지 스캔
+	// Scan until an item with visited = false is found.
 	for {
 		entry := victimElem.Value.(*sieveEntry)
 		if entry.visited {
-			// 기회를 한 번 줌: visited를 false로 바꾸고 다음 후보로 이동
+			// Give it another chance: set visited to false and move to the next candidate.
 			entry.visited = false
 			prev := victimElem.Prev()
 			if prev == nil {
-				// 리스트의 시작에 도달하면 끝으로 이동
+				// If at the beginning of the list, wrap around to the end.
 				victimElem = p.ll.Back()
 			} else {
 				victimElem = prev
 			}
 		} else {
-			// 축출 대상 발견
+			// Found a victim: visited is false.
 			break
 		}
 	}
 
-	// 다음 Evict를 위해 hand 위치를 업데이트
+	// Update hand position for the next Evict call.
 	prev := victimElem.Prev()
 	if prev == nil {
 		p.hand = p.ll.Back()
@@ -116,17 +113,19 @@ func (p *SievePolicy) Evict() []string {
 		p.hand = prev
 	}
 
-	// 최종 희생자(victim) 제거
+	// Remove the chosen victim.
 	victimEntry := p.removeElement(victimElem)
 	return []string{victimEntry.key}
 }
 
-// removeElement는 내부 헬퍼 함수로, 주어진 list.Element를 제거하고 정리합니다.
+// removeElement is an internal helper function that removes a given list.Element
+// from the list and cache map, and adjusts the hand pointer if necessary.
 func (p *SievePolicy) removeElement(e *list.Element) *sieveEntry {
-	// 만약 제거될 요소가 hand가 가리키는 요소라면, hand를 이전 요소로 이동
+	// If the element to be removed is the one pointed to by hand, move hand to the previous element.
 	if e == p.hand {
 		prev := e.Prev()
 		if prev == nil {
+			// If the removed element was the first and hand pointed to it, wrap hand to the end.
 			p.hand = p.ll.Back()
 		} else {
 			p.hand = prev

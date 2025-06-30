@@ -21,14 +21,10 @@ var (
 	testLogger = log.NewNopLogger()
 )
 
-// TestMain sets up the test environment using an in-memory bucket
-// for all tests in this package.
 func TestMain(m *testing.M) {
-	// Use an in-memory bucket for fast and isolated testing.
 	inMemBucket := objstore.NewInMemBucket()
 	testStore = NewObjstoreAdapter(inMemBucket, testLogger)
 
-	// Run all tests
 	os.Exit(m.Run())
 }
 
@@ -39,18 +35,15 @@ func TestObjstoreAdapter_SetAndGetStream(t *testing.T) {
 	etag := "etag-123"
 	content := "hello, daramjwee!"
 
-	// 1. SetWithWriter를 사용하여 스트리밍 업로더를 가져옵니다.
 	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err, "SetWithWriter should not return an error")
 	require.NotNil(t, wc, "writer should not be nil")
 
-	// 2. 데이터를 쓰고 writer를 닫습니다.
 	_, err = io.WriteString(wc, content)
 	require.NoError(t, err, "writing to writer should not fail")
 	err = wc.Close()
 	require.NoError(t, err, "closing writer should not fail")
 
-	// 3. GetStream으로 데이터를 다시 읽어옵니다.
 	rc, meta, err := testStore.GetStream(ctx, key)
 	require.NoError(t, err, "GetStream should not return an error after setting data")
 	require.NotNil(t, rc, "reader should not be nil")
@@ -61,7 +54,6 @@ func TestObjstoreAdapter_SetAndGetStream(t *testing.T) {
 		}
 	}()
 
-	// 4. 내용과 메타데이터를 검증합니다.
 	readBytes, err := io.ReadAll(rc)
 	require.NoError(t, err, "reading from stream should not fail")
 

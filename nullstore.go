@@ -1,4 +1,3 @@
-// package daramjwee provides a simple, "Good Enough" hybrid caching middleware.
 package daramjwee
 
 import (
@@ -6,45 +5,45 @@ import (
 	"io"
 )
 
-// nullStore는 아무 작업도 수행하지 않는 Store 인터페이스의 Null Object 구현입니다.
-// ColdStore가 설정되지 않았을 때 nil 대신 사용되어 nil 체크를 없애줍니다.
+// nullStore is a Null Object implementation of the Store interface.
+// It performs no operations and is used when a ColdStore is not configured,
+// avoiding nil checks.
 type nullStore struct{}
 
-// newNullStore는 nullStore의 새 인스턴스를 생성합니다.
+// newNullStore creates a new instance of nullStore.
 func newNullStore() Store {
 	return &nullStore{}
 }
 
-// 컴파일 타임에 인터페이스 만족 확인
-var _ Store = (*nullStore)(nil)
-
-// GetStream은 항상 ErrNotFound를 반환합니다.
+// GetStream always returns ErrNotFound.
 func (ns *nullStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
 	return nil, nil, ErrNotFound
 }
 
-// SetWithWriter는 모든 데이터를 버리는 io.WriteCloser를 반환합니다.
+// SetWithWriter returns an io.WriteCloser that discards all data.
 func (ns *nullStore) SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
 	return &nullWriteCloser{}, nil
 }
 
-// Delete는 아무것도 하지 않고 성공을 반환합니다.
+// Delete does nothing and returns nil.
 func (ns *nullStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Stat은 항상 ErrNotFound를 반환합니다.
+// Stat always returns ErrNotFound.
 func (ns *nullStore) Stat(ctx context.Context, key string) (*Metadata, error) {
 	return nil, ErrNotFound
 }
 
-// nullWriteCloser는 io.WriteCloser 인터페이스를 만족하며 모든 쓰기 작업을 무시합니다.
+// nullWriteCloser is an io.WriteCloser implementation that discards all written data.
 type nullWriteCloser struct{}
 
+// Write discards the provided bytes and reports success.
 func (nwc *nullWriteCloser) Write(p []byte) (n int, err error) {
-	return len(p), nil // 받은 데이터를 성공적으로 "썼다"고 보고하지만 실제로는 버립니다.
+	return len(p), nil
 }
 
+// Close does nothing and returns nil.
 func (nwc *nullWriteCloser) Close() error {
 	return nil
 }

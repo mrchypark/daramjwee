@@ -14,11 +14,14 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
-// SimpleFetcher is a basic implementation of daramjwee.Fetcher.
+// SimpleFetcher is a basic implementation of daramjwee.Fetcher that returns a predefined string as its data.
 type SimpleFetcher struct {
 	data string
 }
 
+// Fetch simulates fetching data from an origin.
+//
+// In a real application, this would involve network calls to external services.
 func (f *SimpleFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	fmt.Println("Fetching data from origin...")
 	return &daramjwee.FetchResult{
@@ -27,12 +30,32 @@ func (f *SimpleFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 	}, nil
 }
 
+// ExampleSimpleFetcher_Fetch demonstrates how to use SimpleFetcher.
+func ExampleSimpleFetcher_Fetch() {
+	fetcher := &SimpleFetcher{data: "Hello, Daramjwee!"}
+	result, err := fetcher.Fetch(context.Background(), nil)
+	if err != nil {
+		fmt.Printf("Error fetching: %v\n", err)
+		return
+	}
+	defer result.Body.Close()
+
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		fmt.Printf("Error reading body: %v\n", err)
+		return
+	}
+	fmt.Printf("Fetched data: %s\n", string(body))
+	// Output:
+	// Fetching data from origin...
+	// Fetched data: Hello, Daramjwee!
+}
+
+// main showcases the usage of daramjwee cache with a memory store and LRU eviction policy.
 func main() {
 	ctx := context.Background()
-	// Create a memory store with a capacity of 1MB and an LRU eviction policy.
 	memStore := memstore.New(1*1024*1024, policy.NewLRUPolicy())
 
-	// Create a new cache instance.
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	cache, err := daramjwee.New(
 		logger,
@@ -45,7 +68,6 @@ func main() {
 	}
 	defer cache.Close()
 
-	// 1. Get a key that doesn't exist. This will trigger a fetch.
 	fmt.Println("--- First Get (Cache Miss) ---")
 	fetcher := &SimpleFetcher{data: "Hello, Daramjwee!"}
 	reader, err := cache.Get(ctx, "my-key", fetcher)
@@ -57,7 +79,6 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	// 2. Get the same key again. This should be a cache hit.
 	fmt.Println("--- Second Get (Cache Hit) ---")
 	reader, err = cache.Get(ctx, "my-key", fetcher)
 	if err != nil {
@@ -68,7 +89,6 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	// 3. Set a new value for the key.
 	fmt.Println("--- Set New Value ---")
 	writer, err := cache.Set(ctx, "my-key", &daramjwee.Metadata{ETag: "v2"})
 	if err != nil {
@@ -83,9 +103,8 @@ func main() {
 	writer.Close()
 	fmt.Println("Set complete.")
 
-	// 4. Get the key again to see the updated value.
 	fmt.Println("--- Third Get (Cache Hit) ---")
-	reader, err = cache.Get(ctx, "my-key", fetcher) // Always provide a fetcher for potential refresh
+	reader, err = cache.Get(ctx, "my-key", fetcher)
 	if err != nil {
 		logger.Log("msg", "Failed to get key", "err", err)
 		os.Exit(1)
@@ -94,7 +113,6 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	// 5. Delete the key.
 	fmt.Println("--- Delete Key ---")
 	err = cache.Delete(ctx, "my-key")
 	if err != nil {
@@ -103,7 +121,6 @@ func main() {
 	}
 	fmt.Println("Delete complete.")
 
-	// 6. Get the key one last time. Should be a cache miss again.
 	fmt.Println("--- Fourth Get (Cache Miss) ---")
 	reader, err = cache.Get(ctx, "my-key", fetcher)
 	if err != nil {

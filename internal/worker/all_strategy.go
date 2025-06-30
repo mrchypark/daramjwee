@@ -9,7 +9,8 @@ import (
 	"github.com/go-kit/log/level"
 )
 
-// AllStrategy는 제출된 모든 작업에 대해 새로운 고루틴을 생성합니다.
+// AllStrategy creates a new goroutine for every submitted job.
+// It implements the Strategy interface.
 type AllStrategy struct {
 	logger  log.Logger
 	timeout time.Duration
@@ -17,9 +18,7 @@ type AllStrategy struct {
 	wg      sync.WaitGroup
 }
 
-// 컴파일 타임에 Strategy 인터페이스를 만족하는지 확인합니다.
-var _ Strategy = (*AllStrategy)(nil)
-
+// NewAllStrategy creates a new AllStrategy with the specified logger and job timeout.
 func NewAllStrategy(logger log.Logger, timeout time.Duration) *AllStrategy {
 	s := &AllStrategy{
 		logger:  logger,
@@ -30,6 +29,7 @@ func NewAllStrategy(logger log.Logger, timeout time.Duration) *AllStrategy {
 	return s
 }
 
+// start begins the goroutine that listens for new jobs and dispatches them.
 func (s *AllStrategy) start() {
 	go func() {
 		for job := range s.jobs {
@@ -44,13 +44,14 @@ func (s *AllStrategy) start() {
 	}()
 }
 
-// Submit a job to all workers.
+// Submit sends a job to the strategy. It always returns true as it creates a new goroutine for each job.
 func (s *AllStrategy) Submit(job Job) bool {
 	s.jobs <- job
 	return true
 }
 
-// Shutdown은 실행 중인 모든 작업이 완료될 때까지 기다리되, 지정된 타임아웃을 초과하면 에러를 반환합니다.
+// Shutdown waits for all currently running jobs to complete or until the specified timeout is reached.
+// It returns an error if the shutdown times out.
 func (s *AllStrategy) Shutdown(timeout time.Duration) error {
 	close(s.jobs)
 	doneCh := make(chan struct{})

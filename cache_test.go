@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// mockFetcher is a mock implementation of the Fetcher interface for testing purposes.
 type mockFetcher struct {
 	mu              sync.Mutex
 	fetchCount      int
@@ -25,6 +26,7 @@ type mockFetcher struct {
 	lastOldMetadata *Metadata
 }
 
+// Fetch simulates fetching data from an origin, incrementing a fetch counter.
 func (f *mockFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error) {
 	f.mu.Lock()
 	f.fetchCount++
@@ -44,21 +46,24 @@ func (f *mockFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchR
 	}, nil
 }
 
+// getFetchCount returns the number of times Fetch was called.
 func (f *mockFetcher) getFetchCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.fetchCount
 }
 
+// mockStore is a mock implementation of the Store interface for testing purposes.
 type mockStore struct {
 	mu             sync.RWMutex
 	data           map[string][]byte
 	meta           map[string]*Metadata
 	err            error
 	writeCompleted chan string
-	forceSetError  bool // 이 필드를 추가합니다.
+	forceSetError  bool // forceSetError, if true, makes SetWithWriter return an error.
 }
 
+// newMockStore creates a new mockStore.
 func newMockStore() *mockStore {
 	return &mockStore{
 		data:           make(map[string][]byte),
@@ -67,6 +72,7 @@ func newMockStore() *mockStore {
 	}
 }
 
+// GetStream simulates retrieving a stream from the store.
 func (s *mockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -87,25 +93,22 @@ func (s *mockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 	return io.NopCloser(bytes.NewReader(data)), meta, nil
 }
 
+// SetWithWriter simulates writing a stream to the store.
 func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
-	// 에러를 강제하는 경우, 에러만 반환합니다.
 	if s.forceSetError {
 		return nil, errors.New("simulated set error")
 	}
 
-	// 기존의 일반적인 에러 처리 로직은 그대로 둡니다.
 	if s.err != nil {
 		return nil, s.err
 	}
 
-	// 정상적인 쓰기 로직 (기존 테스트들이 의존하는 부분)
 	var buf bytes.Buffer
 	return &mockWriteCloser{
 		onClose: func() error {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 
-			// 데이터를 복사하여 저장합니다 (이전 수정 사항).
 			dataBytes := make([]byte, buf.Len())
 			copy(dataBytes, buf.Bytes())
 
@@ -114,15 +117,9 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Met
 				s.data[key] = dataBytes
 			}
 
-			// ✅ [핵심 수정] select-default를 사용하여 채널 전송을 non-blocking으로 만듭니다.
-			// Chaos 테스트와 같이 수신자가 없을 수도 있는 고부하 상황에서
-			// 채널이 꽉 차더라도 락을 잡고 무한 대기하는 것을 방지합니다.
 			select {
 			case s.writeCompleted <- key:
-				// 수신자가 있어서 전송에 성공한 경우
 			default:
-				// 수신자가 없거나 채널 버퍼가 꽉 차서 전송에 실패한 경우
-				// (Deadlock 방지를 위해 그냥 넘어갑니다)
 			}
 			return nil
 		},
@@ -130,6 +127,7 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Met
 	}, nil
 }
 
+// Delete simulates deleting an entry from the store.
 func (s *mockStore) Delete(ctx context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -138,6 +136,7 @@ func (s *mockStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// Stat simulates retrieving metadata for an entry from the store.
 func (s *mockStore) Stat(ctx context.Context, key string) (*Metadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -148,6 +147,7 @@ func (s *mockStore) Stat(ctx context.Context, key string) (*Metadata, error) {
 	return meta, nil
 }
 
+// setData sets content and metadata for a given key in the mock store.
 func (s *mockStore) setData(key, content string, metadata *Metadata) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -155,6 +155,7 @@ func (s *mockStore) setData(key, content string, metadata *Metadata) {
 	s.meta[key] = metadata
 }
 
+// setNegativeEntry sets a negative cache entry for a given key.
 func (s *mockStore) setNegativeEntry(key string, metadata *Metadata) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,14 +164,19 @@ func (s *mockStore) setNegativeEntry(key string, metadata *Metadata) {
 	delete(s.data, key)
 }
 
+// mockWriteCloser is a mock implementation of io.WriteCloser.
 type mockWriteCloser struct {
 	buf     *bytes.Buffer
 	onClose func() error
 }
 
+// Write writes bytes to the underlying buffer.
 func (mwc *mockWriteCloser) Write(p []byte) (n int, err error) { return mwc.buf.Write(p) }
+
+// Close executes the onClose callback.
 func (mwc *mockWriteCloser) Close() error                      { return mwc.onClose() }
 
+// deterministicFetcher is a mock fetcher that allows controlling fetch start and end signals.
 type deterministicFetcher struct {
 	mockFetcher
 	fetchStarted chan struct{}
@@ -178,6 +184,7 @@ type deterministicFetcher struct {
 	onFetch      func()
 }
 
+// newDeterministicFetcher creates a new deterministicFetcher.
 func newDeterministicFetcher(content, etag string, err error) *deterministicFetcher {
 	return &deterministicFetcher{
 		mockFetcher:  mockFetcher{content: content, etag: etag, err: err},
@@ -186,6 +193,7 @@ func newDeterministicFetcher(content, etag string, err error) *deterministicFetc
 	}
 }
 
+// Fetch simulates fetching data, sending signals before and after the fetch operation.
 func (f *deterministicFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error) {
 	f.fetchStarted <- struct{}{}
 	defer func() { f.fetchEnd <- struct{}{} }()
@@ -195,6 +203,7 @@ func (f *deterministicFetcher) Fetch(ctx context.Context, oldMetadata *Metadata)
 	return f.mockFetcher.Fetch(ctx, oldMetadata)
 }
 
+// setupCache creates a new cache instance with mock stores for testing.
 func setupCache(t *testing.T, opts ...Option) (Cache, *mockStore, *mockStore) {
 	hot := newMockStore()
 	cold := newMockStore()
@@ -212,8 +221,7 @@ func setupCache(t *testing.T, opts ...Option) (Cache, *mockStore, *mockStore) {
 	return cache, hot, cold
 }
 
-// --- 전체 테스트 스위트 ---
-// TestCache_Get_FullMiss는 캐시에 데이터가 전혀 없을 때의 동작을 검증합니다.
+// TestCache_Get_FullMiss verifies the behavior when data is not present in any cache tier.
 func TestCache_Get_FullMiss(t *testing.T) {
 	cache, hot, _ := setupCache(t)
 	ctx := context.Background()
@@ -223,53 +231,44 @@ func TestCache_Get_FullMiss(t *testing.T) {
 	stream, err := cache.Get(ctx, key, fetcher)
 	require.NoError(t, err)
 
-	// 1. 스트림에서 데이터를 모두 읽습니다.
 	readBytes, err := io.ReadAll(stream)
-	require.NoError(t, err, "스트림에서 데이터를 읽는 중 에러가 발생하면 안 됩니다")
+	require.NoError(t, err, "should not get an error reading from stream")
 
-	// 2. (핵심 수정) 스트림을 명시적으로 닫아 쓰기 완료 신호를 트리거합니다.
 	err = stream.Close()
 	require.NoError(t, err)
 
-	// 3. 이제 Hot 캐시로의 비동기 쓰기가 완료될 때까지 안전하게 기다릴 수 있습니다.
 	<-hot.writeCompleted
 
-	// 4. 읽은 콘텐츠와 캐시 상태를 검증합니다.
 	assert.Equal(t, content, string(readBytes))
 	assert.Equal(t, 1, fetcher.getFetchCount())
 
 	hot.mu.RLock()
 	defer hot.mu.RUnlock()
-	require.NotNil(t, hot.meta[key], "메타데이터가 Hot 캐시에 존재해야 합니다.")
+	require.NotNil(t, hot.meta[key], "metadata should exist in Hot cache")
 	assert.Equal(t, content, string(hot.data[key]))
 	assert.Equal(t, etag, hot.meta[key].ETag)
 	assert.False(t, hot.meta[key].CachedAt.IsZero())
 }
 
-// TestCache_Get_ColdHit는 콜드 캐시 히트 및 핫 캐시 승격을 검증합니다.
+// TestCache_Get_ColdHit verifies cold cache hit and promotion to hot cache.
 func TestCache_Get_ColdHit(t *testing.T) {
 	cache, hot, cold := setupCache(t)
 	ctx := context.Background()
 	key, content, etag := "cold-key", "cold content", "v-cold"
 
-	// 1. Cold 캐시에 데이터 준비
 	cold.setData(key, content, &Metadata{ETag: etag, CachedAt: time.Now().Add(-1 * time.Hour)})
 
-	// 2. Get 호출 (Fetcher는 호출되지 않아야 함)
 	stream, err := cache.Get(ctx, key, &mockFetcher{})
 	require.NoError(t, err)
 
 	readBytes, err := io.ReadAll(stream)
 	require.NoError(t, err)
 
-	// 3. (핵심 수정) 스트림을 명시적으로 닫습니다.
 	err = stream.Close()
 	require.NoError(t, err)
 
-	// 4. 비동기 쓰기(승격) 완료를 기다립니다.
 	<-hot.writeCompleted
 
-	// 5. 콘텐츠와 승격 상태를 검증합니다.
 	assert.Equal(t, content, string(readBytes))
 
 	hot.mu.RLock()
@@ -280,8 +279,6 @@ func TestCache_Get_ColdHit(t *testing.T) {
 	assert.Equal(t, etag, hot.meta[key].ETag)
 	assert.True(t, hot.meta[key].CachedAt.After(time.Now().Add(-1*time.Minute)))
 }
-
-// --- 만료 및 네거티브 캐시 테스트 (핵심 로직) ---
 
 func TestCache_StaleHit_ServesStaleWhileRefreshing(t *testing.T) {
 	cache, hot, _ := setupCache(t, WithCache(1*time.Minute))
@@ -312,7 +309,6 @@ func TestCache_NegativeCache_On_ErrCacheableNotFound(t *testing.T) {
 	key := "negative-key"
 	fetcher := &mockFetcher{err: ErrCacheableNotFound}
 
-	// 첫번째 Get
 	stream, err := cache.Get(ctx, key, fetcher)
 	require.ErrorIs(t, err, ErrNotFound)
 	assert.Nil(t, stream)
@@ -324,7 +320,6 @@ func TestCache_NegativeCache_On_ErrCacheableNotFound(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, meta.IsNegative)
 
-	// 두번째 Get
 	stream, err = cache.Get(ctx, key, fetcher)
 	require.ErrorIs(t, err, ErrNotFound)
 	assert.Nil(t, stream)
@@ -352,9 +347,7 @@ func TestCache_NegativeCache_StaleHit(t *testing.T) {
 	assert.Equal(t, freshContent, string(hot.data[key]))
 }
 
-// --- 에러 및 엣지 케이스 테스트 ---
-
-// ✅ [복원된 테스트]
+// TestCache_Get_FetcherError verifies that Get returns an error when the fetcher fails.
 func TestCache_Get_FetcherError(t *testing.T) {
 	cache, _, _ := setupCache(t)
 	expectedErr := errors.New("origin server is down")
@@ -363,7 +356,7 @@ func TestCache_Get_FetcherError(t *testing.T) {
 	assert.ErrorIs(t, err, expectedErr)
 }
 
-// ✅ [복원된 테스트]
+// TestCache_Get_ContextCancellation verifies that Get respects context cancellation.
 func TestCache_Get_ContextCancellation(t *testing.T) {
 	cache, _, _ := setupCache(t)
 	fetcher := &mockFetcher{content: "some data", fetchDelay: 200 * time.Millisecond}
@@ -373,7 +366,7 @@ func TestCache_Get_ContextCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-// ✅ [복원된 테스트]
+// TestCache_Set_Directly verifies that data can be directly set into the cache.
 func TestCache_Set_Directly(t *testing.T) {
 	cache, hot, _ := setupCache(t)
 	ctx := context.Background()
@@ -393,7 +386,7 @@ func TestCache_Set_Directly(t *testing.T) {
 	assert.False(t, hot.meta[key].CachedAt.IsZero(), "CachedAt should be set on direct Set")
 }
 
-// ✅ [복원된 테스트]
+// TestCache_Delete verifies that Delete removes items from both hot and cold stores.
 func TestCache_Delete(t *testing.T) {
 	cache, hot, cold := setupCache(t)
 	key := "delete-key"
@@ -414,34 +407,27 @@ func TestCache_Delete(t *testing.T) {
 	assert.False(t, coldOk)
 }
 
-// TestCache_Close는 cache.Close() 이후의 동작을 검증합니다.
+// TestCache_Close verifies the behavior after cache.Close() is called.
 func TestCache_Close(t *testing.T) {
-	// 1. 테스트 준비
 	cache, hot, _ := setupCache(t, WithCache(1*time.Minute))
 	key := "key-after-close"
-	// 백그라운드 갱신을 유발할 수 있는 만료된 데이터를 준비
 	hot.setData(key, "data", &Metadata{CachedAt: time.Now().Add(-2 * time.Minute)})
 	fetcher := &mockFetcher{content: "new", etag: "v2"}
 
-	// 2. 캐시를 닫음
 	cache.Close()
 
-	// 3. 닫힌 캐시에 Get을 호출하는 것이 새로운 API 계약을 따르는지 확인
-	// 이제 이 호출은 에러를 반환해야 합니다.
 	stream, err := cache.Get(context.Background(), key, fetcher)
 
-	// --- 여기가 핵심 수정 부분 ---
-	// NoError가 아니라, ErrCacheClosed 에러가 발생하는 것을 기대해야 합니다.
 	require.ErrorIs(t, err, ErrCacheClosed, "Get() on a closed cache should now return ErrCacheClosed")
-	// 에러가 발생했으므로 스트림은 nil이어야 합니다.
 	assert.Nil(t, stream, "Stream should be nil when an error is returned")
-	// -------------------------
 
-	// 4. (부가 검증) 어떠한 경우에도 백그라운드 작업이 실행되지 않았는지 확인
-	time.Sleep(50 * time.Millisecond) // 혹시 모를 비동기 호출을 기다림
+	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, 0, fetcher.getFetchCount(), "Fetcher should not be called after cache is closed")
 }
 
+// TestCache_Get_NotModified_ButEvictedRace_Deterministic tests a race condition
+// where an item is reported as not modified but is evicted from the hot cache
+// before it can be served.
 func TestCache_Get_NotModified_ButEvictedRace_Deterministic(t *testing.T) {
 	cache, hot, _ := setupCache(t)
 	ctx := context.Background()
@@ -461,10 +447,7 @@ func TestCache_Get_NotModified_ButEvictedRace_Deterministic(t *testing.T) {
 	assert.Equal(t, 1, fetcher.getFetchCount())
 }
 
-// --- 동시성(Concurrency) 테스트 ---
-
-// ✅ [복원된 테스트]
-
+// TestCache_Concurrent_GetAndDelete verifies concurrent Get and Delete operations.
 func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	cache, hot, _ := setupCache(t)
 	key := "get-delete-key"
@@ -473,28 +456,22 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// 채널을 사용해 Get이 시작되었음을 Delete에 알립니다.
 	getStarted := make(chan struct{})
 
-	// Goroutine 1: Get an object
 	go func() {
 		defer wg.Done()
 		fetcherForGet := &mockFetcher{err: ErrNotModified, etag: "v1"}
 
-		// Get을 실행하기 직전에 신호를 보냅니다.
 		close(getStarted)
 
 		stream, err := cache.Get(context.Background(), key, fetcherForGet)
 		if err == nil {
-			// 스트림을 즉시 닫아 락을 오래 잡고 있지 않도록 합니다.
 			stream.Close()
 		}
 	}()
 
-	// Goroutine 2: Delete the same object
 	go func() {
 		defer wg.Done()
-		// Get이 시작될 때까지 기다립니다.
 		<-getStarted
 
 		err := cache.Delete(context.Background(), key)
@@ -503,58 +480,43 @@ func TestCache_Concurrent_GetAndDelete(t *testing.T) {
 
 	wg.Wait()
 
-	// 최종 상태 검증
 	_, _, err := hot.GetStream(context.Background(), key)
 	assert.ErrorIs(t, err, ErrNotFound, "Item should be deleted after all operations")
 }
 
-// TestCache_ReturnsError_AfterClose는 Close()가 호출된 캐시 인스턴스에 대해
-// 후속 Get, Set, Delete 호출이 명시적인 에러(ErrCacheClosed)를 반환하는지 검증합니다.
+// TestCache_ReturnsError_AfterClose verifies that subsequent calls to Get, Set, and Delete
+// return ErrCacheClosed after the cache instance has been closed.
 func TestCache_ReturnsError_AfterClose(t *testing.T) {
-	// 1. 테스트할 캐시를 생성합니다.
 	cache, _, _ := setupCache(t)
 	ctx := context.Background()
 	key := "any-key-after-close"
 
-	// 2. 캐시를 즉시 닫습니다.
 	cache.Close()
 
-	// 3. 닫힌 캐시에 대한 각 공개 메서드 호출을 검증합니다.
-
-	// 3.1. Get() 호출 검증
 	_, getErr := cache.Get(ctx, key, &mockFetcher{})
 	assert.ErrorIs(t, getErr, ErrCacheClosed, "Get() on a closed cache should return ErrCacheClosed")
 
-	// 3.2. Set() 호출 검증
 	_, setErr := cache.Set(ctx, key, &Metadata{})
 	assert.ErrorIs(t, setErr, ErrCacheClosed, "Set() on a closed cache should return ErrCacheClosed")
 
-	// 3.3. Delete() 호출 검증
 	deleteErr := cache.Delete(ctx, key)
 	assert.ErrorIs(t, deleteErr, ErrCacheClosed, "Delete() on a closed cache should return ErrCacheClosed")
 
-	// 3.4. ScheduleRefresh() 호출 검증 (이것도 공개 API이므로 확인)
 	_ = cache.ScheduleRefresh(ctx, key, &mockFetcher{})
-	// 참고: ScheduleRefresh는 현재 에러를 반환하지 않지만, 안전을 위해 nil이 아니어야 함을 확인하거나
-	// 향후 ErrCacheClosed를 반환하도록 수정할 수 있습니다.
-	// 우선 현재의 계약을 기반으로 테스트합니다.
 	if dc, ok := cache.(*DaramjweeCache); ok {
 		if dc.isClosed.Load() {
-			// isClosed 플래그가 있다면, 에러가 반환되어야 함.
-			// 여기서는 ScheduleRefresh도 에러를 반환하도록 수정되었다고 가정합니다.
-			// func (c *DaramjweeCache) ScheduleRefresh(...) error { if c.isClosed.Load() { return ErrCacheClosed } ... }
-			// assert.ErrorIs(t, refreshErr, ErrCacheClosed, "ScheduleRefresh() on a closed cache should return ErrCacheClosed")
 		}
 	}
 }
 
-// mockCloser는 Close 호출 여부를 추적하고, 설정에 따라 에러를 반환하는 Mock 구현체입니다.
+// mockCloser is a mock implementation of io.Closer that tracks whether Close was called and can simulate errors.
 type mockCloser struct {
 	isClosed    bool
 	shouldError bool
 	closeErr    error
 }
 
+// Close sets isClosed to true and returns an error if shouldError is true.
 func (mc *mockCloser) Close() error {
 	mc.isClosed = true
 	if mc.shouldError {
@@ -566,37 +528,29 @@ func (mc *mockCloser) Close() error {
 	return nil
 }
 
-// TestMultiCloser_ClosesAll_EvenIfOneFails는 multiCloser에 포함된 Closer 중
-// 하나가 에러를 반환하더라도, 나머지 모든 Closer들의 Close가 호출되는 것을 보장하는지 검증합니다.
+// TestMultiCloser_ClosesAll_EvenIfOneFails verifies that multiCloser calls Close on all
+// contained Closers, even if one of them returns an error.
 func TestMultiCloser_ClosesAll_EvenIfOneFails(t *testing.T) {
-	// 1. 3개의 mockCloser를 준비합니다.
 	closer1 := &mockCloser{}
-	// 두 번째 closer는 에러를 반환하도록 설정합니다.
 	closer2 := &mockCloser{shouldError: true}
 	closer3 := &mockCloser{}
 
-	// 2. 이들을 multiCloser로 묶습니다.
 	multi := newMultiCloser(nil, closer1, closer2, closer3)
 
-	// 3. multiCloser의 Close를 호출합니다.
 	err := multi.Close()
 
-	// 4. 결과 검증
-	// 4.1. 에러가 정상적으로 반환되었는지 확인합니다.
 	require.Error(t, err, "multiCloser should return the error from the failing closer")
 
-	// 4.2. (가장 중요) 에러 발생 여부와 상관없이 모든 Closer가 호출되었는지 확인합니다.
 	assert.True(t, closer1.isClosed, "The first closer should have been closed")
 	assert.True(t, closer2.isClosed, "The failing closer should have been attempted to close")
 	assert.True(t, closer3.isClosed, "The third closer should have been closed despite the previous error")
 }
 
-// TestCache_Get_ColdHit_PromotionFails는 콜드 캐시 히트 후
-// Hot Tier로의 승격(promotion)이 실패하는 엣지 케이스를 검증합니다.
+// TestCache_Get_ColdHit_PromotionFails verifies the edge case where a cold cache hit occurs,
+// but the promotion to the hot tier fails.
 func TestCache_Get_ColdHit_PromotionFails(t *testing.T) {
-	// 1. 테스트 환경 설정
 	hot := newMockStore()
-	hot.forceSetError = true // Hot Store에 쓰기 실패를 강제합니다.
+	hot.forceSetError = true
 
 	cold := newMockStore()
 	key, content, etag := "promotion-fail-key", "cold content only", "v-cold"
@@ -606,10 +560,8 @@ func TestCache_Get_ColdHit_PromotionFails(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	// 2. Get 호출 실행
 	stream, err := cache.Get(context.Background(), key, &mockFetcher{})
 
-	// 3. 결과 검증
 	require.NoError(t, err, "Get should not fail even if promotion fails")
 	require.NotNil(t, stream, "A valid stream should be returned from the cold cache")
 
@@ -624,79 +576,60 @@ func TestCache_Get_ColdHit_PromotionFails(t *testing.T) {
 	assert.False(t, exists, "Data should not be promoted to the hot store on failure")
 }
 
-// TestCache_FreshForZero_AlwaysTriggersRefresh는 PositiveFreshFor 또는 NegativeFreshFor가 0으로 설정되었을 때,
-// Get()이 호출될 때마다 백그라운드 갱신이 항상 트리거되는지를 검증합니다.
+// TestCache_FreshForZero_AlwaysTriggersRefresh verifies that when PositiveFreshFor or NegativeFreshFor
+// is set to zero, a background refresh is always triggered on each Get() call.
 func TestCache_FreshForZero_AlwaysTriggersRefresh(t *testing.T) {
-	// --- 시나리오 1: Positive 캐시 (WithCache(0)) ---
 	t.Run("PositiveCacheWithFreshForZero", func(t *testing.T) {
-		// 1. FreshFor가 0인 캐시를 설정합니다.
 		cache, hot, _ := setupCache(t, WithCache(0))
 		ctx := context.Background()
 		key := "fresh-for-zero-key"
 		initialContent := "initial data"
 
-		// Fetcher가 호출 횟수를 셀 수 있도록 준비합니다.
 		fetcher := &mockFetcher{content: "new data", etag: "v2"}
 
-		// 2. 캐시에 초기 데이터를 저장합니다.
 		hot.setData(key, initialContent, &Metadata{ETag: "v1", CachedAt: time.Now()})
 
-		// 3. 첫 번째 Get() 호출
 		stream, err := cache.Get(ctx, key, fetcher)
 		require.NoError(t, err)
 		readBytes, _ := io.ReadAll(stream)
 		stream.Close()
 
-		// 반환된 내용은 초기 캐시 데이터여야 합니다.
 		assert.Equal(t, initialContent, string(readBytes))
-		// 잠시 시간을 주어 백그라운드 갱신이 시작될 시간을 확보합니다.
 		time.Sleep(50 * time.Millisecond)
-		// 백그라운드 갱신이 1번 호출되었는지 확인합니다.
-		assert.Equal(t, 1, fetcher.getFetchCount(), "첫 번째 Get() 호출 후 Fetcher는 1번 호출되어야 합니다.")
+		assert.Equal(t, 1, fetcher.getFetchCount(), "Fetcher should be called once after the first Get()")
 
-		// 4. 두 번째 Get() 호출
 		stream, err = cache.Get(ctx, key, fetcher)
 		require.NoError(t, err)
 		stream.Close()
 
-		// 잠시 시간을 주어 백그라운드 갱신이 시작될 시간을 확보합니다.
 		time.Sleep(50 * time.Millisecond)
-		// Get()을 다시 호출했으므로, Fetcher는 총 2번 호출되어야 합니다.
-		assert.Equal(t, 2, fetcher.getFetchCount(), "두 번째 Get() 호출 후 Fetcher는 총 2번 호출되어야 합니다.")
+		assert.Equal(t, 2, fetcher.getFetchCount(), "Fetcher should be called twice after the second Get()")
 	})
 
-	// --- 시나리오 2: Negative 캐시 (WithNegativeCache(0)) ---
 	t.Run("NegativeCacheWithFreshForZero", func(t *testing.T) {
-		// 1. NegativeFreshFor가 0인 캐시를 설정합니다.
 		cache, hot, _ := setupCache(t, WithNegativeCache(0))
 		ctx := context.Background()
 		key := "negative-fresh-for-zero-key"
 
-		// Fetcher는 ErrCacheableNotFound를 반환하여 네거티브 캐시를 생성하고 갱신해야 합니다.
 		fetcher := &mockFetcher{err: ErrCacheableNotFound}
 
-		// 2. 캐시에 초기 네거티브 데이터를 저장합니다.
 		hot.setNegativeEntry(key, &Metadata{CachedAt: time.Now()})
 
-		// 3. 첫 번째 Get() 호출
 		_, err := cache.Get(ctx, key, fetcher)
 		require.ErrorIs(t, err, ErrNotFound)
 
 		time.Sleep(50 * time.Millisecond)
-		// 네거티브 캐시가 stale 상태이므로, 백그라운드 갱신이 1번 호출되어야 합니다.
-		assert.Equal(t, 1, fetcher.getFetchCount(), "첫 번째 Get() 호출 후 Fetcher는 1번 호출되어야 합니다.")
+		assert.Equal(t, 1, fetcher.getFetchCount(), "Fetcher should be called once after the first Get() for negative cache")
 
-		// 4. 두 번째 Get() 호출
 		_, err = cache.Get(ctx, key, fetcher)
 		require.ErrorIs(t, err, ErrNotFound)
 
 		time.Sleep(50 * time.Millisecond)
-		// Get()을 다시 호출했으므로, Fetcher는 총 2번 호출되어야 합니다.
-		assert.Equal(t, 2, fetcher.getFetchCount(), "두 번째 Get() 호출 후 Fetcher는 총 2번 호출되어야 합니다.")
+		assert.Equal(t, 2, fetcher.getFetchCount(), "Fetcher should be called twice after the second Get() for negative cache")
 	})
 }
 
-// setupBenchmarkCache는 벤치마크(*testing.B)를 위한 전용 헬퍼 함수입니다.
+// setupBenchmarkCache is a helper function for benchmarks.
 func setupBenchmarkCache(b *testing.B, opts ...Option) (Cache, *mockStore, *mockStore) {
 	b.Helper()
 	hot := newMockStore()
@@ -717,14 +650,12 @@ func setupBenchmarkCache(b *testing.B, opts ...Option) (Cache, *mockStore, *mock
 	return cache, hot, cold
 }
 
-// BenchmarkCache_Get_HotHit는 Hot Tier에서 캐시 히트가 발생했을 때의
-// 종단 간 Get 성능을 측정합니다. 가장 이상적이고 빠른 시나리오입니다.
+// BenchmarkCache_Get_HotHit measures the end-to-end Get performance when a cache hit occurs in the Hot Tier.
 func BenchmarkCache_Get_HotHit(b *testing.B) {
 	cache, hot, _ := setupBenchmarkCache(b)
 	key, content := "hot-hit-key", "this is hot content"
 	hot.setData(key, content, &Metadata{})
 
-	// Fetcher는 호출되지 않아야 합니다.
 	fetcher := &mockFetcher{}
 
 	b.ResetTimer()
@@ -735,15 +666,14 @@ func BenchmarkCache_Get_HotHit(b *testing.B) {
 				b.Errorf("Get failed: %v", err)
 				continue
 			}
-			// 실제 스트림 데이터를 소비(consume)해야 정확한 측정이 가능합니다.
 			io.Copy(io.Discard, stream)
 			stream.Close()
 		}
 	})
 }
 
-// BenchmarkCache_Get_ColdHit는 Cold Tier에서 캐시 히트가 발생하고
-// Hot Tier로 데이터가 승격(promotion)되는 시나리오의 성능을 측정합니다.
+// BenchmarkCache_Get_ColdHit measures the performance when a cache hit occurs in the Cold Tier
+// and the data is promoted to the Hot Tier.
 func BenchmarkCache_Get_ColdHit(b *testing.B) {
 	cache, _, cold := setupBenchmarkCache(b)
 	key, content := "cold-hit-key", "this is cold content"
@@ -764,15 +694,14 @@ func BenchmarkCache_Get_ColdHit(b *testing.B) {
 	})
 }
 
-// BenchmarkCache_Get_Miss는 캐시에 데이터가 전혀 없어 원본에서 가져오는
-// 시나리오의 성능을 측정합니다. 가장 비용이 큰 작업입니다.
+// BenchmarkCache_Get_Miss measures the performance when data is not found in any cache tier
+// and must be fetched from the origin. This is the most expensive operation.
 func BenchmarkCache_Get_Miss(b *testing.B) {
 	cache, _, _ := setupBenchmarkCache(b)
 	content := "this is fresh content from origin"
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		// 매번 다른 키를 사용하여 캐시 히트를 방지하고 Miss를 유도합니다.
 		var i int
 		for pb.Next() {
 			key := fmt.Sprintf("miss-key-%d", i)

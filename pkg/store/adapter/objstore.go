@@ -1,4 +1,3 @@
-// Package adapter provides adapters to make external libraries compatible with daramjwee's interfaces.
 package adapter
 
 import (
@@ -33,22 +32,17 @@ func NewObjstoreAdapter(bucket objstore.Bucket, logger log.Logger) daramjwee.Sto
 	}
 }
 
-// 컴파일 타임에 인터페이스 만족 확인
-var _ daramjwee.Store = (*objstoreAdapter)(nil)
-
+// GetStream retrieves an object as a stream from the object storage.
+// It first fetches the metadata and then the actual data object.
 func (a *objstoreAdapter) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	// First, get the metadata. This also serves as an existence check.
 	meta, err := a.Stat(ctx, key)
 	if err != nil {
-		return nil, nil, err // daramjwee.ErrNotFound or other errors
+		return nil, nil, err
 	}
 
-	// Now, get the actual object data stream.
 	dataPath := a.toDataPath(key)
 	r, err := a.bucket.Get(ctx, dataPath)
 	if err != nil {
-		// "Not Found"를 확인하는 대신, Stat이 통과했으므로 다른 종류의 에러로 간주합니다.
-		// 만약 메타는 있는데 데이터가 없는 불일치 상황이라면, Get에서 오류가 발생할 것입니다.
 		level.Warn(a.logger).Log("msg", "failed to get data object even though metadata exists", "key", key, "err", err)
 		return nil, nil, fmt.Errorf("failed to get object for key '%s' after meta check: %w", key, err)
 	}
@@ -77,13 +71,14 @@ func (a *objstoreAdapter) SetWithWriter(ctx context.Context, key string, metadat
 	go func() {
 		defer writer.wg.Done()
 		dataPath := a.toDataPath(key)
-		// This call blocks until the pipe writer is closed.
 		writer.uploadErr = a.bucket.Upload(ctx, dataPath, pr)
 	}()
 
 	return writer, nil
 }
 
+// Delete removes an object and its associated metadata from the object storage.
+// It attempts to delete both the data object and the metadata object concurrently.
 func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -92,8 +87,6 @@ func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
 
 	// Delete data object
 	g.Go(func() error {
-		// 오류 타입을 확인하는 대신, Delete를 직접 호출합니다.
-		// 대부분의 객체 저장소에서 Delete는 멱등성을 가집니다.
 		if err := a.bucket.Delete(gCtx, dataPath); err != nil {
 			level.Error(a.logger).Log("msg", "failed to delete data object", "key", dataPath, "err", err)
 			return err
@@ -110,10 +103,10 @@ func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
 		return nil
 	})
 
-	// Wait()는 nil이 아닌 첫 번째 오류를 반환합니다.
 	return g.Wait()
 }
 
+// Stat retrieves metadata for an object from the object storage without fetching the data.
 func (a *objstoreAdapter) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
 	metaPath := a.toMetaPath(key)
 
@@ -143,12 +136,12 @@ func (a *objstoreAdapter) Stat(ctx context.Context, key string) (*daramjwee.Meta
 	return &metadata, nil
 }
 
-// --- Helper methods and types ---
-
+// toDataPath returns the path for the data object.
 func (a *objstoreAdapter) toDataPath(key string) string {
 	return key
 }
 
+// toMetaPath returns the path for the metadata object.
 func (a *objstoreAdapter) toMetaPath(key string) string {
 	return key + ".meta.json"
 }

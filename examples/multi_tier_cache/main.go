@@ -15,11 +15,12 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
-// SimpleFetcher is a basic implementation of daramjwee.Fetcher.
+// SimpleFetcher is a basic implementation of daramjwee.Fetcher that returns a predefined string as its data.
 type SimpleFetcher struct {
 	data string
 }
 
+// Fetch simulates fetching data from an origin.
 func (f *SimpleFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	fmt.Println("Fetching data from origin...")
 	return &daramjwee.FetchResult{
@@ -28,30 +29,48 @@ func (f *SimpleFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 	}, nil
 }
 
+// ExampleSimpleFetcher_Fetch demonstrates how to use SimpleFetcher.
+func ExampleSimpleFetcher_Fetch() {
+	fetcher := &SimpleFetcher{data: "Hello, Daramjwee!"}
+	result, err := fetcher.Fetch(context.Background(), nil)
+	if err != nil {
+		fmt.Printf("Error fetching: %v\n", err)
+		return
+	}
+	defer result.Body.Close()
+
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		fmt.Printf("Error reading body: %v\n", err)
+		return
+	}
+	fmt.Printf("Fetched data: %s\n", string(body))
+	// Output:
+	// Fetching data from origin...
+	// Fetched data: Hello, Daramjwee!
+}
+
+// main showcases the usage of a multi-tier daramjwee cache with a memory store (hot) and a file store (cold).
 func main() {
 	ctx := context.Background()
 
-	// Create a temporary directory for the filestore (cold cache).
 	baseDir, err := os.MkdirTemp("", "daramjwee-multi-tier-example-")
 	if err != nil {
 		log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr)).Log("msg", "Failed to create temp dir", "err", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(baseDir) // Clean up the directory when done.
+	defer os.RemoveAll(baseDir)
 
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 
-	// Initialize MemStore as hot cache with LRU policy.
 	memStore := memstore.New(1*1024*1024, policy.NewLRUPolicy())
 
-	// Initialize FileStore as cold cache.
 	fileStore, err := filestore.New(baseDir, logger)
 	if err != nil {
 		logger.Log("msg", "Failed to create filestore", "err", err)
 		os.Exit(1)
 	}
 
-	// Create a new cache instance with hot and cold stores.
 	cache, err := daramjwee.New(
 		logger,
 		daramjwee.WithHotStore(memStore),
@@ -64,7 +83,6 @@ func main() {
 	}
 	defer cache.Close()
 
-	// 1. Get a key that doesn't exist. This will trigger a fetch and store in both tiers.
 	fmt.Println("--- First Get (Cache Miss - Both Tiers) ---")
 	fetcher := &SimpleFetcher{data: "Data from Origin for Multi-Tier!"}
 	reader, err := cache.Get(ctx, "multi-key", fetcher)
@@ -76,7 +94,6 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	// 2. Get the same key again. This should be a hot cache hit.
 	fmt.Println("--- Second Get (Hot Cache Hit) ---")
 	reader, err = cache.Get(ctx, "multi-key", fetcher)
 	if err != nil {
@@ -87,8 +104,6 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	// 3. Simulate hot cache eviction (e.g., by filling it up with other data).
-	// For simplicity, we'll just delete from hot cache directly.
 	fmt.Println("--- Simulating Hot Cache Eviction ---")
 	err = memStore.Delete(ctx, "multi-key")
 	if err != nil {
@@ -97,7 +112,6 @@ func main() {
 	}
 	fmt.Println("Key 'multi-key' removed from hot cache.")
 
-	// 4. Get the key again. This should be a cold cache hit.
 	fmt.Println("--- Third Get (Cold Cache Hit) ---")
 	reader, err = cache.Get(ctx, "multi-key", fetcher)
 	if err != nil {
@@ -108,7 +122,6 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	// 5. Set a new value for the key.
 	fmt.Println("--- Set New Value ---")
 	writer, err := cache.Set(ctx, "multi-key", &daramjwee.Metadata{ETag: "v2"})
 	if err != nil {
@@ -123,7 +136,6 @@ func main() {
 	writer.Close()
 	fmt.Println("Set complete.")
 
-	// 6. Get the key again to see the updated value.
 	fmt.Println("--- Fourth Get (Cache Hit) ---")
 	reader, err = cache.Get(ctx, "multi-key", fetcher)
 	if err != nil {
@@ -134,7 +146,6 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	// 7. Delete the key.
 	fmt.Println("--- Delete Key ---")
 	err = cache.Delete(ctx, "multi-key")
 	if err != nil {
@@ -143,7 +154,6 @@ func main() {
 	}
 	fmt.Println("Delete complete.")
 
-	// 8. Get the key one last time. Should be a cache miss again.
 	fmt.Println("--- Fifth Get (Cache Miss) ---")
 	reader, err = cache.Get(ctx, "multi-key", fetcher)
 	if err != nil {
