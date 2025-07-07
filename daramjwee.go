@@ -92,6 +92,14 @@ type EvictionPolicy interface {
 	Evict() []string
 }
 
+// Locker defines the interface for a locking mechanism.
+type Locker interface {
+	Lock(key string)
+	Unlock(key string)
+	RLock(key string)
+	RUnlock(key string)
+}
+
 // nullEvictionPolicy is a Null Object implementation of EvictionPolicy.
 // It performs no operations, effectively disabling eviction.
 type nullEvictionPolicy struct{}

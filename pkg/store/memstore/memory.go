@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/lock"
 )
 
 var (
@@ -32,31 +33,46 @@ type entry struct {
 
 // MemStore is a thread-safe, in-memory implementation of the daramjwee.Store interface.
 type MemStore struct {
-	mu          sync.RWMutex
+	locker      daramjwee.Locker
 	data        map[string]entry
 	capacity    int64 // Capacity in bytes
 	currentSize int64 // Current total size of stored items in bytes
 	policy      daramjwee.EvictionPolicy
 }
 
+// Option configures the MemStore.
+type Option func(*MemStore)
+
+// WithLocker sets the locker for the memstore.
+func WithLocker(locker daramjwee.Locker) Option {
+	return func(ms *MemStore) {
+		ms.locker = locker
+	}
+}
+
 // New creates a new, empty in-memory store with a given capacity and eviction policy.
 // If capacity is 0 or less, the store has no limit.
 // If policy is nil, a no-op policy is used (no eviction).
-func New(capacity int64, policy daramjwee.EvictionPolicy) *MemStore {
+func New(capacity int64, policy daramjwee.EvictionPolicy, opts ...Option) *MemStore {
 	if policy == nil {
 		policy = daramjwee.NewNullEvictionPolicy()
 	}
-	return &MemStore{
+	ms := &MemStore{
 		data:     make(map[string]entry),
 		capacity: capacity,
 		policy:   policy,
+		locker:   lock.NewMutexLock(),
 	}
+	for _, opt := range opts {
+		opt(ms)
+	}
+	return ms
 }
 
 // GetStream retrieves an object as a stream from the in-memory map.
 func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	ms.mu.Lock() // Use Lock because policy.Touch might modify internal state.
-	defer ms.mu.Unlock()
+	ms.locker.Lock(key) // Use Lock because policy.Touch might modify internal state.
+	defer ms.locker.Unlock(key)
 
 	e, ok := ms.data[key]
 	if !ok {
@@ -84,8 +100,8 @@ func (ms *MemStore) SetWithWriter(ctx context.Context, key string, metadata *dar
 
 // Delete removes an object from the in-memory map.
 func (ms *MemStore) Delete(ctx context.Context, key string) error {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
+	ms.locker.Lock(key)
+	defer ms.locker.Unlock(key)
 
 	if e, ok := ms.data[key]; ok {
 		size := int64(len(e.value))
@@ -101,8 +117,8 @@ func (ms *MemStore) Delete(ctx context.Context, key string) error {
 
 // Stat retrieves metadata for an object from the in-memory map.
 func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	ms.mu.Lock() // Use Lock for policy.Touch
-	defer ms.mu.Unlock()
+	ms.locker.Lock(key) // Use Lock for policy.Touch
+	defer ms.locker.Unlock(key)
 
 	e, ok := ms.data[key]
 	if !ok {
@@ -131,8 +147,8 @@ func (w *memStoreWriter) Write(p []byte) (n int, err error) {
 // Close is called when the write operation is complete.
 // It commits the buffered data to the MemStore and handles eviction if capacity is exceeded.
 func (w *memStoreWriter) Close() error {
-	w.ms.mu.Lock()
-	defer w.ms.mu.Unlock()
+	w.ms.locker.Lock(w.key)
+	defer w.ms.locker.Unlock(w.key)
 
 	finalData := make([]byte, w.buf.Len())
 	copy(finalData, w.buf.Bytes())

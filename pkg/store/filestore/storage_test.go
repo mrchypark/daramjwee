@@ -35,7 +35,7 @@ func setupTestStore(t *testing.T, opts ...Option) *FileStore {
 	})
 
 	logger := log.NewNopLogger()
-	fs, err := New(dir, logger, opts...)
+	fs, err := New(dir, logger, 0, nil, opts...)
 	require.NoError(t, err, "failed to create filestore")
 
 	return fs
@@ -273,7 +273,7 @@ func setupBenchmarkStore(b *testing.B, opts ...Option) *FileStore {
 	b.Cleanup(func() { os.RemoveAll(dir) })
 
 	logger := log.NewNopLogger()
-	fs, err := New(dir, logger, opts...)
+	fs, err := New(dir, logger, 0, nil, opts...)
 	require.NoError(b, err)
 	return fs
 }

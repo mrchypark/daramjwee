@@ -107,7 +107,7 @@ func main() {
 		panic(err)
 	}
 
-	hotStore, err := filestore.New(hotStoreDir, log.With(logger, "tier", "hot"))
+	hotStore, err := filestore.New(hotStoreDir, log.With(logger, "tier", "hot"), 1024*1024, nil)
 	if err != nil {
 		panic(err)
 	}

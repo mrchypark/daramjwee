@@ -60,7 +60,7 @@ func main() {
 	defer os.RemoveAll(baseDir)
 
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
-	fileStore, err := filestore.New(baseDir, logger)
+	fileStore, err := filestore.New(baseDir, logger, 1024*1024, nil)
 	if err != nil {
 		logger.Log("msg", "Failed to create filestore", "err", err)
 		os.Exit(1)

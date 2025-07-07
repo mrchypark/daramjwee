@@ -13,14 +13,18 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/lock"
 )
 
 // FileStore is a disk-based implementation of the daramjwee.Store.
 type FileStore struct {
 	baseDir            string
 	logger             log.Logger
-	lockManager        *FileLockManager
+	locker             daramjwee.Locker
 	useCopyAndTruncate bool // useCopyAndTruncate, if true, uses a copy-and-truncate strategy for writing files.
+	capacity           int64
+	currentSize        int64
+	policy             daramjwee.EvictionPolicy
 }
 
 // Option configures the FileStore.
@@ -35,16 +39,28 @@ func WithCopyAndTruncate() Option {
 	}
 }
 
+// WithLocker sets the locker for the filestore.
+func WithLocker(locker daramjwee.Locker) Option {
+	return func(fs *FileStore) {
+		fs.locker = locker
+	}
+}
+
 // New creates a new FileStore.
 // It ensures the base directory exists and initializes the file locking mechanism.
-func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
+func New(dir string, logger log.Logger, capacity int64, policy daramjwee.EvictionPolicy, opts ...Option) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
 	}
+	if policy == nil {
+		policy = daramjwee.NewNullEvictionPolicy()
+	}
 	fs := &FileStore{
-		baseDir:     dir,
-		logger:      logger,
-		lockManager: NewFileLockManager(2048),
+		baseDir:  dir,
+		logger:   logger,
+		locker:   lock.NewMutexLock(),
+		capacity: capacity,
+		policy:   policy,
 	}
 	for _, opt := range opts {
 		opt(fs)
@@ -56,11 +72,11 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 // It returns an io.ReadCloser, the object's metadata, and an error if any.
 func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	path := fs.toDataPath(key)
-	fs.lockManager.RLock(path)
+	fs.locker.RLock(path)
 
 	file, err := os.Open(path)
 	if err != nil {
-		fs.lockManager.RUnlock(path)
+		fs.locker.RUnlock(path)
 		if os.IsNotExist(err) {
 			return nil, nil, daramjwee.ErrNotFound
 		}
@@ -70,17 +86,19 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 	meta, dataOffset, err := readMetadata(file)
 	if err != nil {
 		file.Close()
-		fs.lockManager.RUnlock(path)
+		fs.locker.RUnlock(path)
 		return nil, nil, err
 	}
 
 	if _, err := file.Seek(dataOffset, io.SeekStart); err != nil {
 		file.Close()
-		fs.lockManager.RUnlock(path)
+		fs.locker.RUnlock(path)
 		return nil, nil, fmt.Errorf("failed to seek to data section: %w", err)
 	}
 
-	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
+	fs.policy.Touch(key)
+
+	return newLockedReadCloser(file, func() { fs.locker.RUnlock(path) }), meta, nil
 }
 
 // SetWithWriter returns a writer that streams data to the store.
@@ -88,11 +106,11 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 // upon closing the writer, or copied if WithCopyAndTruncate option is used.
 func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
 	path := fs.toDataPath(key)
-	fs.lockManager.Lock(path)
+	fs.locker.Lock(path)
 
 	tmpFile, err := os.CreateTemp(fs.baseDir, "daramjwee-tmp-*.data")
 	if err != nil {
-		fs.lockManager.Unlock(path)
+		fs.locker.Unlock(path)
 		return nil, err
 	}
 
@@ -100,12 +118,12 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 	if err := writeMetadata(tmpFile, metadata); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
-		fs.lockManager.Unlock(path)
+		fs.locker.Unlock(path)
 		return nil, err
 	}
 
 	onClose := func() (err error) {
-		defer fs.lockManager.Unlock(path)
+		defer fs.locker.Unlock(path)
 
 		defer func() {
 			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil && !os.IsNotExist(errRemove) {
@@ -127,6 +145,44 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 				return fmt.Errorf("failed to rename temporary file: %w", err)
 			}
 		}
+
+		fileInfo, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("failed to get file info for key '%s': %w", key, err)
+		}
+		newItemSize := fileInfo.Size()
+
+		fs.currentSize += newItemSize
+		fs.policy.Add(key, newItemSize)
+
+		if fs.capacity > 0 {
+			for fs.currentSize > fs.capacity {
+				keysToEvict := fs.policy.Evict()
+				if len(keysToEvict) == 0 {
+					break
+				}
+
+				var actuallyEvicted bool
+				for _, keyToEvict := range keysToEvict {
+					evictedPath := fs.toDataPath(keyToEvict)
+					fileInfo, err := os.Stat(evictedPath)
+					if err != nil {
+						continue
+					}
+					evictedSize := fileInfo.Size()
+
+					if err := os.Remove(evictedPath); err == nil {
+						fs.currentSize -= evictedSize
+						actuallyEvicted = true
+					}
+				}
+
+				if !actuallyEvicted {
+					break
+				}
+			}
+		}
+
 		return nil
 	}
 
@@ -136,10 +192,16 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 // Delete removes an object from the store.
 func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	path := fs.toDataPath(key)
-	fs.lockManager.Lock(path)
-	defer fs.lockManager.Unlock(path)
+	fs.locker.Lock(path)
+	defer fs.locker.Unlock(path)
 
-	err := os.Remove(path)
+	fileInfo, err := os.Stat(path)
+	if err == nil {
+		fs.currentSize -= fileInfo.Size()
+		fs.policy.Remove(key)
+	}
+
+	err = os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -149,8 +211,8 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 // Stat reads the metadata of an object without reading the data.
 func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
 	path := fs.toDataPath(key)
-	fs.lockManager.RLock(path)
-	defer fs.lockManager.RUnlock(path)
+	fs.locker.RLock(path)
+	defer fs.locker.RUnlock(path)
 
 	file, err := os.Open(path)
 	if err != nil {
@@ -162,6 +224,7 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 	defer file.Close()
 
 	meta, _, err := readMetadata(file)
+	fs.policy.Touch(key)
 	return meta, err
 }
 
