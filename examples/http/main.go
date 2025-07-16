@@ -1,5 +1,5 @@
 // Package main demonstrates HTTP server integration examples with daramjwee cache
-// 이 파일은 HTTP 서버와 daramjwee 캐시를 통합하는 실용적인 예제들을 포함합니다
+// This file contains practical examples of integrating HTTP servers with daramjwee cache
 package main
 
 import (
@@ -21,7 +21,7 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
-// HTTPFetcher는 HTTP 요청을 통해 데이터를 가져오는 Fetcher 구현입니다
+// HTTPFetcher is a Fetcher implementation that retrieves data through HTTP requests
 type HTTPFetcher struct {
 	url    string
 	client *http.Client
@@ -40,7 +40,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata
 		return nil, err
 	}
 
-	// ETag 기반 조건부 요청
+	// ETag-based conditional request
 	if oldMetadata != nil && oldMetadata.ETag != "" {
 		req.Header.Set("If-None-Match", oldMetadata.ETag)
 	}
@@ -50,7 +50,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata
 		return nil, err
 	}
 
-	// 304 Not Modified 처리
+	// Handle 304 Not Modified
 	if resp.StatusCode == http.StatusNotModified {
 		resp.Body.Close()
 		return nil, daramjwee.ErrNotModified
@@ -77,10 +77,10 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata
 	}, nil
 }
 
-// DatabaseFetcher는 데이터베이스 쿼리를 시뮬레이션하는 Fetcher입니다
+// DatabaseFetcher is a Fetcher that simulates database queries
 type DatabaseFetcher struct {
 	query string
-	delay time.Duration // 데이터베이스 지연 시뮬레이션
+	delay time.Duration // Database delay simulation
 }
 
 func NewDatabaseFetcher(query string, delay time.Duration) *DatabaseFetcher {
@@ -88,10 +88,10 @@ func NewDatabaseFetcher(query string, delay time.Duration) *DatabaseFetcher {
 }
 
 func (f *DatabaseFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-	// 데이터베이스 쿼리 지연 시뮬레이션
+	// Simulate database query delay
 	time.Sleep(f.delay)
 
-	// 간단한 JSON 응답 생성
+	// Generate simple JSON response
 	data := map[string]interface{}{
 		"query":     f.query,
 		"timestamp": time.Now().Unix(),
@@ -114,27 +114,27 @@ func (f *DatabaseFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Meta
 	}, nil
 }
 
-// StaticFileFetcher는 정적 파일을 시뮬레이션하는 Fetcher입니다
+// StaticFileFetcher is a Fetcher that simulates static files
 type StaticFileFetcher struct {
 	filename string
 }
 
 func (f *StaticFileFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-	// 정적 파일 내용 시뮬레이션
+	// Simulate static file content
 	var content string
 	switch {
 	case strings.HasSuffix(f.filename, ".txt"):
-		content = fmt.Sprintf("이것은 %s 파일의 내용입니다.\n생성 시간: %s", f.filename, time.Now().Format(time.RFC3339))
+		content = fmt.Sprintf("This is the content of %s file.\nGenerated at: %s", f.filename, time.Now().Format(time.RFC3339))
 	case strings.HasSuffix(f.filename, ".json"):
 		data := map[string]interface{}{
 			"filename":  f.filename,
 			"timestamp": time.Now().Unix(),
-			"content":   "JSON 파일 내용",
+			"content":   "JSON file content",
 		}
 		jsonData, _ := json.Marshal(data)
 		content = string(jsonData)
 	default:
-		content = fmt.Sprintf("파일: %s\n내용: 바이너리 데이터 시뮬레이션", f.filename)
+		content = fmt.Sprintf("File: %s\nContent: Binary data simulation", f.filename)
 	}
 
 	metadata := &daramjwee.Metadata{
@@ -152,44 +152,44 @@ func main() {
 	logger := log.NewLogfmtLogger(os.Stdout)
 	logger = level.NewFilter(logger, level.AllowInfo())
 
-	fmt.Println("=== HTTP 서버 통합 예제들 ===")
+	fmt.Println("=== HTTP Server Integration Examples ===")
 
-	// 1. 웹 프록시 서버
+	// 1. Web proxy server
 	go webProxyServer(logger)
-	time.Sleep(100 * time.Millisecond) // 서버 시작 대기
+	time.Sleep(100 * time.Millisecond) // Wait for server to start
 
-	// 2. API 캐싱 서버
+	// 2. API caching server
 	go apiCachingServer(logger)
 	time.Sleep(100 * time.Millisecond)
 
-	// 3. 정적 파일 서버
+	// 3. Static file server
 	go staticFileServer(logger)
 	time.Sleep(100 * time.Millisecond)
 
-	// 4. 데이터베이스 캐싱 서버
+	// 4. Database caching server
 	go databaseCachingServer(logger)
 	time.Sleep(100 * time.Millisecond)
 
-	fmt.Println("\n모든 서버가 시작되었습니다!")
-	fmt.Println("- 웹 프록시: http://localhost:8081")
-	fmt.Println("- API 캐싱: http://localhost:8082")
-	fmt.Println("- 정적 파일: http://localhost:8083")
-	fmt.Println("- DB 캐싱: http://localhost:8084")
-	fmt.Println("\n테스트 예제:")
+	fmt.Println("\nAll servers have been started!")
+	fmt.Println("- Web Proxy: http://localhost:8081")
+	fmt.Println("- API Caching: http://localhost:8082")
+	fmt.Println("- Static Files: http://localhost:8083")
+	fmt.Println("- DB Caching: http://localhost:8084")
+	fmt.Println("\nTest examples:")
 	fmt.Println("curl http://localhost:8081/proxy?url=https://httpbin.org/json")
 	fmt.Println("curl http://localhost:8082/api/users")
 	fmt.Println("curl http://localhost:8083/static/example.txt")
 	fmt.Println("curl http://localhost:8084/db/users")
 
-	// 서버들이 계속 실행되도록 대기
+	// Keep servers running
 	select {}
 }
 
-// 1. 웹 프록시 서버 - 외부 URL을 캐싱하는 프록시
+// 1. Web proxy server - Proxy that caches external URLs
 func webProxyServer(logger log.Logger) {
-	fmt.Println("\n1. 웹 프록시 서버 시작 (포트 8081)")
+	fmt.Println("\n1. Starting web proxy server (port 8081)")
 
-	// 프록시용 캐시 설정
+	// Proxy cache configuration
 	hotStore := memstore.New(
 		100*1024*1024, // 100MB
 		policy.NewLRUPolicy(),
