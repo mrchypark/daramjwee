@@ -2,22 +2,26 @@ package filestore
 
 import (
 	"context"
+	"crypto/sha256" // Import for hashing
 	"encoding/binary"
+	"encoding/hex" // Import for hex encoding hash
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
-	"github.com/goccy/go-json"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/goccy/go-json"
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/lock"
 )
 
 // FileStore is a disk-based implementation of the daramjwee.Store.
 type FileStore struct {
+	mu                 sync.Mutex // Mutex to protect currentSize
 	baseDir            string
 	logger             log.Logger
 	locker             daramjwee.Locker
@@ -25,6 +29,9 @@ type FileStore struct {
 	capacity           int64
 	currentSize        int64
 	policy             daramjwee.EvictionPolicy
+	hashKey            bool // New field to enable/disable key hashing
+	dirDepth           int  // New field for directory depth (e.g., 2 for /xx/yy/file)
+	dirPrefixLength    int  // New field for length of each directory prefix (e.g., 2 for /xx/yy/file)
 }
 
 // Option configures the FileStore.
@@ -46,6 +53,17 @@ func WithLocker(locker daramjwee.Locker) Option {
 	}
 }
 
+// WithHashedKeys enables hashing of cache keys to generate file paths.
+// dirDepth specifies how many levels of subdirectories to create based on the hash.
+// dirPrefixLength specifies the length of each directory prefix (e.g., 2 for "ab/cd").
+func WithHashedKeys(dirDepth, dirPrefixLength int) Option {
+	return func(fs *FileStore) {
+		fs.hashKey = true
+		fs.dirDepth = dirDepth
+		fs.dirPrefixLength = dirPrefixLength
+	}
+}
+
 // New creates a new FileStore.
 // It ensures the base directory exists and initializes the file locking mechanism.
 func New(dir string, logger log.Logger, capacity int64, policy daramjwee.EvictionPolicy, opts ...Option) (*FileStore, error) {
@@ -56,15 +74,33 @@ func New(dir string, logger log.Logger, capacity int64, policy daramjwee.Evictio
 		policy = daramjwee.NewNullEvictionPolicy()
 	}
 	fs := &FileStore{
-		baseDir:  dir,
-		logger:   logger,
-		locker:   lock.NewMutexLock(),
-		capacity: capacity,
-		policy:   policy,
+		baseDir:         dir,
+		logger:          logger,
+		locker:          lock.NewMutexLock(),
+		capacity:        capacity,
+		policy:          policy,
+		hashKey:         false, // Default to no hashing
+		dirDepth:        0,
+		dirPrefixLength: 0,
 	}
 	for _, opt := range opts {
 		opt(fs)
 	}
+
+	// Basic validation for hashed keys options
+	if fs.hashKey {
+		if fs.dirDepth < 0 {
+			return nil, fmt.Errorf("invalid dirDepth for hashed keys: %d", fs.dirDepth)
+		}
+		if fs.dirPrefixLength <= 0 {
+			return nil, fmt.Errorf("invalid dirPrefixLength for hashed keys: %d", fs.dirPrefixLength)
+		}
+		// SHA256 produces 64 hex characters (32 bytes * 2). Make sure dirPrefixLength * dirDepth doesn't exceed this.
+		if fs.dirPrefixLength*fs.dirDepth > sha256.Size*2 {
+			return nil, fmt.Errorf("combined directory prefix length (%d) exceeds hash size (%d)", fs.dirPrefixLength*fs.dirDepth, sha256.Size*2)
+		}
+	}
+
 	return fs, nil
 }
 
@@ -105,12 +141,13 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 // The data is written to a temporary file and then atomically moved to the final location
 // upon closing the writer, or copied if WithCopyAndTruncate option is used.
 func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
-	path := fs.toDataPath(key)
-	fs.locker.Lock(path)
+	finalPath := fs.toDataPath(key) // Use finalPath to distinguish from temporary path
+	fs.locker.Lock(finalPath)       // Lock on the final path
 
+	// Create a temporary file in the baseDir, not a subdirectory of the finalPath
 	tmpFile, err := os.CreateTemp(fs.baseDir, "daramjwee-tmp-*.data")
 	if err != nil {
-		fs.locker.Unlock(path)
+		fs.locker.Unlock(finalPath)
 		return nil, err
 	}
 
@@ -118,12 +155,13 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 	if err := writeMetadata(tmpFile, metadata); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
-		fs.locker.Unlock(path)
+		fs.locker.Unlock(finalPath)
 		return nil, err
 	}
 
 	onClose := func() (err error) {
-		defer fs.locker.Unlock(path)
+		level.Debug(fs.logger).Log("msg", "onClose function called", "key", key)
+		defer fs.locker.Unlock(finalPath) // Unlock the final path
 
 		defer func() {
 			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil && !os.IsNotExist(errRemove) {
@@ -134,54 +172,100 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 			}
 		}()
 
+		// Ensure the directory for the final path exists before renaming/copying
+		dir := filepath.Dir(finalPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create target directory %s: %w", dir, err)
+		}
+
+		// Check if the file already exists to subtract its old size
+		oldSize := int64(0)
+		existingFileInfo, statErr := os.Stat(finalPath)
+		if statErr == nil {
+			oldSize = existingFileInfo.Size()
+			level.Debug(fs.logger).Log("msg", "existing file found", "finalPath", finalPath, "oldSize", oldSize)
+		} else if os.IsNotExist(statErr) {
+			level.Debug(fs.logger).Log("msg", "no existing file found", "finalPath", finalPath)
+		} else {
+			level.Warn(fs.logger).Log("msg", "failed to stat existing file", "finalPath", finalPath, "err", statErr)
+		}
+
 		if fs.useCopyAndTruncate {
 			// Non-atomic copy strategy for NFS compatibility.
-			if err := copyFile(tmpFile.Name(), path); err != nil {
+			if err := copyFile(tmpFile.Name(), finalPath); err != nil {
 				return fmt.Errorf("failed to copy temp file to final path: %w", err)
 			}
 		} else {
 			// Atomic rename strategy.
-			if err := os.Rename(tmpFile.Name(), path); err != nil {
+			if err := os.Rename(tmpFile.Name(), finalPath); err != nil {
 				return fmt.Errorf("failed to rename temporary file: %w", err)
 			}
 		}
 
-		fileInfo, err := os.Stat(path)
+		fileInfo, err := os.Stat(finalPath)
 		if err != nil {
 			return fmt.Errorf("failed to get file info for key '%s': %w", key, err)
 		}
 		newItemSize := fileInfo.Size()
 
-		fs.currentSize += newItemSize
+		level.Debug(fs.logger).Log(
+			"msg", "SetWithWriter onClose: before currentSize update",
+			"key", key,
+			"oldSize", oldSize,
+			"newItemSize", newItemSize,
+			"currentSizeBeforeLock", fs.currentSize,
+		)
+
+		fs.mu.Lock() // Protect currentSize
+		fs.currentSize -= oldSize // Subtract old size if it existed
+		fs.currentSize += newItemSize // Add new size
 		fs.policy.Add(key, newItemSize)
+
+		level.Debug(fs.logger).Log(
+			"msg", "SetWithWriter onClose: after currentSize update",
+			"key", key,
+			"currentSizeAfterLock", fs.currentSize,
+		)
 
 		if fs.capacity > 0 {
 			for fs.currentSize > fs.capacity {
 				keysToEvict := fs.policy.Evict()
 				if len(keysToEvict) == 0 {
-					break
+					break // No more keys to evict, or policy is stuck
 				}
 
 				var actuallyEvicted bool
 				for _, keyToEvict := range keysToEvict {
-					evictedPath := fs.toDataPath(keyToEvict)
+					evictedPath := fs.toDataPath(keyToEvict) // Use toDataPath for eviction as well
 					fileInfo, err := os.Stat(evictedPath)
 					if err != nil {
+						// File might have been deleted by another process or never existed
+						level.Debug(fs.logger).Log("msg", "file for key to evict not found", "key", keyToEvict, "path", evictedPath, "err", err)
+						fs.policy.Remove(keyToEvict) // Remove from policy if file doesn't exist
 						continue
 					}
 					evictedSize := fileInfo.Size()
 
+					level.Debug(fs.logger).Log("msg", "evicting file", "key", keyToEvict, "evictedSize", evictedSize, "currentSizeBeforeEvict", fs.currentSize)
+
 					if err := os.Remove(evictedPath); err == nil {
-						fs.currentSize -= evictedSize
+						fs.currentSize -= evictedSize // Protected by fs.mu
+						fs.policy.Remove(keyToEvict) // Remove from policy after successful eviction
 						actuallyEvicted = true
+					} else {
+						level.Warn(fs.logger).Log("msg", "failed to remove evicted file", "file", evictedPath, "key", keyToEvict, "err", err)
 					}
+					level.Debug(fs.logger).Log("msg", "file evicted", "key", keyToEvict, "currentSizeAfterEvict", fs.currentSize)
 				}
 
 				if !actuallyEvicted {
+					// No files were actually evicted in this loop, likely capacity cannot be met.
+					// This prevents infinite loops if policy.Evict keeps returning the same un-evictable keys.
 					break
 				}
 			}
 		}
+		fs.mu.Unlock() // Release currentSize protection
 
 		return nil
 	}
@@ -195,10 +279,31 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	fs.locker.Lock(path)
 	defer fs.locker.Unlock(path)
 
+	// Stat the file *before* removal to get its size for currentSize adjustment.
+	// This also correctly handles cases where the file doesn't exist,
+	// avoiding attempting to subtract size from currentSize unnecessarily.
 	fileInfo, err := os.Stat(path)
-	if err == nil {
-		fs.currentSize -= fileInfo.Size()
-		fs.policy.Remove(key)
+	if err == nil { // Only if file exists
+		deletedSize := fileInfo.Size()
+		level.Debug(fs.logger).Log(
+			"msg", "Delete: before currentSize update",
+			"key", key,
+			"deletedSize", deletedSize,
+			"currentSizeBeforeLock", fs.currentSize,
+		)
+		fs.mu.Lock() // Protect currentSize
+		fs.currentSize -= deletedSize
+		fs.policy.Remove(key) // Move inside the mutex
+		level.Debug(fs.logger).Log(
+			"msg", "Delete: after currentSize update",
+			"key", key,
+			"currentSizeAfterLock", fs.currentSize,
+		)
+		fs.mu.Unlock() // Release currentSize protection
+	} else if os.IsNotExist(err) {
+		level.Debug(fs.logger).Log("msg", "Delete: file not found, no size update", "key", key, "path", path)
+	} else {
+		level.Warn(fs.logger).Log("msg", "Delete: failed to stat file before deletion", "key", key, "path", path, "err", err)
 	}
 
 	err = os.Remove(path)
@@ -229,11 +334,41 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 }
 
 // toDataPath converts a key into a safe file path within the base directory.
-// It prevents path traversal by stripping ".." and leading path separators.
+// It applies hashing and directory partitioning if fs.hashKey is true.
 func (fs *FileStore) toDataPath(key string) string {
-	safeKey := strings.ReplaceAll(key, "..", "")
-	safeKey = strings.TrimPrefix(safeKey, string(os.PathSeparator))
-	return filepath.Join(fs.baseDir, safeKey)
+	if !fs.hashKey {
+		// Original implementation for non-hashed keys
+		// Prevents path traversal by stripping ".." and leading path separators.
+		safeKey := strings.ReplaceAll(key, "..", "")
+		safeKey = strings.TrimPrefix(safeKey, string(os.PathSeparator))
+		return filepath.Join(fs.baseDir, safeKey)
+	}
+
+	// Hashing logic
+	hasher := sha256.New()
+	hasher.Write([]byte(key))
+	hashedKey := hex.EncodeToString(hasher.Sum(nil)) // Get hex string of hash
+
+	// Construct path with directory partitioning
+	pathParts := make([]string, 0, fs.dirDepth+2) // baseDir + dirDepth subdirs + hashedKey filename
+	pathParts = append(pathParts, fs.baseDir)
+
+	for i := 0; i < fs.dirDepth; i++ {
+		start := i * fs.dirPrefixLength
+		end := start + fs.dirPrefixLength
+		if end > len(hashedKey) {
+			// This case should be prevented by validation in New, but as a safeguard.
+			// Use the remaining part of the hash, or fewer parts than dirDepth if hash is too short.
+			if start >= len(hashedKey) { // No more hash characters left
+				break
+			}
+			end = len(hashedKey) // Take whatever's left
+		}
+		pathParts = append(pathParts, hashedKey[start:end])
+	}
+	pathParts = append(pathParts, hashedKey) // Final filename is the full hash
+
+	return filepath.Join(pathParts...)
 }
 
 // writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
