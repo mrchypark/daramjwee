@@ -212,21 +212,21 @@ func webProxyServer(logger log.Logger) {
 		daramjwee.WithNegativeCache(1*time.Minute),
 	)
 	if err != nil {
-		fmt.Printf("프록시 캐시 생성 실패: %v\n", err)
+		fmt.Printf("Failed to create proxy cache: %v\n", err)
 		return
 	}
 
 	http.HandleFunc("/proxy", func(w http.ResponseWriter, r *http.Request) {
 		targetURL := r.URL.Query().Get("url")
 		if targetURL == "" {
-			http.Error(w, "url 파라미터가 필요합니다", http.StatusBadRequest)
+			http.Error(w, "url parameter is required", http.StatusBadRequest)
 			return
 		}
 
 		fetcher := NewHTTPFetcher(targetURL)
 		reader, err := cache.Get(r.Context(), targetURL, fetcher)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("프록시 요청 실패: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Proxy request failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer reader.Close()
@@ -237,15 +237,15 @@ func webProxyServer(logger log.Logger) {
 	})
 
 	if err := http.ListenAndServe(":8081", nil); err != nil {
-		fmt.Printf("웹 프록시 서버 시작 실패: %v\n", err)
+		fmt.Printf("Failed to start web proxy server: %v\n", err)
 	}
 }
 
-// 2. API 캐싱 서버 - API 응답을 캐싱
+// 2. API caching server - Caches API responses
 func apiCachingServer(logger log.Logger) {
-	fmt.Println("2. API 캐싱 서버 시작 (포트 8082)")
+	fmt.Println("2. Starting API caching server (port 8082)")
 
-	// API 캐시 설정
+	// API cache configuration
 	hotStore := memstore.New(
 		50*1024*1024, // 50MB
 		policy.NewSievePolicy(),
@@ -259,16 +259,16 @@ func apiCachingServer(logger log.Logger) {
 		daramjwee.WithNegativeCache(30*time.Second),
 	)
 	if err != nil {
-		fmt.Printf("API 캐시 생성 실패: %v\n", err)
+		fmt.Printf("Failed to create API cache: %v\n", err)
 		return
 	}
 
-	// 사용자 API 엔드포인트
+	// User API endpoint
 	http.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
 		fetcher := NewDatabaseFetcher("SELECT * FROM users", 500*time.Millisecond)
 		reader, err := cache.Get(r.Context(), "api:users", fetcher)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("API 요청 실패: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("API request failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer reader.Close()
@@ -278,11 +278,11 @@ func apiCachingServer(logger log.Logger) {
 		io.Copy(w, reader)
 	})
 
-	// 특정 사용자 API 엔드포인트
+	// Specific user API endpoint
 	http.HandleFunc("/api/users/", func(w http.ResponseWriter, r *http.Request) {
 		userID := strings.TrimPrefix(r.URL.Path, "/api/users/")
 		if userID == "" {
-			http.Error(w, "사용자 ID가 필요합니다", http.StatusBadRequest)
+			http.Error(w, "User ID is required", http.StatusBadRequest)
 			return
 		}
 
@@ -291,7 +291,7 @@ func apiCachingServer(logger log.Logger) {
 
 		reader, err := cache.Get(r.Context(), cacheKey, fetcher)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("사용자 조회 실패: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("User lookup failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer reader.Close()
@@ -302,15 +302,15 @@ func apiCachingServer(logger log.Logger) {
 	})
 
 	if err := http.ListenAndServe(":8082", nil); err != nil {
-		fmt.Printf("API 캐싱 서버 시작 실패: %v\n", err)
+		fmt.Printf("Failed to start API caching server: %v\n", err)
 	}
 }
 
-// 3. 정적 파일 서버 - 정적 파일을 캐싱
+// 3. Static file server - Caches static files
 func staticFileServer(logger log.Logger) {
-	fmt.Println("3. 정적 파일 서버 시작 (포트 8083)")
+	fmt.Println("3. Starting static file server (port 8083)")
 
-	// 정적 파일용 캐시 설정
+	// Static file cache configuration
 	tmpDir, _ := os.MkdirTemp("", "static-cache-*")
 	fileStore, _ := filestore.New(
 		tmpDir,
@@ -323,31 +323,31 @@ func staticFileServer(logger log.Logger) {
 	cache, err := daramjwee.New(logger,
 		daramjwee.WithHotStore(fileStore),
 		daramjwee.WithWorker("pool", 3, 200, 60*time.Second),
-		daramjwee.WithCache(1*time.Hour), // 1시간 캐시
+		daramjwee.WithCache(1*time.Hour), // 1-hour cache
 		daramjwee.WithNegativeCache(5*time.Minute),
 	)
 	if err != nil {
-		fmt.Printf("정적 파일 캐시 생성 실패: %v\n", err)
+		fmt.Printf("Failed to create static file cache: %v\n", err)
 		return
 	}
 
 	http.HandleFunc("/static/", func(w http.ResponseWriter, r *http.Request) {
 		filename := strings.TrimPrefix(r.URL.Path, "/static/")
 		if filename == "" {
-			http.Error(w, "파일명이 필요합니다", http.StatusBadRequest)
+			http.Error(w, "Filename is required", http.StatusBadRequest)
 			return
 		}
 
-		// 간단한 정적 파일 시뮬레이션
+		// Simple static file simulation
 		fetcher := &StaticFileFetcher{filename: filename}
 		reader, err := cache.Get(r.Context(), fmt.Sprintf("static:%s", filename), fetcher)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("파일 조회 실패: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("File lookup failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer reader.Close()
 
-		// 파일 확장자에 따른 Content-Type 설정
+		// Set Content-Type based on file extension
 		if strings.HasSuffix(filename, ".txt") {
 			w.Header().Set("Content-Type", "text/plain")
 		} else if strings.HasSuffix(filename, ".json") {
@@ -361,17 +361,17 @@ func staticFileServer(logger log.Logger) {
 	})
 
 	if err := http.ListenAndServe(":8083", nil); err != nil {
-		fmt.Printf("정적 파일 서버 시작 실패: %v\n", err)
+		fmt.Printf("Failed to start static file server: %v\n", err)
 	}
 }
 
-// 4. 데이터베이스 캐싱 서버 - 복잡한 DB 쿼리 결과를 캐싱
+// 4. Database caching server - Caches complex DB query results
 func databaseCachingServer(logger log.Logger) {
-	fmt.Println("4. 데이터베이스 캐싱 서버 시작 (포트 8084)")
+	fmt.Println("4. Starting database caching server (port 8084)")
 
-	// DB 캐시용 하이브리드 설정
+	// Hybrid configuration for DB cache
 	hotStore := memstore.New(
-		200*1024*1024, // 200MB 메모리
+		200*1024*1024, // 200MB memory
 		policy.NewS3FIFOPolicy(200*1024*1024, 0.15),
 		memstore.WithLocker(lock.NewStripeLock(1024)),
 	)
@@ -380,7 +380,7 @@ func databaseCachingServer(logger log.Logger) {
 	coldStore, _ := filestore.New(
 		tmpDir,
 		logger,
-		2*1024*1024*1024, // 2GB 디스크
+		2*1024*1024*1024, // 2GB disk
 		policy.NewLRUPolicy(),
 	)
 
@@ -392,11 +392,11 @@ func databaseCachingServer(logger log.Logger) {
 		daramjwee.WithNegativeCache(2*time.Minute),
 	)
 	if err != nil {
-		fmt.Printf("DB 캐시 생성 실패: %v\n", err)
+		fmt.Printf("Failed to create DB cache: %v\n", err)
 		return
 	}
 
-	// 사용자 목록 조회
+	// User list lookup
 	http.HandleFunc("/db/users", func(w http.ResponseWriter, r *http.Request) {
 		page := r.URL.Query().Get("page")
 		if page == "" {
@@ -408,7 +408,7 @@ func databaseCachingServer(logger log.Logger) {
 
 		reader, err := cache.Get(r.Context(), cacheKey, fetcher)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("DB 조회 실패: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("DB lookup failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer reader.Close()
@@ -418,23 +418,23 @@ func databaseCachingServer(logger log.Logger) {
 		io.Copy(w, reader)
 	})
 
-	// 복잡한 통계 쿼리
+	// Complex statistics query
 	http.HandleFunc("/db/stats", func(w http.ResponseWriter, r *http.Request) {
 		statsType := r.URL.Query().Get("type")
 		if statsType == "" {
 			statsType = "daily"
 		}
 
-		// 복잡한 쿼리 시뮬레이션 (더 긴 지연)
+		// Complex query simulation (longer delay)
 		fetcher := NewDatabaseFetcher(
 			fmt.Sprintf("SELECT COUNT(*), AVG(value) FROM analytics WHERE type='%s' GROUP BY date", statsType),
-			3*time.Second, // 복잡한 쿼리는 더 오래 걸림
+			3*time.Second, // Complex queries take longer
 		)
 		cacheKey := fmt.Sprintf("db:stats:%s", statsType)
 
 		reader, err := cache.Get(r.Context(), cacheKey, fetcher)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("통계 조회 실패: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Statistics lookup failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer reader.Close()
@@ -444,7 +444,7 @@ func databaseCachingServer(logger log.Logger) {
 		io.Copy(w, reader)
 	})
 
-	// 캐시 상태 조회 엔드포인트
+	// Cache status lookup endpoint
 	http.HandleFunc("/cache/status", func(w http.ResponseWriter, r *http.Request) {
 		status := map[string]interface{}{
 			"cache_type": "daramjwee-hybrid",
@@ -458,6 +458,6 @@ func databaseCachingServer(logger log.Logger) {
 	})
 
 	if err := http.ListenAndServe(":8084", nil); err != nil {
-		fmt.Printf("DB 캐싱 서버 시작 실패: %v\n", err)
+		fmt.Printf("Failed to start DB caching server: %v\n", err)
 	}
 }
