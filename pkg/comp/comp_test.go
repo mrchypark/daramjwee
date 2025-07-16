@@ -22,8 +22,8 @@ func TestAllCompressors(t *testing.T) {
 		implemented bool // 실제 압축/해제가 구현되었는지 여부
 	}{
 		{"gzip", NewDefaultGzipCompressor(), true},
-		{"lz4", NewDefaultLZ4Compressor(), false},
-		{"zstd", NewDefaultZstdCompressor(), false},
+		{"lz4", NewDefaultLZ4Compressor(), true},
+		{"zstd", NewDefaultZstdCompressor(), true},
 		{"none", daramjwee.NewNoneCompressor(), true},
 	}
 
@@ -128,6 +128,8 @@ func BenchmarkAllCompressors(b *testing.B) {
 		implemented bool
 	}{
 		{"gzip", NewDefaultGzipCompressor(), true},
+		{"lz4", NewDefaultLZ4Compressor(), true},
+		{"zstd", NewDefaultZstdCompressor(), true},
 		{"none", daramjwee.NewNoneCompressor(), true},
 	}
 

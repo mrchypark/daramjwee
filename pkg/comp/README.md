@@ -6,11 +6,9 @@ daramjwee의 압축 기능을 제공하는 패키지입니다. 스트림 기반�
 
 ### ✅ 구현 완료
 - **Gzip**: 표준 gzip 압축 (RFC 1952)
+- **LZ4**: 고속 압축 알고리즘 (pierrec/lz4 라이브러리 사용)
+- **Zstd**: Facebook의 고성능 압축 알고리즘 (klauspost/compress 라이브러리 사용)
 - **None**: 압축하지 않는 pass-through 구현
-
-### 🚧 구현 예정
-- **LZ4**: 고속 압축 알고리즘 (스켈레톤 구현됨)
-- **Zstd**: Facebook의 고성능 압축 알고리즘 (스켈레톤 구현됨)
 
 ## 사용법
 
@@ -97,10 +95,10 @@ type Compressor interface {
 - `gzip.DefaultCompression` (-1): 기본 압축 (권장)
 - `gzip.BestCompression` (9): 최고 압축률 우선
 
-### LZ4 (구현 예정)
+### LZ4
 - 1-12: 1이 가장 빠름, 12가 가장 높은 압축률
 
-### Zstd (구현 예정)
+### Zstd
 - 1-22: 1이 가장 빠름, 22가 가장 높은 압축률
 
 ## 성능 특성
@@ -108,13 +106,26 @@ type Compressor interface {
 벤치마크 결과 (Apple M3 기준):
 
 ```
-BenchmarkGzipCompressor_Compress-8                 10000    108663 ns/op    863375 B/op    22 allocs/op
-BenchmarkGzipCompressor_Decompress-8               60969     21422 ns/op    171843 B/op    15 allocs/op
-BenchmarkAllCompressors/none_compress-8           406546      3095 ns/op     49232 B/op     3 allocs/op
+BenchmarkAllCompressors/gzip_compress-8            11324    118944 ns/op    863375 B/op    22 allocs/op
+BenchmarkAllCompressors/lz4_compress-8             75553     13482 ns/op     54188 B/op    12 allocs/op
+BenchmarkAllCompressors/zstd_compress-8             9387    123911 ns/op   2395960 B/op    50 allocs/op
+BenchmarkAllCompressors/none_compress-8           383479      3088 ns/op     49233 B/op     3 allocs/op
+
+BenchmarkGzipCompressor_Decompress-8               60190     21155 ns/op    171843 B/op    15 allocs/op
+BenchmarkLZ4Compressor_Decompress-8                 3620    276809 ns/op   8447332 B/op    13 allocs/op
+BenchmarkZstdCompressor_Decompress-8               34785     39325 ns/op    195161 B/op    39 allocs/op
 ```
 
-- **Gzip**: 압축률이 좋지만 CPU 사용량이 높음
-- **None**: 압축하지 않으므로 매우 빠름
+### 압축 성능 (빠른 순서)
+1. **LZ4**: 가장 빠른 압축 (13,482 ns/op) - 실시간 처리에 적합
+2. **Gzip**: 균형잡힌 성능 (118,944 ns/op) - 범용적 사용
+3. **Zstd**: 높은 압축률 (123,911 ns/op) - 저장 공간 절약 우선
+4. **None**: 압축하지 않음 (3,088 ns/op) - 참조용
+
+### 압축 해제 성능 (빠른 순서)
+1. **Gzip**: 빠른 해제 (21,155 ns/op)
+2. **Zstd**: 중간 성능 (39,325 ns/op)
+3. **LZ4**: 상대적으로 느린 해제 (276,809 ns/op)
 
 ## 에러 처리
 
@@ -154,7 +165,7 @@ go test ./pkg/comp -cover
 
 ## 향후 계획
 
-1. **LZ4 구현**: `github.com/pierrec/lz4` 라이브러리 통합
-2. **Zstd 구현**: `github.com/klauspost/compress/zstd` 라이브러리 통합
-3. **압축 메타데이터**: 압축률, 원본 크기 등 자동 계산
-4. **스트리밍 최적화**: 더 큰 데이터에 대한 메모리 사용량 최적화
+1. **압축 메타데이터**: 압축률, 원본 크기 등 자동 계산
+2. **스트리밍 최적화**: 더 큰 데이터에 대한 메모리 사용량 최적화
+3. **압축 알고리즘 자동 선택**: 데이터 특성에 따른 최적 알고리즘 추천
+4. **병렬 압축**: 대용량 데이터에 대한 병렬 처리 지원

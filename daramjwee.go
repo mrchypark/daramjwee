@@ -1,6 +1,7 @@
 package daramjwee
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -253,4 +254,65 @@ func (n *NoneCompressor) Algorithm() string {
 // Level returns the compression level (0 since no compression is performed)
 func (n *NoneCompressor) Level() int {
 	return 0
+}
+
+// Helper functions for common use cases with small objects
+
+// GetBytes retrieves an object as a byte slice.
+// This is a convenience wrapper around Get that handles stream reading and closing.
+// It's ideal for small objects where the streaming API overhead isn't necessary.
+func GetBytes(ctx context.Context, cache Cache, key string, fetcher Fetcher) ([]byte, error) {
+	stream, err := cache.Get(ctx, key, fetcher)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+
+	return io.ReadAll(stream)
+}
+
+// GetString retrieves an object as a string.
+// This is a convenience wrapper around GetBytes for text-based content.
+func GetString(ctx context.Context, cache Cache, key string, fetcher Fetcher) (string, error) {
+	data, err := GetBytes(ctx, cache, key, fetcher)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// SetBytes stores a byte slice in the cache.
+// This is a convenience wrapper around Set that handles the streaming write.
+func SetBytes(ctx context.Context, cache Cache, key string, data []byte, metadata *Metadata) error {
+	writer, err := cache.Set(ctx, key, metadata)
+	if err != nil {
+		return err
+	}
+	defer writer.Close()
+
+	_, err = writer.Write(data)
+	return err
+}
+
+// SetString stores a string in the cache.
+// This is a convenience wrapper around SetBytes for text-based content.
+func SetString(ctx context.Context, cache Cache, key string, data string, metadata *Metadata) error {
+	return SetBytes(ctx, cache, key, []byte(data), metadata)
+}
+
+// SimpleFetcher is a convenience type that wraps a simple fetch function.
+// It's useful when you don't need the full complexity of implementing the Fetcher interface.
+type SimpleFetcher func(ctx context.Context, oldMetadata *Metadata) ([]byte, *Metadata, error)
+
+// Fetch implements the Fetcher interface by calling the wrapped function.
+func (f SimpleFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error) {
+	data, metadata, err := f(ctx, oldMetadata)
+	if err != nil {
+		return nil, err
+	}
+
+	return &FetchResult{
+		Body:     io.NopCloser(bytes.NewReader(data)),
+		Metadata: metadata,
+	}, nil
 }
