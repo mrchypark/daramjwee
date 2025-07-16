@@ -349,21 +349,21 @@ func TestMemStore_Parallel(t *testing.T) {
 		})
 		t.Run("Stat", func(t *testing.T) {
 			t.Parallel()
-				_, err := store.Stat(ctx, "keyB")
-				assert.NoError(t, err)
-			})
-		t.Run("Delete", func(t *testing.T) {
-				t.Parallel()
-				err := store.Delete(ctx, "keyC")
-				assert.NoError(t, err)
-			})
-		t.Run("Set-New", func(t *testing.T) {
-				t.Parallel()
-				writer, _ := store.SetWithWriter(ctx, "keyE", &daramjwee.Metadata{ETag: "v_new"})
-				writer.Write([]byte("new key"))
-				writer.Close()
-			})
+			_, err := store.Stat(ctx, "keyB")
+			assert.NoError(t, err)
 		})
+		t.Run("Delete", func(t *testing.T) {
+			t.Parallel()
+			err := store.Delete(ctx, "keyC")
+			assert.NoError(t, err)
+		})
+		t.Run("Set-New", func(t *testing.T) {
+			t.Parallel()
+			writer, _ := store.SetWithWriter(ctx, "keyE", &daramjwee.Metadata{ETag: "v_new"})
+			writer.Write([]byte("new key"))
+			writer.Close()
+		})
+	})
 }
 
 // TestMemStore_NegativeCache_NoBody tests that setting an item with IsNegative=true
@@ -465,13 +465,13 @@ type badPolicy struct {
 }
 
 // Touch does nothing.
-func (p *badPolicy) Touch(key string)           {}
+func (p *badPolicy) Touch(key string) {}
 
 // Add does nothing.
 func (p *badPolicy) Add(key string, size int64) {}
 
 // Remove does nothing.
-func (p *badPolicy) Remove(key string)          {}
+func (p *badPolicy) Remove(key string) {}
 
 // Evict returns a predefined list of keys, or non-existent keys by default.
 func (p *badPolicy) Evict() []string {
@@ -547,7 +547,7 @@ func BenchmarkMemStore_ConcurrentReadWrite(b *testing.B) {
 				// Read operation
 				reader, _, err := store.GetStream(ctx, key)
 				if err == nil {
-					// 실제 읽는 동작을 시뮬레이션
+					// Simulate actual reading operation
 					io.Copy(io.Discard, reader)
 					reader.Close()
 				}

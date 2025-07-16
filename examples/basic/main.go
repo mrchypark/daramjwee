@@ -1,3 +1,4 @@
+// Package main demonstrates basic daramjwee cache usage with HTTP server
 package main
 
 import (
@@ -38,7 +39,7 @@ func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 	if oldMetadata != nil {
 		oldETagVal = oldMetadata.ETag
 	}
-	fmt.Printf("[Origin] Fetching key: %s, (old ETag: '%s')", f.key, oldETagVal)
+	fmt.Printf("[Origin] Fetching key: %s, (old ETag: '%s')\n", f.key, oldETagVal)
 	time.Sleep(500 * time.Millisecond) // Simulate network latency
 
 	obj, ok := fakeOrigin[f.key]
@@ -129,7 +130,7 @@ func main() {
 			return
 		}
 
-		fmt.Printf("--- Handling request for key: %s ---", key)
+		fmt.Printf("--- Handling request for key: %s ---\n", key)
 
 		stream, err := cache.Get(r.Context(), key, &originFetcher{key: key})
 		if err != nil {
@@ -137,32 +138,32 @@ func main() {
 				fmt.Println("[Handler] Object not found.")
 				http.Error(w, "Object Not Found", http.StatusNotFound)
 			} else {
-				fmt.Printf("[Handler] Error: %v", err)
+				fmt.Printf("[Handler] Error: %v\n", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
 		defer func() {
 			if err := stream.Close(); err != nil {
-				fmt.Printf("[Handler] Error closing stream: %v", err)
+				fmt.Printf("[Handler] Error closing stream: %v\n", err)
 			}
 		}()
 
 		fmt.Println("[Handler] Streaming response to client...")
 		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.Copy(w, stream); err != nil {
-			fmt.Printf("[Handler] Error copying stream to response: %v", err)
+			fmt.Printf("[Handler] Error copying stream to response: %v\n", err)
 		}
 		fmt.Println("[Handler] Done.")
 	})
 
-	fmt.Println("daramjwee example server is running on :8080")
+	fmt.Println("daramjwee basic server is running on :8080")
 	fmt.Println("Try visiting:")
 	fmt.Println("  http://localhost:8080/objects/hello")
 	fmt.Println("  http://localhost:8080/objects/world")
 	fmt.Println("  http://localhost:8080/objects/not-exist")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
-		fmt.Printf("Failed to start server: %v", err)
+		fmt.Printf("Failed to start server: %v\n", err)
 		os.Exit(1)
 	}
 }

@@ -124,14 +124,14 @@ func TestObjstoreAdapter_StreamingWriter_UploadError(t *testing.T) {
 	key := "test-upload-error"
 	etag := "etag-upload-error"
 
-	// 어댑터가 사용하는 버킷을 임시로 교체하여 에러를 시뮬레이션합니다.
-	// 실제 프로덕션 코드에서는 이렇게 하지 않겠지만, 테스트에서는 유용한 기법입니다.
+	// Temporarily replace the bucket used by the adapter to simulate errors.
+	// We wouldn't do this in actual production code, but it's a useful technique in tests.
 	originalBucket := testStore.(*objstoreAdapter).bucket
 
 	mockBucket := &errorBucket{originalBucket}
 	testStore.(*objstoreAdapter).bucket = mockBucket
 	defer func() {
-		// 테스트가 끝나면 원래 버킷으로 복원합니다.
+		// Restore the original bucket when the test ends.
 		testStore.(*objstoreAdapter).bucket = originalBucket
 	}()
 
@@ -141,7 +141,7 @@ func TestObjstoreAdapter_StreamingWriter_UploadError(t *testing.T) {
 	_, err = wc.Write([]byte("this will fail"))
 	require.NoError(t, err)
 
-	// Close()에서 내부 업로드 에러가 전파되어야 합니다.
+	// Close() should propagate the internal upload error.
 	err = wc.Close()
 	require.Error(t, err, "Close should return an error if upload fails")
 	assert.Contains(t, err.Error(), "simulated upload error", "error message should indicate upload failure")
@@ -158,7 +158,7 @@ var errSimulatedUpload = errors.New("simulated upload error")
 func (b *errorBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
 	// Consume the reader to allow the pipe to close, but return an error.
 	_, _ = io.ReadAll(r)
-	return errSimulatedUpload // 미리 정의한 커스텀 에러를 반환합니다.
+	return errSimulatedUpload // Return the predefined custom error.
 }
 
 // TestObjstoreAdapter_NegativeCache_NoBody tests that setting an item with IsNegative=true
@@ -228,56 +228,58 @@ func TestObjstoreAdapter_MetadataFields(t *testing.T) {
 	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
 
-// TestObjstoreAdapter_GoroutineLeakOnContextCancel는 스트리밍 업로드 중 컨텍스트가
-// 취소되었을 때, 백그라운드 업로드 고루틴이 정상적으로 종료되어 누수되지 않는지 검증합니다.
+// TestObjstoreAdapter_GoroutineLeakOnContextCancel verifies that when the context
+// is canceled during streaming upload, the background upload goroutine terminates
+// properly without leaking.
 func TestObjstoreAdapter_GoroutineLeakOnContextCancel(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping leak test in short mode")
 	}
 
-	// 1. 테스트 시작 전의 고루틴 수를 기록합니다.
+	// 1. Record the number of goroutines before the test starts.
 	initialGoroutines := runtime.NumGoroutine()
 
-	// 2. 업로드가 시작되었음을 알릴 채널만 준비합니다. (종료 채널은 제거)
+	// 2. Prepare only the channel to signal upload start. (Remove termination channel)
 	uploadStarted := make(chan struct{})
 	mockBucket := &errorBucketWithFunc{
 		uploadFunc: func(ctx context.Context, name string, r io.Reader) error {
-			close(uploadStarted) // 업로드 시작 신호
-			// 컨텍스트가 취소될 때까지 대기
+			close(uploadStarted) // Signal upload start
+			// Wait until context is canceled
 			<-ctx.Done()
-			// 컨텍스트 에러를 반환하여, writer.Close()가 이 에러를 받을 수 있도록 함
+			// Return context error so writer.Close() can receive this error
 			return ctx.Err()
 		},
 	}
-	// errorBucket의 Upload 메서드를 커스텀 함수로 교체합니다.
+	// Replace errorBucket's Upload method with custom function.
 	originalBucket := testStore.(*objstoreAdapter).bucket
 	testStore.(*objstoreAdapter).bucket = mockBucket
 	defer func() {
 		testStore.(*objstoreAdapter).bucket = originalBucket
 	}()
 
-	// 3. 취소 가능한 컨텍스트를 생성합니다.
+	// 3. Create a cancelable context.
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 4. SetWithWriter를 호출하여 백그라운드 업로드 고루틴을 실행시킵니다.
+	// 4. Call SetWithWriter to start the background upload goroutine.
 	writer, err := testStore.SetWithWriter(ctx, "leak-test-key", &daramjwee.Metadata{})
 	require.NoError(t, err)
 	require.NotNil(t, writer)
 
-	// 업로드 고루틴이 실행될 때까지 대기
+	// Wait until upload goroutine starts
 	<-uploadStarted
 
-	// 5. 컨텍스트를 즉시 취소하여 고루틴 종료를 트리거합니다.
+	// 5. Cancel the context immediately to trigger goroutine termination.
 	cancel()
 
-	// 6. writer를 닫습니다. 이 함수는 내부적으로 wg.Wait()를 통해
-	//    백그라운드 고루틴이 종료될 때까지 안전하게 기다립니다.
-	//    백그라운드 고루틴은 ctx.Err()를 반환하므로, Close()는 그 에러를 최종적으로 반환합니다.
+	// 6. Close the writer. This function internally waits safely for the
+	//    background goroutine to terminate through wg.Wait().
+	//    Since the background goroutine returns ctx.Err(), Close() will ultimately return that error.
 	closeErr := writer.Close()
 	assert.ErrorIs(t, closeErr, context.Canceled, "writer.Close() should propagate the context cancellation error")
 
-	// 7. 테스트 종료 후, 고루틴 수가 테스트 시작 전과 비슷한 수준인지 확인하여 누수 여부를 최종 검증합니다.
-	//    GC와 스케줄러가 안정화될 시간을 잠시 줍니다.
+	// 7. After test completion, verify that the number of goroutines is at a similar level
+	//    to before the test started to finally check for leaks.
+	//    Give some time for GC and scheduler to stabilize.
 	runtime.GC()
 	time.Sleep(100 * time.Millisecond)
 	finalGoroutines := runtime.NumGoroutine()
@@ -285,7 +287,7 @@ func TestObjstoreAdapter_GoroutineLeakOnContextCancel(t *testing.T) {
 	assert.InDelta(t, initialGoroutines, finalGoroutines, 2, "Number of goroutines should not significantly increase after test")
 }
 
-// errorBucket을 수정하여 커스텀 Upload 함수를 주입할 수 있도록 합니다.
+// errorBucketWithFunc modifies errorBucket to allow injection of custom Upload functions.
 type errorBucketWithFunc struct {
 	objstore.Bucket
 	uploadFunc func(ctx context.Context, name string, r io.Reader) error
@@ -295,7 +297,7 @@ func (b *errorBucketWithFunc) Upload(ctx context.Context, name string, r io.Read
 	if b.uploadFunc != nil {
 		return b.uploadFunc(ctx, name, r)
 	}
-	// 기본 동작: 즉시 에러 반환
+	// Default behavior: return error immediately
 	_, _ = io.ReadAll(r)
 	return errors.New("simulated upload error")
 }

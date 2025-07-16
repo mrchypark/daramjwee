@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- 테스트를 위한 Mock Store ---
-// 이 테스트 파일 내에서만 사용할 간단한 Mock Store입니다.
+// --- Mock Store for Testing ---
+// Simple Mock Store used only within this test file.
 type optionsTestMockStore struct{}
 
 func (s *optionsTestMockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
@@ -28,19 +28,19 @@ func (s *optionsTestMockStore) Stat(ctx context.Context, key string) (*Metadata,
 	return nil, nil
 }
 
-// --- 기본 유효성 검사 테스트 ---
+// --- Basic Validation Tests ---
 
 func TestNew_OptionValidation(t *testing.T) {
-	// 유효성 검사 테스트에 사용할 기본 HotStore
+	// Default HotStore for validation tests
 	validHotStore := &optionsTestMockStore{}
 
 	testCases := []struct {
 		name        string
 		options     []Option
 		expectErr   bool
-		expectedMsg string // 에러 발생 시 기대하는 메시지 일부
+		expectedMsg string // Expected message part when error occurs
 	}{
-		// --- 해피 패스 (성공 케이스) ---
+		// --- Happy Path (Success Cases) ---
 		{
 			name:      "Success with only mandatory hot store",
 			options:   []Option{WithHotStore(validHotStore)},
@@ -53,14 +53,14 @@ func TestNew_OptionValidation(t *testing.T) {
 				WithColdStore(&optionsTestMockStore{}),
 				WithWorker("pool", 10, 100, 5*time.Second),
 				WithDefaultTimeout(10 * time.Second),
-				WithShutdownTimeout(20 * time.Second), // **수정**: ShutdownTimeout 테스트 추가
-				WithCache(1 * time.Minute),            // **수정**: WithGracePeriod -> WithCache
+				WithShutdownTimeout(20 * time.Second), // **Modified**: Added ShutdownTimeout test
+				WithCache(1 * time.Minute),            // **Modified**: WithGracePeriod -> WithCache
 				WithNegativeCache(5 * time.Minute),
 			},
 			expectErr: false,
 		},
 		{
-			name: "Success with positive cache TTL of zero", // **수정**: 0은 유효한 값이므로 성공 케이스로 변경
+			name: "Success with positive cache TTL of zero", // **Modified**: 0 is a valid value, so changed to success case
 			options: []Option{
 				WithHotStore(validHotStore),
 				WithCache(0),
@@ -76,7 +76,7 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectErr: false,
 		},
 
-		// --- 실패 케이스 ---
+		// --- Failure Cases ---
 		{
 			name:        "Failure without any options",
 			options:     []Option{},
@@ -144,7 +144,7 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectedMsg: "default timeout must be positive",
 		},
 		{
-			name: "Failure with zero shutdown timeout", // **추가**: ShutdownTimeout 실패 케이스
+			name: "Failure with zero shutdown timeout", // **Added**: ShutdownTimeout failure case
 			options: []Option{
 				WithHotStore(validHotStore),
 				WithShutdownTimeout(0),
@@ -153,7 +153,7 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectedMsg: "Shutdown timeout must be positive",
 		},
 		{
-			name: "Failure with negative shutdown timeout", // **추가**: ShutdownTimeout 실패 케이스
+			name: "Failure with negative shutdown timeout", // **Added**: ShutdownTimeout failure case
 			options: []Option{
 				WithHotStore(validHotStore),
 				WithShutdownTimeout(-10 * time.Second),
@@ -162,7 +162,7 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectedMsg: "Shutdown timeout must be positive",
 		},
 		{
-			name: "Failure with negative value for positive cache", // **수정**: WithGracePeriod -> WithCache
+			name: "Failure with negative value for positive cache", // **Modified**: WithGracePeriod -> WithCache
 			options: []Option{
 				WithHotStore(validHotStore),
 				WithCache(-1 * time.Minute),
@@ -192,28 +192,28 @@ func TestNew_OptionValidation(t *testing.T) {
 			} else {
 				require.NoError(t, err, "Expected no error for valid options")
 				assert.NotNil(t, cache, "Cache should not be nil on successful creation")
-				// 성공 시에는 리소스를 정리해야 합니다.
+				// Clean up resources on success.
 				cache.Close()
 			}
 		})
 	}
 }
 
-// --- 엣지 케이스 테스트 ---
+// --- Edge Case Tests ---
 
-// TestNew_OptionOverrides는 동일한 옵션이 여러 번 제공되었을 때
-// 마지막에 제공된 옵션이 적용되는지 검증합니다.
+// TestNew_OptionOverrides verifies that when the same option is provided multiple times,
+// the last provided option is applied.
 func TestNew_OptionOverrides(t *testing.T) {
 	validHotStore := &optionsTestMockStore{}
 	finalTimeout := 15 * time.Second
-	finalFreshFor := 10 * time.Minute // **수정**: 변수명 및 값 변경
+	finalFreshFor := 10 * time.Minute // **Modified**: Variable name and value changed
 
 	options := []Option{
 		WithHotStore(validHotStore),
-		WithDefaultTimeout(5 * time.Second), // 초기값
-		WithCache(1 * time.Minute),          // **수정**: WithGracePeriod -> WithCache
-		WithDefaultTimeout(finalTimeout),    // 최종값
-		WithCache(finalFreshFor),            // **수정**: WithGracePeriod -> WithCache
+		WithDefaultTimeout(5 * time.Second), // Initial value
+		WithCache(1 * time.Minute),          // **Modified**: WithGracePeriod -> WithCache
+		WithDefaultTimeout(finalTimeout),    // Final value
+		WithCache(finalFreshFor),            // **Modified**: WithGracePeriod -> WithCache
 	}
 
 	cache, err := New(nil, options...)
@@ -221,23 +221,23 @@ func TestNew_OptionOverrides(t *testing.T) {
 	require.NotNil(t, cache)
 	defer cache.Close()
 
-	// Cache 인터페이스를 실제 구현체인 DaramjweeCache로 타입 단언(type assertion)하여
-	// 내부 설정값을 확인합니다.
+	// Type assert the Cache interface to the actual implementation DaramjweeCache
+	// to check internal configuration values.
 	dCache, ok := cache.(*DaramjweeCache)
 	require.True(t, ok, "Failed to assert cache to *DaramjweeCache")
 
 	assert.Equal(t, finalTimeout, dCache.DefaultTimeout, "The last DefaultTimeout option should be applied")
-	assert.Equal(t, finalFreshFor, dCache.PositiveFreshFor, "The last WithCache option should be applied") // **수정**: 검증 필드 변경
+	assert.Equal(t, finalFreshFor, dCache.PositiveFreshFor, "The last WithCache option should be applied") // **Modified**: Verification field changed
 }
 
-// TestNew_NilColdStoreIsValid는 ColdStore로 nil을 전달하는 것이 유효하며,
-// 이 경우 내부적으로 nullStore가 사용되는 것을 검증합니다.
+// TestNew_NilColdStoreIsValid verifies that passing nil as ColdStore is valid,
+// and in this case nullStore is used internally.
 func TestNew_NilColdStoreIsValid(t *testing.T) {
 	validHotStore := &optionsTestMockStore{}
 
 	options := []Option{
 		WithHotStore(validHotStore),
-		WithColdStore(nil), // 명시적으로 nil ColdStore 설정
+		WithColdStore(nil), // Explicitly set nil ColdStore
 	}
 
 	cache, err := New(nil, options...)
@@ -245,12 +245,12 @@ func TestNew_NilColdStoreIsValid(t *testing.T) {
 	require.NotNil(t, cache)
 	defer cache.Close()
 
-	// 내부적으로 nullStore가 사용되었는지 확인하려면, 실제 ColdStore에 접근해야 합니다.
+	// To check if nullStore is used internally, we need to access the actual ColdStore.
 	dCache, ok := cache.(*DaramjweeCache)
 	require.True(t, ok)
 
-	// nullStore 타입인지 확인합니다.
-	// daramjwee.go의 New 함수에서 nil ColdStore는 *nullStore로 대체됩니다.
+	// Check if it's a nullStore type.
+	// In the New function of daramjwee.go, nil ColdStore is replaced with *nullStore.
 	_, ok = dCache.ColdStore.(*nullStore)
 	assert.True(t, ok, "ColdStore should be an instance of nullStore when configured with nil")
 }

@@ -54,7 +54,7 @@ type Metadata struct {
 	ETag        string               `json:"etag,omitempty"`
 	IsNegative  bool                 `json:"is_negative,omitempty"`
 	CachedAt    time.Time            `json:"cached_at"`
-	Compression *CompressionMetadata `json:"compression,omitempty"` // 압축 관련 메타데이터
+	Compression *CompressionMetadata `json:"compression,omitempty"` // Compression-related metadata
 }
 
 // FetchResult holds the data and metadata returned from a successful fetch operation.
@@ -101,20 +101,20 @@ type Locker interface {
 	RUnlock(key string)
 }
 
-// Compressor는 압축/해제 기능을 정의하는 인터페이스입니다
+// Compressor defines the interface for compression/decompression functionality
 type Compressor interface {
-	// Compress는 입력 스트림을 압축하여 출력 스트림에 씁니다
-	// 압축된 바이트 수와 에러를 반환합니다
+	// Compress compresses the input stream and writes to the output stream
+	// Returns the number of compressed bytes and any error
 	Compress(dst io.Writer, src io.Reader) (int64, error)
 
-	// Decompress는 압축된 입력 스트림을 해제하여 출력 스트림에 씁니다
-	// 해제된 바이트 수와 에러를 반환합니다
+	// Decompress decompresses the input stream and writes to the output stream
+	// Returns the number of decompressed bytes and any error
 	Decompress(dst io.Writer, src io.Reader) (int64, error)
 
-	// Algorithm은 압축 알고리즘 이름을 반환합니다
+	// Algorithm returns the compression algorithm name
 	Algorithm() string
 
-	// Level은 압축 레벨을 반환합니다
+	// Level returns the compression level
 	Level() int
 }
 
@@ -190,7 +190,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	return c, nil
 }
 
-// CompressionType은 지원하는 압축 알고리즘을 정의합니다
+// CompressionType defines the supported compression algorithms
 type CompressionType string
 
 const (
@@ -200,57 +200,57 @@ const (
 	CompressionNone CompressionType = "none"
 )
 
-// CompressionMetadata는 압축 관련 메타데이터를 저장합니다
+// CompressionMetadata stores compression-related metadata
 type CompressionMetadata struct {
-	Algorithm        string  `json:"algorithm"`         // 압축 알고리즘
-	Level            int     `json:"level"`             // 압축 레벨
-	OriginalSize     int64   `json:"original_size"`     // 원본 크기
-	CompressedSize   int64   `json:"compressed_size"`   // 압축된 크기
-	CompressionRatio float64 `json:"compression_ratio"` // 압축 비율 (압축된 크기 / 원본 크기)
+	Algorithm        string  `json:"algorithm"`         // Compression algorithm
+	Level            int     `json:"level"`             // Compression level
+	OriginalSize     int64   `json:"original_size"`     // Original size
+	CompressedSize   int64   `json:"compressed_size"`   // Compressed size
+	CompressionRatio float64 `json:"compression_ratio"` // Compression ratio (compressed size / original size)
 }
 
-// 압축 관련 에러 타입들
+// Compression-related error types
 var (
-	// ErrCompressionFailed는 압축 작업이 실패했을 때 반환됩니다
+	// ErrCompressionFailed is returned when compression operation fails
 	ErrCompressionFailed = errors.New("daramjwee: compression failed")
 
-	// ErrDecompressionFailed는 압축 해제 작업이 실패했을 때 반환됩니다
+	// ErrDecompressionFailed is returned when decompression operation fails
 	ErrDecompressionFailed = errors.New("daramjwee: decompression failed")
 
-	// ErrUnsupportedAlgorithm은 지원하지 않는 압축 알고리즘이 사용될 때 반환됩니다
+	// ErrUnsupportedAlgorithm is returned when an unsupported compression algorithm is used
 	ErrUnsupportedAlgorithm = errors.New("daramjwee: unsupported compression algorithm")
 
-	// ErrCorruptedData는 압축된 데이터가 손상되었을 때 반환됩니다
+	// ErrCorruptedData is returned when compressed data is corrupted
 	ErrCorruptedData = errors.New("daramjwee: corrupted compressed data")
 
-	// ErrInvalidCompressionLevel은 유효하지 않은 압축 레벨이 설정될 때 반환됩니다
+	// ErrInvalidCompressionLevel is returned when an invalid compression level is set
 	ErrInvalidCompressionLevel = errors.New("daramjwee: invalid compression level")
 )
 
-// NoneCompressor는 압축을 수행하지 않는 패스스루 구현입니다
+// NoneCompressor is a pass-through implementation that performs no compression
 type NoneCompressor struct{}
 
-// NewNoneCompressor는 새로운 압축 없음 구현을 생성합니다
+// NewNoneCompressor creates a new no-compression implementation
 func NewNoneCompressor() Compressor {
 	return &NoneCompressor{}
 }
 
-// Compress는 데이터를 그대로 복사합니다 (압축하지 않음)
+// Compress copies data as-is (no compression)
 func (n *NoneCompressor) Compress(dst io.Writer, src io.Reader) (int64, error) {
 	return io.Copy(dst, src)
 }
 
-// Decompress는 데이터를 그대로 복사합니다 (압축 해제하지 않음)
+// Decompress copies data as-is (no decompression)
 func (n *NoneCompressor) Decompress(dst io.Writer, src io.Reader) (int64, error) {
 	return io.Copy(dst, src)
 }
 
-// Algorithm은 압축 알고리즘 이름을 반환합니다
+// Algorithm returns the compression algorithm name
 func (n *NoneCompressor) Algorithm() string {
 	return "none"
 }
 
-// Level은 압축 레벨을 반환합니다 (압축하지 않으므로 0)
+// Level returns the compression level (0 since no compression is performed)
 func (n *NoneCompressor) Level() int {
 	return 0
 }

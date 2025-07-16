@@ -8,12 +8,12 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
-// GzipCompressor는 gzip 압축 알고리즘을 구현합니다
+// GzipCompressor implements the gzip compression algorithm
 type GzipCompressor struct {
 	level int
 }
 
-// NewGzipCompressor는 새로운 gzip 압축기를 생성합니다
+// NewGzipCompressor creates a new gzip compressor
 func NewGzipCompressor(level int) (*GzipCompressor, error) {
 	if level < gzip.HuffmanOnly || level > gzip.BestCompression {
 		return nil, daramjwee.ErrInvalidCompressionLevel
@@ -21,12 +21,12 @@ func NewGzipCompressor(level int) (*GzipCompressor, error) {
 	return &GzipCompressor{level: level}, nil
 }
 
-// NewDefaultGzipCompressor는 기본 압축 레벨로 gzip 압축기를 생성합니다
+// NewDefaultGzipCompressor creates a gzip compressor with default compression level
 func NewDefaultGzipCompressor() *GzipCompressor {
 	return &GzipCompressor{level: gzip.DefaultCompression}
 }
 
-// Compress는 입력 스트림을 gzip으로 압축합니다
+// Compress compresses the input stream with gzip
 func (g *GzipCompressor) Compress(dst io.Writer, src io.Reader) (int64, error) {
 	writer, err := gzip.NewWriterLevel(dst, g.level)
 	if err != nil {
@@ -46,7 +46,7 @@ func (g *GzipCompressor) Compress(dst io.Writer, src io.Reader) (int64, error) {
 	return written, nil
 }
 
-// Decompress는 gzip으로 압축된 스트림을 해제합니다
+// Decompress decompresses a gzip-compressed stream
 func (g *GzipCompressor) Decompress(dst io.Writer, src io.Reader) (int64, error) {
 	reader, err := gzip.NewReader(src)
 	if err != nil {
@@ -62,12 +62,12 @@ func (g *GzipCompressor) Decompress(dst io.Writer, src io.Reader) (int64, error)
 	return written, nil
 }
 
-// Algorithm은 압축 알고리즘 이름을 반환합니다
+// Algorithm returns the compression algorithm name
 func (g *GzipCompressor) Algorithm() string {
 	return "gzip"
 }
 
-// Level은 압축 레벨을 반환합니다
+// Level returns the compression level
 func (g *GzipCompressor) Level() int {
 	return g.level
 }

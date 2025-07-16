@@ -20,8 +20,8 @@ func TestCache_Chaos_RaceCondition(t *testing.T) {
 		t.Skip("Skipping chaos test in short mode")
 	}
 
-	// 1. 테스트를 위한 캐시 생성
-	// defer cache.Close()를 여기서 제거합니다.
+	// 1. Create cache for testing
+	// Remove defer cache.Close() from here.
 	cache, hot, _ := setupCache(t)
 
 	ctx := context.Background()
@@ -40,7 +40,7 @@ func TestCache_Chaos_RaceCondition(t *testing.T) {
 	for i := 0; i < numGoroutines; i++ {
 		go func(goroutineID int) {
 			defer wg.Done()
-			// 각 고루틴마다 별도의 시드를 가진 난수 생성기를 사용합니다.
+			// Use a separate seeded random number generator for each goroutine.
 			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(goroutineID)))
 
 			for j := 0; j < 100; j++ {
@@ -68,12 +68,12 @@ func TestCache_Chaos_RaceCondition(t *testing.T) {
 		}(i)
 	}
 
-	// 2. 모든 'chaos' 고루틴이 작업을 마칠 때까지 명시적으로 기다립니다.
+	// 2. Explicitly wait for all 'chaos' goroutines to complete their work.
 	wg.Wait()
 
-	// 3. 'chaos'가 완전히 끝난 후에, 캐시를 닫습니다.
-	// 이렇게 하면 순환 대기 문제가 발생하지 않습니다.
+	// 3. Close the cache after 'chaos' is completely finished.
+	// This prevents circular wait problems.
 	cache.Close()
 
-	// 테스트의 주 목적은 레이스 컨디션 탐지이므로, 최종 상태 검증은 생략합니다.
+	// The main purpose of the test is race condition detection, so final state verification is omitted.
 }
