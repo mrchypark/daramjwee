@@ -90,8 +90,8 @@ func TestSetBytes(t *testing.T) {
 
 	// Verify data was stored correctly
 	fetcher := SimpleFetcher(func(ctx context.Context, oldMetadata *Metadata) ([]byte, *Metadata, error) {
-		t.Fatal("Fetcher should not be called for cache hit")
-		return nil, nil, nil
+		// Return error instead of calling t.Fatal to avoid race condition
+		return nil, nil, assert.AnError
 	})
 
 	retrievedData, err := GetBytes(ctx, cache, key, fetcher)
@@ -121,8 +121,8 @@ func TestSetString(t *testing.T) {
 
 	// Verify string was stored correctly
 	fetcher := SimpleFetcher(func(ctx context.Context, oldMetadata *Metadata) ([]byte, *Metadata, error) {
-		t.Fatal("Fetcher should not be called for cache hit")
-		return nil, nil, nil
+		// Return error instead of calling t.Fatal to avoid race condition
+		return nil, nil, assert.AnError
 	})
 
 	retrievedString, err := GetString(ctx, cache, key, fetcher)
@@ -191,8 +191,8 @@ func TestHelperFunctionsIntegration(t *testing.T) {
 	for _, tc := range testCases {
 		// This fetcher should never be called since data is already cached
 		fetcher := SimpleFetcher(func(ctx context.Context, oldMetadata *Metadata) ([]byte, *Metadata, error) {
-			t.Fatalf("Fetcher should not be called for cached key: %s", tc.key)
-			return nil, nil, nil
+			// Return error instead of calling t.Fatalf to avoid race condition
+			return nil, nil, assert.AnError
 		})
 
 		retrievedData, err := GetString(ctx, cache, tc.key, fetcher)

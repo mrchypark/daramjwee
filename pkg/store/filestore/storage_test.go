@@ -432,9 +432,9 @@ func TestFileStore_Eviction_Debug(t *testing.T) {
 // TestFileStore_Eviction tests the eviction of items when capacity is exceeded.
 func TestFileStore_Eviction(t *testing.T) {
 	policy := newMockPolicy()
-	// A file with empty metadata and 10 bytes of content is 83 bytes.
-	// Set capacity to hold two files (166 bytes), but not three (249 bytes).
-	fs, err := New(t.TempDir(), log.NewNopLogger(), 167, policy)
+	// A file with empty metadata and 10 bytes of content is 65 bytes.
+	// Set capacity to hold two files (130 bytes), but not three (195 bytes).
+	fs, err := New(t.TempDir(), log.NewNopLogger(), 130, policy)
 	require.NoError(t, err)
 
 	ctx := context.Background()
