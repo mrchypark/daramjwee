@@ -13,8 +13,6 @@ import (
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
-var ErrCacheClosed = errors.New("daramjwee: cache is closed")
-
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
 	HotStore         Store
