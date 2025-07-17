@@ -63,6 +63,7 @@ func TestBufferLifecycleManager_RegisterBuffer(t *testing.T) {
 	blm.registryMutex.RUnlock()
 
 	assert.True(t, exists)
+	require.NotNil(t, metadata, "Buffer metadata should not be nil")
 	assert.Equal(t, len(buf), metadata.Size)
 	assert.Equal(t, poolSize, metadata.PoolSize)
 	assert.Equal(t, int64(1), metadata.UsageCount)
@@ -92,9 +93,11 @@ func TestBufferLifecycleManager_UpdateBufferUsage(t *testing.T) {
 	// Verify usage update
 	addr := uintptr(unsafe.Pointer(&buf[0]))
 	blm.registryMutex.RLock()
-	metadata := blm.bufferRegistry[addr]
+	metadata, exists := blm.bufferRegistry[addr]
 	blm.registryMutex.RUnlock()
 
+	assert.True(t, exists, "Buffer should exist in registry")
+	require.NotNil(t, metadata, "Buffer metadata should not be nil")
 	assert.Equal(t, int64(2), metadata.UsageCount) // Initial + update
 	assert.True(t, metadata.IsActive)
 }

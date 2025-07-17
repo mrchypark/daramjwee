@@ -3,6 +3,7 @@ package daramjwee
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime"
 	"testing"
 	"time"
@@ -627,10 +628,7 @@ func (mev *MemoryEfficiencyValidator) analyzeMemoryStability(t *testing.T, sampl
 	variance /= float64(len(memoryValues))
 
 	// Calculate coefficient of variation
-	stdDev := variance
-	if stdDev > 0 {
-		stdDev = variance // Simplified - should be sqrt(variance)
-	}
+	stdDev := math.Sqrt(variance)
 
 	cv := stdDev / mean * 100 // Coefficient of variation as percentage
 

@@ -1898,10 +1898,10 @@ func (cfg *BufferPoolConfig) validate() error {
 
 	// Validate large object threshold constraints
 	if cfg.LargeObjectThreshold <= 0 {
-		cfg.LargeObjectThreshold = 256 * 1024 // Default: 256KB
+		return &ConfigError{"large object threshold must be positive"}
 	}
 	if cfg.VeryLargeObjectThreshold <= 0 {
-		cfg.VeryLargeObjectThreshold = 1024 * 1024 // Default: 1MB
+		return &ConfigError{"very large object threshold must be positive"}
 	}
 	if cfg.LargeObjectThreshold >= cfg.VeryLargeObjectThreshold {
 		return &ConfigError{"large object threshold must be smaller than very large object threshold"}
