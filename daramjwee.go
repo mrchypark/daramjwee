@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -3439,6 +3440,9 @@ type AdaptiveBufferPool struct {
 	stats            *AdaptiveBufferPoolStats
 	metricsCollector *MetricsCollector
 
+	// Memory pressure management
+	memoryPressureDetector *MemoryPressureDetector
+
 	// Resource management for large operations
 	largeOpsSemaphore chan struct{} // Semaphore for limiting concurrent large operations
 
@@ -3465,6 +3469,11 @@ type AdaptiveBufferPoolStats struct {
 	ChunkPoolPuts   int64
 	ChunkPoolHits   int64
 	ChunkPoolMisses int64
+
+	// Memory pressure metrics
+	MemoryPressureRejections int64 // Number of allocations rejected due to critical memory pressure
+	MemoryPressureReductions int64 // Number of allocations reduced due to memory pressure
+	StrategyAdaptations      int64 // Number of strategy adaptations due to memory pressure
 }
 
 // NewAdaptiveBufferPool creates a new adaptive buffer pool with the given configuration.
@@ -3558,6 +3567,37 @@ func (abp *AdaptiveBufferPool) Get(size int) []byte {
 		}
 	}()
 
+	// Check memory pressure and adapt allocation strategy
+	if abp.memoryPressureDetector != nil {
+		if abp.memoryPressureDetector.ShouldRejectAllocation() {
+			// Under critical memory pressure, reject large allocations
+			if size > abp.config.LargeObjectThreshold {
+				atomic.AddInt64(&abp.stats.MemoryPressureRejections, 1)
+				if abp.logger != nil {
+					level.Warn(abp.logger).Log(
+						"msg", "rejected large allocation due to critical memory pressure",
+						"size", size,
+						"threshold", abp.config.LargeObjectThreshold,
+					)
+				}
+				// Return minimal buffer for critical situations
+				return make([]byte, min(size, 64*1024))
+			}
+		}
+
+		if abp.memoryPressureDetector.ShouldReduceAllocation() {
+			// Under memory pressure, reduce buffer size
+			reductionFactor := abp.memoryPressureDetector.GetAllocationReductionFactor()
+			if reductionFactor < 1.0 {
+				adjustedSize := int(float64(size) * reductionFactor)
+				if adjustedSize < size {
+					atomic.AddInt64(&abp.stats.MemoryPressureReductions, 1)
+					size = max(adjustedSize, 4*1024) // Minimum 4KB
+				}
+			}
+		}
+	}
+
 	// Update size-category metrics regardless of strategy
 	category := classifyObjectSize(size, abp.config)
 	switch category {
@@ -3572,6 +3612,12 @@ func (abp *AdaptiveBufferPool) Get(size int) []byte {
 	}
 
 	strategy := selectStrategyWithLogging(size, abp.config, abp.logger)
+
+	// Adapt strategy based on memory pressure
+	if abp.memoryPressureDetector != nil {
+		strategy = abp.adaptStrategyForMemoryPressure(strategy, size)
+	}
+
 	abp.updateStrategyMetrics(strategy)
 
 	switch strategy {
@@ -3718,6 +3764,55 @@ func (abp *AdaptiveBufferPool) updateLatencyMetrics(category ObjectSizeCategory,
 			float64(currentLatency)*0.9 + float64(latency)*0.1,
 		)
 	}
+}
+
+// adaptStrategyForMemoryPressure adapts the buffer pool strategy based on current memory pressure.
+func (abp *AdaptiveBufferPool) adaptStrategyForMemoryPressure(originalStrategy BufferPoolStrategy, size int) BufferPoolStrategy {
+	pressure := abp.memoryPressureDetector.GetCurrentPressure()
+
+	// No adaptation needed under normal conditions
+	if pressure <= MemoryPressureLow {
+		return originalStrategy
+	}
+
+	adaptedStrategy := originalStrategy
+
+	switch pressure {
+	case MemoryPressureMedium:
+		// Under medium pressure, prefer direct streaming for large objects
+		if size > abp.config.LargeObjectThreshold && originalStrategy == StrategyPooled {
+			adaptedStrategy = StrategyDirect
+		}
+
+	case MemoryPressureHigh:
+		// Under high pressure, use direct streaming for medium and large objects
+		if size > SmallObjectThreshold {
+			adaptedStrategy = StrategyDirect
+		}
+
+	case MemoryPressureCritical:
+		// Under critical pressure, use direct streaming for all but small objects
+		if size > 16*1024 { // 16KB threshold for critical situations
+			adaptedStrategy = StrategyDirect
+		}
+	}
+
+	// Track strategy adaptations
+	if adaptedStrategy != originalStrategy {
+		atomic.AddInt64(&abp.stats.StrategyAdaptations, 1)
+
+		if abp.logger != nil {
+			level.Debug(abp.logger).Log(
+				"msg", "adapted buffer pool strategy due to memory pressure",
+				"original_strategy", originalStrategy.String(),
+				"adapted_strategy", adaptedStrategy.String(),
+				"pressure_level", pressure.String(),
+				"size", size,
+			)
+		}
+	}
+
+	return adaptedStrategy
 }
 
 // calculateMemoryEfficiency calculates the memory efficiency ratio.
@@ -6462,5 +6557,425 @@ func (ca *ConfigAnalyzer) validateConfiguration(dataPoints []MetricDataPoint) Co
 				Recommendation: "Continue monitoring performance",
 			},
 		},
+	}
+}
+
+// MemoryPressureDetector monitors system memory usage and detects pressure situations.
+type MemoryPressureDetector struct {
+	// Configuration
+	config MemoryPressureConfig
+	logger log.Logger
+
+	// Current state
+	currentPressure   MemoryPressureLevel
+	pressureHistory   []MemoryPressureReading
+	lastPressureCheck time.Time
+
+	// Thresholds
+	lowPressureThreshold    float64
+	mediumPressureThreshold float64
+	highPressureThreshold   float64
+
+	// Statistics
+	stats MemoryPressureStats
+
+	// Background monitoring
+	monitoringTicker *time.Ticker
+	monitoringCancel context.CancelFunc
+	monitoringCtx    context.Context
+
+	// Thread safety
+	mutex sync.RWMutex
+}
+
+// MemoryPressureConfig configures memory pressure detection behavior.
+type MemoryPressureConfig struct {
+	// Monitoring settings
+	MonitoringInterval time.Duration
+	HistoryRetention   time.Duration
+	MaxHistoryEntries  int
+
+	// Pressure thresholds (as percentage of total memory)
+	LowPressureThreshold    float64 // Default: 0.7 (70%)
+	MediumPressureThreshold float64 // Default: 0.8 (80%)
+	HighPressureThreshold   float64 // Default: 0.9 (90%)
+
+	// Response settings
+	EnableAdaptiveResponse  bool
+	EnableEmergencyFallback bool
+	EnablePressureLogging   bool
+
+	// Alert settings
+	AlertOnPressureChange bool
+	AlertThreshold        MemoryPressureLevel
+}
+
+// MemoryPressureLevel represents different levels of memory pressure.
+type MemoryPressureLevel int
+
+const (
+	MemoryPressureNone MemoryPressureLevel = iota
+	MemoryPressureLow
+	MemoryPressureMedium
+	MemoryPressureHigh
+	MemoryPressureCritical
+)
+
+// String returns the string representation of MemoryPressureLevel.
+func (mpl MemoryPressureLevel) String() string {
+	switch mpl {
+	case MemoryPressureNone:
+		return "none"
+	case MemoryPressureLow:
+		return "low"
+	case MemoryPressureMedium:
+		return "medium"
+	case MemoryPressureHigh:
+		return "high"
+	case MemoryPressureCritical:
+		return "critical"
+	default:
+		return "unknown"
+	}
+}
+
+// MemoryPressureReading represents a single memory pressure measurement.
+type MemoryPressureReading struct {
+	Timestamp       time.Time
+	TotalMemory     uint64
+	UsedMemory      uint64
+	AvailableMemory uint64
+	UsagePercent    float64
+	PressureLevel   MemoryPressureLevel
+	GCStats         GCPressureStats
+}
+
+// GCPressureStats tracks garbage collection pressure indicators.
+type GCPressureStats struct {
+	NumGC         uint32
+	PauseTotalNs  uint64
+	LastGC        time.Time
+	GCCPUFraction float64
+}
+
+// MemoryPressureStats provides statistics about memory pressure detection.
+type MemoryPressureStats struct {
+	TotalReadings      int64
+	PressureEvents     map[MemoryPressureLevel]int64
+	AveragePressure    float64
+	MaxPressureReached MemoryPressureLevel
+	TimeInPressure     map[MemoryPressureLevel]time.Duration
+	LastPressureChange time.Time
+	AdaptiveResponses  int64
+	EmergencyFallbacks int64
+}
+
+// NewMemoryPressureDetector creates a new memory pressure detector.
+func NewMemoryPressureDetector(config MemoryPressureConfig, logger log.Logger) *MemoryPressureDetector {
+	// Set defaults
+	if config.MonitoringInterval <= 0 {
+		config.MonitoringInterval = 5 * time.Second
+	}
+	if config.HistoryRetention <= 0 {
+		config.HistoryRetention = 1 * time.Hour
+	}
+	if config.MaxHistoryEntries <= 0 {
+		config.MaxHistoryEntries = 720 // 1 hour at 5-second intervals
+	}
+	if config.LowPressureThreshold <= 0 {
+		config.LowPressureThreshold = 0.7
+	}
+	if config.MediumPressureThreshold <= 0 {
+		config.MediumPressureThreshold = 0.8
+	}
+	if config.HighPressureThreshold <= 0 {
+		config.HighPressureThreshold = 0.9
+	}
+
+	mpd := &MemoryPressureDetector{
+		config:                  config,
+		logger:                  logger,
+		lowPressureThreshold:    config.LowPressureThreshold,
+		mediumPressureThreshold: config.MediumPressureThreshold,
+		highPressureThreshold:   config.HighPressureThreshold,
+		pressureHistory:         make([]MemoryPressureReading, 0, config.MaxHistoryEntries),
+		stats: MemoryPressureStats{
+			PressureEvents: make(map[MemoryPressureLevel]int64),
+			TimeInPressure: make(map[MemoryPressureLevel]time.Duration),
+		},
+	}
+
+	// Start monitoring
+	mpd.startMonitoring()
+
+	return mpd
+}
+
+// GetCurrentPressure returns the current memory pressure level.
+func (mpd *MemoryPressureDetector) GetCurrentPressure() MemoryPressureLevel {
+	mpd.mutex.RLock()
+	defer mpd.mutex.RUnlock()
+	return mpd.currentPressure
+}
+
+// GetPressureReading returns the latest memory pressure reading.
+func (mpd *MemoryPressureDetector) GetPressureReading() MemoryPressureReading {
+	mpd.mutex.RLock()
+	defer mpd.mutex.RUnlock()
+
+	if len(mpd.pressureHistory) == 0 {
+		return MemoryPressureReading{}
+	}
+
+	return mpd.pressureHistory[len(mpd.pressureHistory)-1]
+}
+
+// GetStats returns memory pressure statistics.
+func (mpd *MemoryPressureDetector) GetStats() MemoryPressureStats {
+	mpd.mutex.RLock()
+	defer mpd.mutex.RUnlock()
+	return mpd.stats
+}
+
+// startMonitoring starts background memory pressure monitoring.
+func (mpd *MemoryPressureDetector) startMonitoring() {
+	mpd.monitoringCtx, mpd.monitoringCancel = context.WithCancel(context.Background())
+	mpd.monitoringTicker = time.NewTicker(mpd.config.MonitoringInterval)
+
+	go func() {
+		defer mpd.monitoringTicker.Stop()
+
+		// Take initial reading
+		mpd.takePressureReading()
+
+		for {
+			select {
+			case <-mpd.monitoringCtx.Done():
+				return
+			case <-mpd.monitoringTicker.C:
+				mpd.takePressureReading()
+			}
+		}
+	}()
+}
+
+// takePressureReading takes a memory pressure reading and updates state.
+func (mpd *MemoryPressureDetector) takePressureReading() {
+	reading := mpd.collectMemoryStats()
+
+	mpd.mutex.Lock()
+	defer mpd.mutex.Unlock()
+
+	// Add to history
+	mpd.pressureHistory = append(mpd.pressureHistory, reading)
+
+	// Trim history if necessary
+	if len(mpd.pressureHistory) > mpd.config.MaxHistoryEntries {
+		mpd.pressureHistory = mpd.pressureHistory[1:]
+	}
+
+	// Update current pressure level
+	previousPressure := mpd.currentPressure
+	mpd.currentPressure = reading.PressureLevel
+
+	// Update statistics
+	mpd.stats.TotalReadings++
+	mpd.stats.PressureEvents[reading.PressureLevel]++
+
+	if reading.PressureLevel > mpd.stats.MaxPressureReached {
+		mpd.stats.MaxPressureReached = reading.PressureLevel
+	}
+
+	// Update average pressure
+	if mpd.stats.TotalReadings > 0 {
+		mpd.stats.AveragePressure = (mpd.stats.AveragePressure*float64(mpd.stats.TotalReadings-1) + reading.UsagePercent) / float64(mpd.stats.TotalReadings)
+	}
+
+	// Track pressure change
+	if previousPressure != mpd.currentPressure {
+		mpd.stats.LastPressureChange = reading.Timestamp
+
+		// Log pressure change
+		if mpd.config.EnablePressureLogging && mpd.logger != nil {
+			level.Info(mpd.logger).Log(
+				"msg", "memory pressure level changed",
+				"previous_level", previousPressure.String(),
+				"current_level", mpd.currentPressure.String(),
+				"usage_percent", reading.UsagePercent,
+				"available_mb", reading.AvailableMemory/(1024*1024),
+			)
+		}
+
+		// Trigger adaptive response if enabled
+		if mpd.config.EnableAdaptiveResponse {
+			mpd.triggerAdaptiveResponse(reading)
+		}
+
+		// Alert if configured
+		if mpd.config.AlertOnPressureChange && mpd.currentPressure >= mpd.config.AlertThreshold {
+			mpd.triggerPressureAlert(reading)
+		}
+	}
+
+	// Clean up old history
+	mpd.cleanupOldHistory()
+}
+
+// collectMemoryStats collects current memory statistics.
+func (mpd *MemoryPressureDetector) collectMemoryStats() MemoryPressureReading {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	// Get system memory info (simplified - in real implementation, use OS-specific calls)
+	totalMemory := uint64(8 * 1024 * 1024 * 1024) // 8GB default assumption
+	usedMemory := m.Sys
+	availableMemory := totalMemory - usedMemory
+	usagePercent := float64(usedMemory) / float64(totalMemory)
+
+	// Determine pressure level
+	pressureLevel := mpd.calculatePressureLevel(usagePercent)
+
+	// Collect GC stats
+	gcStats := GCPressureStats{
+		NumGC:         m.NumGC,
+		PauseTotalNs:  m.PauseTotalNs,
+		GCCPUFraction: m.GCCPUFraction,
+	}
+
+	if m.NumGC > 0 {
+		gcStats.LastGC = time.Unix(0, int64(m.LastGC))
+	}
+
+	return MemoryPressureReading{
+		Timestamp:       time.Now(),
+		TotalMemory:     totalMemory,
+		UsedMemory:      usedMemory,
+		AvailableMemory: availableMemory,
+		UsagePercent:    usagePercent,
+		PressureLevel:   pressureLevel,
+		GCStats:         gcStats,
+	}
+}
+
+// calculatePressureLevel determines the pressure level based on usage percentage.
+func (mpd *MemoryPressureDetector) calculatePressureLevel(usagePercent float64) MemoryPressureLevel {
+	switch {
+	case usagePercent >= 0.95:
+		return MemoryPressureCritical
+	case usagePercent >= mpd.highPressureThreshold:
+		return MemoryPressureHigh
+	case usagePercent >= mpd.mediumPressureThreshold:
+		return MemoryPressureMedium
+	case usagePercent >= mpd.lowPressureThreshold:
+		return MemoryPressureLow
+	default:
+		return MemoryPressureNone
+	}
+}
+
+// triggerAdaptiveResponse triggers adaptive response to memory pressure.
+func (mpd *MemoryPressureDetector) triggerAdaptiveResponse(reading MemoryPressureReading) {
+	mpd.stats.AdaptiveResponses++
+
+	switch reading.PressureLevel {
+	case MemoryPressureHigh, MemoryPressureCritical:
+		// Trigger emergency garbage collection
+		runtime.GC()
+
+		// Log emergency response
+		if mpd.logger != nil {
+			level.Warn(mpd.logger).Log(
+				"msg", "triggered emergency GC due to memory pressure",
+				"pressure_level", reading.PressureLevel.String(),
+				"usage_percent", reading.UsagePercent,
+			)
+		}
+
+		if reading.PressureLevel == MemoryPressureCritical {
+			mpd.stats.EmergencyFallbacks++
+		}
+	}
+}
+
+// triggerPressureAlert triggers a pressure alert.
+func (mpd *MemoryPressureDetector) triggerPressureAlert(reading MemoryPressureReading) {
+	if mpd.logger != nil {
+		level.Warn(mpd.logger).Log(
+			"msg", "memory pressure alert",
+			"pressure_level", reading.PressureLevel.String(),
+			"usage_percent", reading.UsagePercent,
+			"available_mb", reading.AvailableMemory/(1024*1024),
+			"gc_count", reading.GCStats.NumGC,
+		)
+	}
+}
+
+// cleanupOldHistory removes old pressure readings beyond retention period.
+func (mpd *MemoryPressureDetector) cleanupOldHistory() {
+	if mpd.config.HistoryRetention <= 0 {
+		return
+	}
+
+	cutoff := time.Now().Add(-mpd.config.HistoryRetention)
+
+	// Find first reading to keep
+	keepIndex := 0
+	for i, reading := range mpd.pressureHistory {
+		if reading.Timestamp.After(cutoff) {
+			keepIndex = i
+			break
+		}
+	}
+
+	// Remove old readings
+	if keepIndex > 0 {
+		mpd.pressureHistory = mpd.pressureHistory[keepIndex:]
+	}
+}
+
+// ShouldReduceAllocation returns true if allocations should be reduced due to memory pressure.
+func (mpd *MemoryPressureDetector) ShouldReduceAllocation() bool {
+	pressure := mpd.GetCurrentPressure()
+	return pressure >= MemoryPressureMedium
+}
+
+// ShouldRejectAllocation returns true if new allocations should be rejected due to critical memory pressure.
+func (mpd *MemoryPressureDetector) ShouldRejectAllocation() bool {
+	pressure := mpd.GetCurrentPressure()
+	return pressure >= MemoryPressureCritical
+}
+
+// GetAllocationReductionFactor returns a factor (0.0-1.0) by which allocations should be reduced.
+func (mpd *MemoryPressureDetector) GetAllocationReductionFactor() float64 {
+	pressure := mpd.GetCurrentPressure()
+
+	switch pressure {
+	case MemoryPressureNone:
+		return 1.0
+	case MemoryPressureLow:
+		return 0.9
+	case MemoryPressureMedium:
+		return 0.7
+	case MemoryPressureHigh:
+		return 0.5
+	case MemoryPressureCritical:
+		return 0.2
+	default:
+		return 1.0
+	}
+}
+
+// Close shuts down the memory pressure detector.
+func (mpd *MemoryPressureDetector) Close() {
+	if mpd.monitoringCancel != nil {
+		mpd.monitoringCancel()
+	}
+
+	if mpd.monitoringTicker != nil {
+		mpd.monitoringTicker.Stop()
+	}
+
+	if mpd.logger != nil {
+		level.Info(mpd.logger).Log("msg", "memory pressure detector closed")
 	}
 }
