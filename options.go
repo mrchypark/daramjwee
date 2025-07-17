@@ -31,6 +31,8 @@ type Config struct {
 
 	PositiveFreshFor time.Duration
 	NegativeFreshFor time.Duration
+
+	BufferPool BufferPoolConfig
 }
 
 // Option is a function type that modifies the Config.
@@ -120,6 +122,49 @@ func WithNegativeCache(freshFor time.Duration) Option {
 			return &ConfigError{"negative cache TTL cannot be a negative value"}
 		}
 		cfg.NegativeFreshFor = freshFor
+		return nil
+	}
+}
+
+// WithBufferPool enables or disables buffer pooling with basic configuration.
+// When enabled, it uses reasonable defaults for buffer sizes.
+func WithBufferPool(enabled bool, defaultSize int) Option {
+	return func(cfg *Config) error {
+		if defaultSize <= 0 {
+			return &ConfigError{"buffer pool default size must be positive"}
+		}
+		cfg.BufferPool.Enabled = enabled
+		cfg.BufferPool.DefaultBufferSize = defaultSize
+		// Set reasonable defaults for min/max based on default size
+		cfg.BufferPool.MinBufferSize = defaultSize / 8
+		if cfg.BufferPool.MinBufferSize < 1024 {
+			cfg.BufferPool.MinBufferSize = 1024 // Minimum 1KB
+		}
+		cfg.BufferPool.MaxBufferSize = defaultSize * 2
+		return nil
+	}
+}
+
+// WithBufferPoolAdvanced provides detailed configuration for buffer pool behavior.
+// All size parameters must be positive and logically consistent.
+func WithBufferPoolAdvanced(config BufferPoolConfig) Option {
+	return func(cfg *Config) error {
+		if config.DefaultBufferSize <= 0 {
+			return &ConfigError{"buffer pool default size must be positive"}
+		}
+		if config.MinBufferSize <= 0 {
+			return &ConfigError{"buffer pool minimum size must be positive"}
+		}
+		if config.MaxBufferSize <= 0 {
+			return &ConfigError{"buffer pool maximum size must be positive"}
+		}
+		if config.MinBufferSize > config.DefaultBufferSize {
+			return &ConfigError{"buffer pool minimum size cannot be larger than default size"}
+		}
+		if config.DefaultBufferSize > config.MaxBufferSize {
+			return &ConfigError{"buffer pool default size cannot be larger than maximum size"}
+		}
+		cfg.BufferPool = config
 		return nil
 	}
 }

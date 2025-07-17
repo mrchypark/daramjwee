@@ -44,6 +44,55 @@ Here's a comparison of the performance (ns/op, lower is better) of different loc
 *   **`StripeLock`** consistently shows the **best performance** across all scenarios. This is because it effectively reduces contention by distributing lock requests across multiple mutexes.
 *   **`MutexLock`** performs well, but is generally slower than `StripeLock` as contention increases.
 
+### Buffer Pool Optimization Performance
+
+`daramjwee` includes an optional buffer pool optimization that can significantly improve performance for medium to large data transfers by reusing buffers and reducing memory allocations. Here are the benchmark results comparing performance with and without buffer pool optimization:
+
+#### Cold Hit Promotion Performance
+
+| Data Size | Without Buffer Pool | With Buffer Pool | Performance Gain | Memory Savings |
+|:----------|:-------------------|:-----------------|:-----------------|:---------------|
+| **Small (1KB)** | 1,368 ns/op, 1,860 B/op | 1,249 ns/op, 1,852 B/op | **8.7% faster** | Minimal |
+| **Medium (32KB)** | 218,520 ns/op, 64,568 B/op | 82,176 ns/op, 33,966 B/op | **62.4% faster** | **47.4% less memory** ⭐ |
+| **Large (256KB)** | 376,642 ns/op, 463,151 B/op | 2,974,592 ns/op, 748,034 B/op | 7.9x slower ⚠️ | - |
+| **XLarge (1MB)** | 2,865,468 ns/op, 2,201,228 B/op | 1,605,788 ns/op, 3,053,343 B/op | **44.0% faster** | 38.7% more memory |
+
+#### Cache Miss Performance
+
+| Data Size | Without Buffer Pool | With Buffer Pool | Performance Gain | Memory Savings |
+|:----------|:-------------------|:-----------------|:-----------------|:---------------|
+| **Small (1KB)** | 1,539 ns/op, 3,759 B/op | 1,741 ns/op, 3,779 B/op | 13.1% slower | - |
+| **Medium (32KB)** | 9,367 ns/op, 91,351 B/op | 7,864 ns/op, 90,587 B/op | **16.0% faster** | Minimal |
+| **Large (256KB)** | 83,245 ns/op, 929,204 B/op | 37,612 ns/op, 922,555 B/op | **54.8% faster** ⭐ | Minimal |
+| **XLarge (1MB)** | 181,497 ns/op, 5,632,082 B/op | 178,142 ns/op, 5,705,847 B/op | **1.8% faster** | - |
+
+#### Background Refresh Performance
+
+| Data Size | Without Buffer Pool | With Buffer Pool | Performance Gain |
+|:----------|:-------------------|:-----------------|:-----------------|
+| **Small (1KB)** | 465.9 ns/op, 1,951 B/op | 384.6 ns/op, 1,986 B/op | **17.5% faster** |
+
+**Key Insights:**
+
+- **🎯 Sweet Spot**: Buffer pool optimization is most effective for **medium-sized data (32KB-256KB)**
+- **⚡ Best Performance**: Up to **62% faster** for cold hit promotion with 32KB data
+- **💾 Memory Efficiency**: Significant memory savings for medium-sized data transfers
+- **⚠️ Trade-offs**: Large data (256KB+) cold hits may perform worse due to buffer pool overhead
+- **📊 Recommendation**: Enable buffer pool optimization for workloads with predominantly medium-sized objects
+
+#### Other Component Performance
+
+**Compression Algorithms** (lower is better):
+- **None**: 3,388 ns/op (fastest, no compression)
+- **LZ4**: 14,872 ns/op (best balance of speed/compression)
+- **Gzip**: 107,934 ns/op (good compression ratio)
+- **Zstd**: 116,546 ns/op (best compression, slower)
+
+**Eviction Policies** (lower is better):
+- **Sieve**: 94.45 ns/op (fastest, modern algorithm)
+- **S3-FIFO**: 99.24 ns/op (good balance)
+- **LRU**: 109.5 ns/op (traditional, reliable)
+
   * **Efficient Caching Logic:**
 
       * **ETag-based Optimization:** Avoids unnecessary data transfer by exchanging ETags with the origin server. If content is not modified (`ErrNotModified`), the fetch is skipped, saving network bandwidth.

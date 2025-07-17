@@ -179,6 +179,123 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectErr:   true,
 			expectedMsg: "negative cache TTL cannot be a negative value",
 		},
+		{
+			name: "Success with buffer pool enabled",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPool(true, 32*1024),
+			},
+			expectErr: false,
+		},
+		{
+			name: "Success with buffer pool disabled",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPool(false, 32*1024),
+			},
+			expectErr: false,
+		},
+		{
+			name: "Failure with zero buffer pool default size",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPool(true, 0),
+			},
+			expectErr:   true,
+			expectedMsg: "buffer pool default size must be positive",
+		},
+		{
+			name: "Failure with negative buffer pool default size",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPool(true, -1024),
+			},
+			expectErr:   true,
+			expectedMsg: "buffer pool default size must be positive",
+		},
+		{
+			name: "Success with advanced buffer pool configuration",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPoolAdvanced(BufferPoolConfig{
+					Enabled:           true,
+					DefaultBufferSize: 32 * 1024,
+					MaxBufferSize:     64 * 1024,
+					MinBufferSize:     4 * 1024,
+				}),
+			},
+			expectErr: false,
+		},
+		{
+			name: "Failure with advanced buffer pool - zero default size",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPoolAdvanced(BufferPoolConfig{
+					Enabled:           true,
+					DefaultBufferSize: 0,
+					MaxBufferSize:     64 * 1024,
+					MinBufferSize:     4 * 1024,
+				}),
+			},
+			expectErr:   true,
+			expectedMsg: "buffer pool default size must be positive",
+		},
+		{
+			name: "Failure with advanced buffer pool - zero min size",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPoolAdvanced(BufferPoolConfig{
+					Enabled:           true,
+					DefaultBufferSize: 32 * 1024,
+					MaxBufferSize:     64 * 1024,
+					MinBufferSize:     0,
+				}),
+			},
+			expectErr:   true,
+			expectedMsg: "buffer pool minimum size must be positive",
+		},
+		{
+			name: "Failure with advanced buffer pool - zero max size",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPoolAdvanced(BufferPoolConfig{
+					Enabled:           true,
+					DefaultBufferSize: 32 * 1024,
+					MaxBufferSize:     0,
+					MinBufferSize:     4 * 1024,
+				}),
+			},
+			expectErr:   true,
+			expectedMsg: "buffer pool maximum size must be positive",
+		},
+		{
+			name: "Failure with advanced buffer pool - min > default",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPoolAdvanced(BufferPoolConfig{
+					Enabled:           true,
+					DefaultBufferSize: 16 * 1024,
+					MaxBufferSize:     64 * 1024,
+					MinBufferSize:     32 * 1024,
+				}),
+			},
+			expectErr:   true,
+			expectedMsg: "buffer pool minimum size cannot be larger than default size",
+		},
+		{
+			name: "Failure with advanced buffer pool - default > max",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithBufferPoolAdvanced(BufferPoolConfig{
+					Enabled:           true,
+					DefaultBufferSize: 64 * 1024,
+					MaxBufferSize:     32 * 1024,
+					MinBufferSize:     4 * 1024,
+				}),
+			},
+			expectErr:   true,
+			expectedMsg: "buffer pool default size cannot be larger than maximum size",
+		},
 	}
 
 	for _, tc := range testCases {

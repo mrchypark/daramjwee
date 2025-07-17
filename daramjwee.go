@@ -119,6 +119,74 @@ type Compressor interface {
 	Level() int
 }
 
+// BufferPool defines the interface for buffer pool management.
+// It provides optimized buffer allocation and reuse for stream operations.
+type BufferPool interface {
+	// Get retrieves a buffer from the pool with the specified size.
+	// The returned buffer may be larger than requested but never smaller.
+	Get(size int) []byte
+
+	// Put returns a buffer to the pool for reuse.
+	// The buffer should not be used after calling Put.
+	Put(buf []byte)
+
+	// CopyBuffer performs optimized copy using pooled buffers.
+	// It's equivalent to io.Copy but uses buffer pool for better performance.
+	CopyBuffer(dst io.Writer, src io.Reader) (int64, error)
+
+	// TeeReader creates an optimized TeeReader using pooled buffers.
+	// It's equivalent to io.TeeReader but uses buffer pool for better performance.
+	TeeReader(r io.Reader, w io.Writer) io.Reader
+
+	// GetStats returns current buffer pool statistics.
+	GetStats() BufferPoolStats
+}
+
+// BufferPoolConfig holds configuration for buffer pool behavior.
+type BufferPoolConfig struct {
+	// Enabled controls whether buffer pooling is active.
+	// When false, operations fall back to standard library implementations.
+	Enabled bool
+
+	// DefaultBufferSize is the default buffer size for pool operations.
+	// This should match common use cases for optimal performance.
+	DefaultBufferSize int
+
+	// MaxBufferSize is the maximum buffer size that will be pooled.
+	// Buffers larger than this will not be returned to the pool to prevent memory bloat.
+	MaxBufferSize int
+
+	// MinBufferSize is the minimum buffer size that will be pooled.
+	// Buffers smaller than this will not be returned to the pool.
+	MinBufferSize int
+
+	// EnableLogging controls whether buffer pool performance metrics are logged.
+	// When false, no performance logging is performed to avoid overhead.
+	EnableLogging bool
+
+	// LoggingInterval specifies how often buffer pool statistics are logged.
+	// Only used when EnableLogging is true. Zero value disables periodic logging.
+	LoggingInterval time.Duration
+}
+
+// BufferPoolStats provides monitoring information about buffer pool usage.
+type BufferPoolStats struct {
+	// TotalGets is the total number of Get operations performed.
+	TotalGets int64
+
+	// TotalPuts is the total number of Put operations performed.
+	TotalPuts int64
+
+	// PoolHits is the number of times a buffer was successfully retrieved from the pool.
+	PoolHits int64
+
+	// PoolMisses is the number of times a new buffer had to be allocated.
+	PoolMisses int64
+
+	// ActiveBuffers is the current number of buffers checked out from the pool.
+	ActiveBuffers int64
+}
+
 // nullEvictionPolicy is a Null Object implementation of EvictionPolicy.
 // It performs no operations, effectively disabling eviction.
 type nullEvictionPolicy struct{}
@@ -155,6 +223,14 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		ShutdownTimeout:  30 * time.Second,
 		PositiveFreshFor: 0 * time.Second,
 		NegativeFreshFor: 0 * time.Second,
+		BufferPool: BufferPoolConfig{
+			Enabled:           true,
+			DefaultBufferSize: 32 * 1024, // 32KB default buffer size
+			MaxBufferSize:     64 * 1024, // 64KB max buffer size
+			MinBufferSize:     4 * 1024,  // 4KB min buffer size
+			EnableLogging:     false,     // Disabled by default for performance
+			LoggingInterval:   0,         // No periodic logging by default
+		},
 	}
 
 	for _, opt := range opts {
@@ -177,12 +253,32 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		return nil, err
 	}
 
+	// Initialize buffer pool
+	var bufferPool BufferPool
+	if cfg.BufferPool.Enabled {
+		bufferPool = NewDefaultBufferPoolWithLogger(cfg.BufferPool, logger)
+		level.Debug(logger).Log("msg", "buffer pool initialized", "enabled", true, "default_size", cfg.BufferPool.DefaultBufferSize, "logging_enabled", cfg.BufferPool.EnableLogging, "logging_interval", cfg.BufferPool.LoggingInterval)
+	} else {
+		// Create a disabled buffer pool that falls back to standard operations
+		bufferPool = NewDefaultBufferPoolWithLogger(BufferPoolConfig{
+			Enabled:           false,
+			DefaultBufferSize: cfg.BufferPool.DefaultBufferSize,
+			MaxBufferSize:     cfg.BufferPool.MaxBufferSize,
+			MinBufferSize:     cfg.BufferPool.MinBufferSize,
+			EnableLogging:     false,
+			LoggingInterval:   0,
+		}, logger)
+		level.Debug(logger).Log("msg", "buffer pool disabled, using fallback operations")
+	}
+
 	c := &DaramjweeCache{
 		Logger:           logger,
 		HotStore:         cfg.HotStore,
 		ColdStore:        cfg.ColdStore,
 		Worker:           workerManager,
+		BufferPool:       bufferPool,
 		DefaultTimeout:   cfg.DefaultTimeout,
+		ShutdownTimeout:  cfg.ShutdownTimeout,
 		PositiveFreshFor: cfg.PositiveFreshFor,
 		NegativeFreshFor: cfg.NegativeFreshFor,
 	}

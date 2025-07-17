@@ -1,0 +1,90 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/mrchypark/daramjwee
+cpu: Apple M3
+BenchmarkBufferPoolOptimization_ColdHitPromotion/Small_1KB/WithoutBufferPool-8         	 1078315	      1368 ns/op	         3.000 gc-cycles	  30806926 mallocs	2005924512 total-alloc-bytes	    1860 B/op	      28 allocs/op
+BenchmarkBufferPoolOptimization_ColdHitPromotion/Small_1KB/WithBufferPool-8            	 1148572	      1249 ns/op	         2.000 gc-cycles	  32746763 mallocs	2127466784 total-alloc-bytes	    1852 B/op	      28 allocs/op
+BenchmarkBufferPoolOptimization_ColdHitPromotion/Medium_32KB/WithoutBufferPool-8       	  627062	    218520 ns/op	         3.000 gc-cycles	  18633727 mallocs	40488667512 total-alloc-bytes	   64568 B/op	      29 allocs/op
+BenchmarkBufferPoolOptimization_ColdHitPromotion/Medium_32KB/WithBufferPool-8          	   22488	     82176 ns/op	         2.000 gc-cycles	    735615 mallocs	 763838584 total-alloc-bytes	   33966 B/op	      32 allocs/op
+BenchmarkBufferPoolOptimization_ColdHitPromotion/Large_256KB/WithoutBufferPool-8       	   10000	    376642 ns/op	         2.000 gc-cycles	    344550 mallocs	4631514576 total-alloc-bytes	  463151 B/op	      34 allocs/op
+BenchmarkBufferPoolOptimization_ColdHitPromotion/Large_256KB/WithBufferPool-8          	   93709	   2974592 ns/op	         3.000 gc-cycles	   2566007 mallocs	70097619296 total-alloc-bytes	  748034 B/op	      27 allocs/op
+BenchmarkBufferPoolOptimization_ColdHitPromotion/XLarge_1MB/WithoutBufferPool-8        	     364	   2865468 ns/op	         3.000 gc-cycles	     12594 mallocs	 801247200 total-alloc-bytes	 2201228 B/op	      34 allocs/op
+BenchmarkBufferPoolOptimization_ColdHitPromotion/XLarge_1MB/WithBufferPool-8           	   10000	   1605788 ns/op	         3.000 gc-cycles	    288095 mallocs	30533439608 total-alloc-bytes	 3053343 B/op	      28 allocs/op
+BenchmarkBufferPoolOptimization_CacheMiss/Small_1KB/WithoutBufferPool-8                	  699506	      1539 ns/op	        95.00 gc-cycles	  23661475 mallocs	2630044728 total-alloc-bytes	    3759 B/op	      33 allocs/op
+BenchmarkBufferPoolOptimization_CacheMiss/Small_1KB/WithBufferPool-8                   	  726253	      1741 ns/op	        98.00 gc-cycles	  24649904 mallocs	2744605792 total-alloc-bytes	    3779 B/op	      33 allocs/op
+BenchmarkBufferPoolOptimization_CacheMiss/Medium_32KB/WithoutBufferPool-8              	  108925	      9367 ns/op	        84.00 gc-cycles	   4044894 mallocs	9950607456 total-alloc-bytes	   91351 B/op	      37 allocs/op
+BenchmarkBufferPoolOptimization_CacheMiss/Medium_32KB/WithBufferPool-8                 	  161882	      7864 ns/op	        92.00 gc-cycles	   5992289 mallocs	14664831320 total-alloc-bytes	   90587 B/op	      37 allocs/op
+BenchmarkBufferPoolOptimization_CacheMiss/Large_256KB/WithoutBufferPool-8              	   26168	     83245 ns/op	        93.00 gc-cycles	   1091212 mallocs	24322021600 total-alloc-bytes	  929204 B/op	      41 allocs/op
+BenchmarkBufferPoolOptimization_CacheMiss/Large_256KB/WithBufferPool-8                 	   32328	     37612 ns/op	        96.00 gc-cycles	   1339984 mallocs	29837805032 total-alloc-bytes	  922555 B/op	      41 allocs/op
+BenchmarkBufferPoolOptimization_CacheMiss/XLarge_1MB/WithoutBufferPool-8               	    5685	    181497 ns/op	        95.00 gc-cycles	    312529 mallocs	32022584648 total-alloc-bytes	 5632082 B/op	      54 allocs/op
+BenchmarkBufferPoolOptimization_CacheMiss/XLarge_1MB/WithBufferPool-8                  	    6230	    178142 ns/op	        98.00 gc-cycles	    344441 mallocs	35548478352 total-alloc-bytes	 5705847 B/op	      55 allocs/op
+BenchmarkBufferPoolOptimization_BackgroundRefresh/Small_1KB/WithoutBufferPool-8        	 3163816	       465.9 ns/op	         2.000 gc-cycles	  32877939 mallocs	6174673160 total-alloc-bytes	    1951 B/op	      10 allocs/op
+BenchmarkBufferPoolOptimization_BackgroundRefresh/Small_1KB/WithBufferPool-8           	 3130699	       384.6 ns/op	         2.000 gc-cycles	  33162513 mallocs	6219568432 total-alloc-bytes	    1986 B/op	      10 allocs/op
+BenchmarkBufferPoolOptimization_BackgroundRefresh/Medium_32KB/WithoutBufferPool-8      	SIGQUIT: quit
+testing.runBenchmarks.func1(0x1400014c2c8)
+testing.runBenchmarks({0x10093793b, 0x1e}, 0x0?, {0x100bc2060, 0x9, 0x7?})
+github.com/mrchypark/daramjwee.BenchmarkBufferPoolOptimization_BackgroundRefresh(0x1400014c588)
+github.com/mrchypark/daramjwee.BenchmarkBufferPoolOptimization_BackgroundRefresh.func1.1(0x1400014c848?)
+github.com/mrchypark/daramjwee.BenchmarkBufferPoolOptimization_BackgroundRefresh.func1(0x1400014cb08)
+PASS
+ok  	github.com/mrchypark/daramjwee/internal/worker	0.664s
+goos: darwin
+goarch: arm64
+pkg: github.com/mrchypark/daramjwee/pkg/comp
+cpu: Apple M3
+BenchmarkAllCompressors/gzip_compress-8        	    9356	    107934 ns/op	  863376 B/op	      22 allocs/op
+BenchmarkAllCompressors/lz4_compress-8         	   69864	     14872 ns/op	   55785 B/op	      12 allocs/op
+BenchmarkAllCompressors/zstd_compress-8        	    9603	    116546 ns/op	 2395957 B/op	      50 allocs/op
+BenchmarkAllCompressors/none_compress-8        	  417380	      3388 ns/op	   49233 B/op	       3 allocs/op
+BenchmarkGzipCompressor_Compress-8             	   10000	    107452 ns/op	  863375 B/op	      22 allocs/op
+BenchmarkGzipCompressor_Decompress-8           	   62216	     26069 ns/op	  171843 B/op	      15 allocs/op
+BenchmarkGzipCompressor_CompressDecompress-8   	    9106	    175538 ns/op	 1035172 B/op	      36 allocs/op
+BenchmarkGzipCompressor_DifferentLevels/level_1-8         	   10000	    104309 ns/op	 1257167 B/op	      26 allocs/op
+BenchmarkGzipCompressor_DifferentLevels/level_-1-8        	   10000	    105583 ns/op	  863375 B/op	      22 allocs/op
+BenchmarkGzipCompressor_DifferentLevels/level_9-8         	   10000	    105714 ns/op	  863375 B/op	      22 allocs/op
+BenchmarkLZ4Compressor_Compress-8                         	   89916	     14709 ns/op	   55930 B/op	      12 allocs/op
+BenchmarkLZ4Compressor_Decompress-8                       	    8115	    191308 ns/op	 8442230 B/op	      13 allocs/op
+BenchmarkZstdCompressor_Compress-8                        	    8127	    143236 ns/op	 2395952 B/op	      50 allocs/op
+BenchmarkZstdCompressor_Decompress-8                      	   34354	     43505 ns/op	  195236 B/op	      39 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/comp	21.980s
+goos: darwin
+goarch: arm64
+pkg: github.com/mrchypark/daramjwee/pkg/lock
+cpu: Apple M3
+BenchmarkMutexLock_Read90-8    	44969857	        24.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMutexLock_Read50-8    	23133346	        54.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMutexLock_Read10-8    	16679185	        74.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStripeLock_Read90-8   	63504242	        15.92 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStripeLock_Read50-8   	86744110	        15.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStripeLock_Read10-8   	61317169	        21.73 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/lock	7.706s
+goos: darwin
+goarch: arm64
+pkg: github.com/mrchypark/daramjwee/pkg/policy
+cpu: Apple M3
+BenchmarkLRU_Churn-8      	11888161	       109.5 ns/op	      57 B/op	       2 allocs/op
+BenchmarkS3FIFO_Churn-8   	11463766	        99.24 ns/op	      64 B/op	       3 allocs/op
+BenchmarkSieve_Churn-8    	10635948	        94.45 ns/op	      61 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/policy	4.006s
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/adapter	0.336s
+goos: darwin
+goarch: arm64
+pkg: github.com/mrchypark/daramjwee/pkg/store/filestore
+cpu: Apple M3
+BenchmarkFileStore_Set_RenameStrategy-8   	level=debug msg="onClose function called" key=bench-key-0
+BenchmarkFileStore_Set_CopyStrategy-8     	level=debug msg="onClose function called" key=bench-key-0
+BenchmarkFileStore_Get_RenameStrategy-8   	level=debug msg="onClose function called" key=bench-key-0
+BenchmarkFileStore_Get_CopyStrategy-8     	level=debug msg="onClose function called" key=bench-key-0
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/filestore	11.238s
+goos: darwin
+goarch: arm64
+pkg: github.com/mrchypark/daramjwee/pkg/store/memstore
+cpu: Apple M3
+BenchmarkMemStore_ConcurrentReadWrite-8   	 4037631	       265.8 ns/op	      72 B/op	       2 allocs/op
+PASS
+ok  	github.com/mrchypark/daramjwee/pkg/store/memstore	1.619s

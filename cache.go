@@ -21,6 +21,7 @@ type DaramjweeCache struct {
 	ColdStore        Store // Optional
 	Logger           log.Logger
 	Worker           *worker.Manager
+	BufferPool       BufferPool
 	DefaultTimeout   time.Duration
 	ShutdownTimeout  time.Duration
 	PositiveFreshFor time.Duration
@@ -160,7 +161,13 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 			return
 		}
 
-		_, copyErr := io.Copy(writer, result.Body)
+		var copyErr error
+		if c.BufferPool != nil {
+			_, copyErr = c.BufferPool.CopyBuffer(writer, result.Body)
+		} else {
+			// Fallback to standard io.Copy if buffer pool is not available
+			_, copyErr = io.Copy(writer, result.Body)
+		}
 		closeErr := writer.Close()
 
 		if copyErr != nil || closeErr != nil {
@@ -358,7 +365,13 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 			return
 		}
 
-		_, copyErr := io.Copy(destWriter, srcStream)
+		var copyErr error
+		if c.BufferPool != nil {
+			_, copyErr = c.BufferPool.CopyBuffer(destWriter, srcStream)
+		} else {
+			// Fallback to standard io.Copy if buffer pool is not available
+			_, copyErr = io.Copy(destWriter, srcStream)
+		}
 		closeErr := destWriter.Close()
 
 		if copyErr != nil || closeErr != nil {
@@ -379,7 +392,13 @@ func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key string, me
 		return coldStream, nil
 	}
 
-	teeReader := io.TeeReader(coldStream, hotWriter)
+	var teeReader io.Reader
+	if c.BufferPool != nil {
+		teeReader = c.BufferPool.TeeReader(coldStream, hotWriter)
+	} else {
+		// Fallback to standard io.TeeReader if buffer pool is not available
+		teeReader = io.TeeReader(coldStream, hotWriter)
+	}
 	return newMultiCloser(teeReader, coldStream, hotWriter), nil
 }
 
@@ -391,7 +410,13 @@ func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, resu
 			level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
 			return result.Body, err
 		}
-		teeReader := io.TeeReader(result.Body, cacheWriter)
+		var teeReader io.Reader
+		if c.BufferPool != nil {
+			teeReader = c.BufferPool.TeeReader(result.Body, cacheWriter)
+		} else {
+			// Fallback to standard io.TeeReader if buffer pool is not available
+			teeReader = io.TeeReader(result.Body, cacheWriter)
+		}
 		return newMultiCloser(teeReader, result.Body, cacheWriter), nil
 	}
 	return result.Body, nil
