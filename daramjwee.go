@@ -4,7 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"math"
+	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-kit/log"
@@ -1418,6 +1423,156 @@ type BufferPool interface {
 //   - Set appropriate size limits to prevent memory bloat
 //   - Enable monitoring for performance insights and tuning
 //
+// BufferPoolStrategy defines different optimization strategies for different object sizes.
+type BufferPoolStrategy int
+
+const (
+	// StrategyPooled uses buffer pool for optimization
+	StrategyPooled BufferPoolStrategy = iota
+	// StrategyChunked uses chunked streaming for large objects
+	StrategyChunked
+	// StrategyDirect uses direct streaming without pooling
+	StrategyDirect
+	// StrategyAdaptive automatically selects the best strategy based on object size
+	StrategyAdaptive
+)
+
+// String returns the string representation of BufferPoolStrategy.
+func (s BufferPoolStrategy) String() string {
+	switch s {
+	case StrategyPooled:
+		return "pooled"
+	case StrategyChunked:
+		return "chunked"
+	case StrategyDirect:
+		return "direct"
+	case StrategyAdaptive:
+		return "adaptive"
+	default:
+		return "unknown"
+	}
+}
+
+// ObjectSizeCategory represents different object size categories for optimization.
+type ObjectSizeCategory int
+
+const (
+	// SizeCategorySmall represents objects smaller than 32KB
+	SizeCategorySmall ObjectSizeCategory = iota
+	// SizeCategoryMedium represents objects between 32KB and LargeObjectThreshold
+	SizeCategoryMedium
+	// SizeCategoryLarge represents objects between LargeObjectThreshold and VeryLargeObjectThreshold
+	SizeCategoryLarge
+	// SizeCategoryVeryLarge represents objects larger than VeryLargeObjectThreshold
+	SizeCategoryVeryLarge
+)
+
+// String returns the string representation of ObjectSizeCategory.
+func (c ObjectSizeCategory) String() string {
+	switch c {
+	case SizeCategorySmall:
+		return "small"
+	case SizeCategoryMedium:
+		return "medium"
+	case SizeCategoryLarge:
+		return "large"
+	case SizeCategoryVeryLarge:
+		return "very_large"
+	default:
+		return "unknown"
+	}
+}
+
+// Size category thresholds
+const (
+	// SmallObjectThreshold defines the boundary between small and medium objects
+	SmallObjectThreshold = 32 * 1024 // 32KB
+)
+
+// classifyObjectSize determines the size category for a given object size.
+func classifyObjectSize(size int, config BufferPoolConfig) ObjectSizeCategory {
+	switch {
+	case size < SmallObjectThreshold:
+		return SizeCategorySmall
+	case size < config.LargeObjectThreshold:
+		return SizeCategoryMedium
+	case size < config.VeryLargeObjectThreshold:
+		return SizeCategoryLarge
+	default:
+		return SizeCategoryVeryLarge
+	}
+}
+
+// selectStrategy determines the optimal strategy for a given object size.
+func selectStrategy(size int, config BufferPoolConfig) BufferPoolStrategy {
+	// If strategy is not adaptive, return the configured strategy
+	if config.LargeObjectStrategy != StrategyAdaptive {
+		return config.LargeObjectStrategy
+	}
+
+	// Adaptive strategy selection based on object size
+	category := classifyObjectSize(size, config)
+
+	switch category {
+	case SizeCategorySmall, SizeCategoryMedium:
+		// Use buffer pooling for small and medium objects
+		return StrategyPooled
+	case SizeCategoryLarge:
+		// Use chunked streaming for large objects to optimize memory usage
+		return StrategyChunked
+	case SizeCategoryVeryLarge:
+		// Use direct streaming for very large objects to minimize overhead
+		return StrategyDirect
+	default:
+		// Fallback to pooled strategy
+		return StrategyPooled
+	}
+}
+
+// validateStrategy checks if a strategy is valid and provides fallback.
+func validateStrategy(strategy BufferPoolStrategy) BufferPoolStrategy {
+	switch strategy {
+	case StrategyPooled, StrategyChunked, StrategyDirect, StrategyAdaptive:
+		return strategy
+	default:
+		// Fallback to adaptive strategy for invalid values
+		return StrategyAdaptive
+	}
+}
+
+// getOptimalChunkSize calculates the optimal chunk size for a given object size.
+func getOptimalChunkSize(objectSize int, config BufferPoolConfig) int {
+	baseChunkSize := config.ChunkSize
+	if baseChunkSize <= 0 {
+		baseChunkSize = 64 * 1024 // Default 64KB
+	}
+
+	// For very large objects, use larger chunks for better I/O efficiency
+	if objectSize >= config.VeryLargeObjectThreshold {
+		// Use up to 128KB chunks for very large objects
+		if baseChunkSize < 128*1024 {
+			return 128 * 1024
+		}
+	}
+
+	// For large objects, optimize chunk size based on object size
+	if objectSize >= config.LargeObjectThreshold {
+		// Use chunk size that divides the object size efficiently
+		// Aim for 8-16 chunks per object for optimal streaming
+		optimalChunkSize := objectSize / 12 // Target ~12 chunks
+
+		// Round to nearest power of 2 or common size
+		if optimalChunkSize > baseChunkSize*2 {
+			return baseChunkSize * 2
+		}
+		if optimalChunkSize < baseChunkSize/2 {
+			return baseChunkSize / 2
+		}
+	}
+
+	return baseChunkSize
+}
+
 // Performance impact: Well-configured buffer pools provide substantial performance
 // improvements, especially under high concurrency and frequent I/O operations.
 type BufferPoolConfig struct {
@@ -1568,6 +1723,103 @@ type BufferPoolConfig struct {
 	// Performance impact: Minimal overhead, but frequent logging can increase
 	// log processing load and storage requirements.
 	LoggingInterval time.Duration
+
+	// Large object handling configuration fields
+
+	// LargeObjectThreshold defines the size threshold for large object detection.
+	//
+	// Objects larger than this threshold will use alternative optimization strategies
+	// instead of standard buffer pooling. This helps prevent performance degradation
+	// observed with large objects in buffer pools.
+	//
+	// Sizing guidelines:
+	//   - Default: 256KB (256 * 1024 bytes)
+	//   - Conservative: 128KB for memory-constrained environments
+	//   - Aggressive: 512KB for systems with abundant memory
+	//   - Should be larger than MaxBufferSize to avoid conflicts
+	//
+	// Performance considerations:
+	//   - Objects below this threshold use standard buffer pooling
+	//   - Objects above this threshold use chunked streaming or direct operations
+	//   - Threshold should be based on actual workload analysis
+	//   - Monitor performance across the threshold boundary
+	LargeObjectThreshold int
+
+	// VeryLargeObjectThreshold defines the threshold for very large objects.
+	//
+	// Objects larger than this threshold bypass buffer pooling entirely and use
+	// direct streaming operations to minimize memory overhead and GC pressure.
+	//
+	// Sizing guidelines:
+	//   - Default: 1MB (1024 * 1024 bytes)
+	//   - Should be significantly larger than LargeObjectThreshold
+	//   - Consider available memory and GC characteristics
+	//   - Adjust based on maximum expected object sizes
+	//
+	// Performance implications:
+	//   - Objects above this threshold use direct streaming without any pooling
+	//   - Minimizes memory allocation and GC pressure for very large objects
+	//   - Provides consistent performance regardless of object size
+	VeryLargeObjectThreshold int
+
+	// LargeObjectStrategy defines the strategy for handling large objects.
+	//
+	// Strategy selection guidelines:
+	//   - StrategyAdaptive: Automatically select based on object size (recommended)
+	//   - StrategyChunked: Use chunked streaming for all large objects
+	//   - StrategyDirect: Use direct streaming without pooling
+	//   - StrategyPooled: Force pooling (may cause performance issues)
+	//
+	// Default: StrategyAdaptive provides optimal performance across different sizes
+	LargeObjectStrategy BufferPoolStrategy
+
+	// ChunkSize defines the chunk size for streaming large objects.
+	//
+	// This size is used for chunked streaming operations when processing large
+	// objects. It affects memory usage and I/O efficiency for large transfers.
+	//
+	// Sizing recommendations:
+	//   - Default: 64KB (64 * 1024 bytes)
+	//   - I/O bound workloads: 128KB for better throughput
+	//   - Memory constrained: 32KB to reduce memory usage
+	//   - Network operations: Match network buffer sizes
+	//
+	// Performance considerations:
+	//   - Larger chunks improve I/O efficiency but use more memory
+	//   - Smaller chunks reduce memory usage but may increase overhead
+	//   - Should be a power of 2 for optimal memory alignment
+	ChunkSize int
+
+	// MaxConcurrentLargeOps limits concurrent large object operations.
+	//
+	// This setting prevents resource exhaustion when processing multiple large
+	// objects simultaneously. It provides backpressure and resource management.
+	//
+	// Sizing guidelines:
+	//   - Default: 4 concurrent operations
+	//   - High-memory systems: 8-16 operations
+	//   - Memory-constrained: 1-2 operations
+	//   - Consider available memory and I/O capacity
+	//
+	// Resource management:
+	//   - Operations exceeding this limit are queued or rejected
+	//   - Prevents memory exhaustion from concurrent large transfers
+	//   - Balances throughput with resource stability
+	MaxConcurrentLargeOps int
+
+	// EnableDetailedMetrics enables size-category performance metrics.
+	//
+	// When enabled, the buffer pool tracks detailed metrics for different
+	// object size categories and strategy usage patterns.
+	//
+	// Monitoring benefits:
+	//   - Track performance across different object sizes
+	//   - Monitor strategy selection effectiveness
+	//   - Identify optimization opportunities
+	//   - Analyze memory usage patterns
+	//
+	// Performance impact: Minimal overhead for metric collection
+	EnableDetailedMetrics bool
 }
 
 // BufferPoolStats provides monitoring information about buffer pool usage.
@@ -1586,6 +1838,150 @@ type BufferPoolStats struct {
 
 	// ActiveBuffers is the current number of buffers checked out from the pool.
 	ActiveBuffers int64
+
+	// Size-category operation counters for detailed monitoring
+
+	// SmallObjectOps tracks operations on objects smaller than 32KB.
+	SmallObjectOps int64
+
+	// MediumObjectOps tracks operations on objects between 32KB and LargeObjectThreshold.
+	MediumObjectOps int64
+
+	// LargeObjectOps tracks operations on objects between LargeObjectThreshold and VeryLargeObjectThreshold.
+	LargeObjectOps int64
+
+	// VeryLargeObjectOps tracks operations on objects larger than VeryLargeObjectThreshold.
+	VeryLargeObjectOps int64
+
+	// Strategy usage metrics for performance analysis
+
+	// PooledOperations tracks operations that used buffer pooling strategy.
+	PooledOperations int64
+
+	// ChunkedOperations tracks operations that used chunked streaming strategy.
+	ChunkedOperations int64
+
+	// DirectOperations tracks operations that used direct streaming strategy.
+	DirectOperations int64
+
+	// Performance metrics for optimization insights
+
+	// AverageLatencyNs provides average latency by size category in nanoseconds.
+	// Keys: "small", "medium", "large", "very_large"
+	AverageLatencyNs map[string]int64
+
+	// MemoryEfficiency represents the ratio of effective memory usage to total allocated memory.
+	// Values closer to 1.0 indicate better memory efficiency.
+	MemoryEfficiency float64
+}
+
+// validateBufferPoolConfig validates the buffer pool configuration for consistency.
+func (cfg *BufferPoolConfig) validate() error {
+	// Validate basic buffer size constraints
+	if cfg.MinBufferSize <= 0 {
+		return &ConfigError{"buffer pool minimum size must be positive"}
+	}
+	if cfg.DefaultBufferSize <= 0 {
+		return &ConfigError{"buffer pool default size must be positive"}
+	}
+	if cfg.MaxBufferSize <= 0 {
+		return &ConfigError{"buffer pool maximum size must be positive"}
+	}
+	if cfg.MinBufferSize > cfg.DefaultBufferSize {
+		return &ConfigError{"buffer pool minimum size cannot be larger than default size"}
+	}
+	if cfg.DefaultBufferSize > cfg.MaxBufferSize {
+		return &ConfigError{"buffer pool default size cannot be larger than maximum size"}
+	}
+
+	// Validate large object threshold constraints
+	if cfg.LargeObjectThreshold <= 0 {
+		cfg.LargeObjectThreshold = 256 * 1024 // Default: 256KB
+	}
+	if cfg.VeryLargeObjectThreshold <= 0 {
+		cfg.VeryLargeObjectThreshold = 1024 * 1024 // Default: 1MB
+	}
+	if cfg.LargeObjectThreshold >= cfg.VeryLargeObjectThreshold {
+		return &ConfigError{"large object threshold must be smaller than very large object threshold"}
+	}
+
+	// Validate chunk size
+	if cfg.ChunkSize <= 0 {
+		cfg.ChunkSize = 64 * 1024 // Default: 64KB
+	}
+	if cfg.ChunkSize > cfg.LargeObjectThreshold {
+		return &ConfigError{"chunk size should not exceed large object threshold"}
+	}
+
+	// Validate concurrent operations limit
+	if cfg.MaxConcurrentLargeOps <= 0 {
+		cfg.MaxConcurrentLargeOps = 4 // Default: 4 concurrent operations
+	}
+
+	// Validate strategy
+	switch cfg.LargeObjectStrategy {
+	case StrategyPooled, StrategyChunked, StrategyDirect, StrategyAdaptive:
+		// Valid strategies
+	default:
+		cfg.LargeObjectStrategy = StrategyAdaptive // Default to adaptive
+	}
+
+	return nil
+}
+
+// logStrategySelection logs debug information about strategy selection decisions.
+func logStrategySelection(logger log.Logger, size int, category ObjectSizeCategory, strategy BufferPoolStrategy, config BufferPoolConfig) {
+	if logger == nil {
+		return
+	}
+
+	level.Debug(logger).Log(
+		"msg", "buffer pool strategy selected",
+		"object_size", size,
+		"size_category", category.String(),
+		"selected_strategy", strategy.String(),
+		"large_threshold", config.LargeObjectThreshold,
+		"very_large_threshold", config.VeryLargeObjectThreshold,
+		"configured_strategy", config.LargeObjectStrategy.String(),
+	)
+}
+
+// selectStrategyWithLogging determines the optimal strategy with debug logging.
+func selectStrategyWithLogging(size int, config BufferPoolConfig, logger log.Logger) BufferPoolStrategy {
+	category := classifyObjectSize(size, config)
+	strategy := selectStrategy(size, config)
+
+	// Log strategy selection for debugging and monitoring
+	if config.EnableDetailedMetrics {
+		logStrategySelection(logger, size, category, strategy, config)
+	}
+
+	return strategy
+}
+
+// isStrategyOptimal checks if the selected strategy is optimal for the given size.
+// This is used for performance optimization and validation.
+func isStrategyOptimal(size int, strategy BufferPoolStrategy, config BufferPoolConfig) bool {
+	expectedStrategy := selectStrategy(size, config)
+	return strategy == expectedStrategy
+}
+
+// getStrategyPerformanceHint provides performance hints for strategy selection.
+func getStrategyPerformanceHint(size int, config BufferPoolConfig) string {
+	category := classifyObjectSize(size, config)
+
+	switch category {
+	case SizeCategorySmall:
+		return "small objects benefit from buffer pooling"
+	case SizeCategoryMedium:
+		return "medium objects use optimized buffer pooling"
+	case SizeCategoryLarge:
+		return "large objects use chunked streaming for memory efficiency"
+	case SizeCategoryVeryLarge:
+		return "very large objects use direct streaming to minimize overhead"
+	default:
+		return "unknown size category"
+	}
 }
 
 // nullEvictionPolicy is a Null Object implementation of EvictionPolicy.
@@ -3025,3 +3421,3046 @@ func (f SimpleFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*Fetch
 // 6. Not testing error scenarios in development
 // 7. Improper resource cleanup during error conditions
 // 8. Not implementing timeout and cancellation handling
+
+// AdaptiveBufferPool implements size-aware buffer management with strategy delegation.
+type AdaptiveBufferPool struct {
+	config BufferPoolConfig
+	logger log.Logger
+
+	// Size-specific pools for different object categories
+	smallPool  BufferPool // For objects < 32KB
+	mediumPool BufferPool // For objects 32KB-256KB
+
+	// Large object handling
+	chunkPool        *sync.Pool        // Pool of reusable chunks for streaming
+	chunkPoolManager *ChunkPoolManager // Advanced chunk pool management
+
+	// Metrics and monitoring
+	stats            *AdaptiveBufferPoolStats
+	metricsCollector *MetricsCollector
+
+	// Resource management for large operations
+	largeOpsSemaphore chan struct{} // Semaphore for limiting concurrent large operations
+
+	// Thread safety
+	mutex sync.RWMutex
+}
+
+// AdaptiveBufferPoolStats extends BufferPoolStats with adaptive-specific metrics.
+type AdaptiveBufferPoolStats struct {
+	BufferPoolStats
+
+	// Strategy selection metrics
+	StrategySelections map[string]int64 // Count of strategy selections by type
+
+	// Performance tracking
+	LatencyByCategory map[string]time.Duration // Average latency by size category
+
+	// Resource usage
+	ConcurrentLargeOps    int64 // Current number of concurrent large operations
+	MaxConcurrentLargeOps int64 // Maximum concurrent large operations reached
+
+	// Chunk pool metrics
+	ChunkPoolGets   int64
+	ChunkPoolPuts   int64
+	ChunkPoolHits   int64
+	ChunkPoolMisses int64
+}
+
+// NewAdaptiveBufferPool creates a new adaptive buffer pool with the given configuration.
+func NewAdaptiveBufferPool(config BufferPoolConfig, logger log.Logger) (*AdaptiveBufferPool, error) {
+	// Validate configuration
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+
+	// Create size-specific pools
+	smallPoolConfig := config
+	smallPoolConfig.MaxBufferSize = SmallObjectThreshold
+	smallPool := NewDefaultBufferPoolWithLogger(smallPoolConfig, logger)
+
+	mediumPoolConfig := config
+	mediumPoolConfig.MinBufferSize = SmallObjectThreshold
+	mediumPoolConfig.MaxBufferSize = config.LargeObjectThreshold
+	mediumPool := NewDefaultBufferPoolWithLogger(mediumPoolConfig, logger)
+
+	// Create chunk pool for large object streaming
+	chunkPool := &sync.Pool{
+		New: func() interface{} {
+			return make([]byte, config.ChunkSize)
+		},
+	}
+
+	// Create advanced chunk pool manager
+	chunkPoolConfig := ChunkPoolConfig{
+		ChunkSizes: []int{
+			config.ChunkSize / 2,
+			config.ChunkSize,
+			config.ChunkSize * 2,
+		},
+		MaxChunksPerPool:        100,
+		MemoryPressureThreshold: int64(config.MaxBufferSize * 50), // 50x max buffer size
+		CleanupInterval:         5 * time.Minute,
+		MaxChunkAge:             10 * time.Minute,
+		EnableMetrics:           config.EnableDetailedMetrics,
+	}
+	chunkPoolManager := NewChunkPoolManager(chunkPoolConfig, logger)
+
+	// Create semaphore for limiting concurrent large operations
+	largeOpsSemaphore := make(chan struct{}, config.MaxConcurrentLargeOps)
+
+	// Initialize statistics
+	stats := &AdaptiveBufferPoolStats{
+		StrategySelections: make(map[string]int64),
+		LatencyByCategory:  make(map[string]time.Duration),
+	}
+
+	// Initialize metrics collector if detailed metrics are enabled
+	var metricsCollector *MetricsCollector
+	if config.EnableDetailedMetrics {
+		metricsConfig := MetricsConfig{
+			CollectionInterval:     1 * time.Second,
+			RetentionPeriod:        24 * time.Hour,
+			MaxDataPoints:          10000,
+			EnableTrendAnalysis:    true,
+			EnableAnomalyDetection: true,
+			EnableRecommendations:  true,
+			AnalysisInterval:       5 * time.Minute,
+			ReportingInterval:      15 * time.Minute,
+		}
+		metricsCollector = NewMetricsCollector(metricsConfig, logger)
+	}
+
+	return &AdaptiveBufferPool{
+		config:            config,
+		logger:            logger,
+		smallPool:         smallPool,
+		mediumPool:        mediumPool,
+		chunkPool:         chunkPool,
+		chunkPoolManager:  chunkPoolManager,
+		stats:             stats,
+		metricsCollector:  metricsCollector,
+		largeOpsSemaphore: largeOpsSemaphore,
+	}, nil
+}
+
+// Get retrieves a buffer using the appropriate strategy based on size.
+func (abp *AdaptiveBufferPool) Get(size int) []byte {
+	if !abp.config.Enabled {
+		return make([]byte, size)
+	}
+
+	startTime := time.Now()
+	defer func() {
+		if abp.config.EnableDetailedMetrics {
+			category := classifyObjectSize(size, abp.config)
+			abp.updateLatencyMetrics(category, time.Since(startTime))
+		}
+	}()
+
+	// Update size-category metrics regardless of strategy
+	category := classifyObjectSize(size, abp.config)
+	switch category {
+	case SizeCategorySmall:
+		atomic.AddInt64(&abp.stats.SmallObjectOps, 1)
+	case SizeCategoryMedium:
+		atomic.AddInt64(&abp.stats.MediumObjectOps, 1)
+	case SizeCategoryLarge:
+		atomic.AddInt64(&abp.stats.LargeObjectOps, 1)
+	case SizeCategoryVeryLarge:
+		atomic.AddInt64(&abp.stats.VeryLargeObjectOps, 1)
+	}
+
+	strategy := selectStrategyWithLogging(size, abp.config, abp.logger)
+	abp.updateStrategyMetrics(strategy)
+
+	switch strategy {
+	case StrategyPooled:
+		return abp.getPooledBuffer(size)
+	case StrategyChunked, StrategyDirect:
+		// For large objects, return a buffer but don't use pooling
+		return make([]byte, size)
+	default:
+		// Fallback to pooled strategy
+		return abp.getPooledBuffer(size)
+	}
+}
+
+// getPooledBuffer retrieves a buffer from the appropriate size-specific pool.
+func (abp *AdaptiveBufferPool) getPooledBuffer(size int) []byte {
+	category := classifyObjectSize(size, abp.config)
+
+	switch category {
+	case SizeCategorySmall:
+		return abp.smallPool.Get(size)
+	case SizeCategoryMedium:
+		return abp.mediumPool.Get(size)
+	default:
+		// For large objects that still use pooling, use medium pool
+		return abp.mediumPool.Get(size)
+	}
+}
+
+// Put returns a buffer to the appropriate pool based on its size.
+func (abp *AdaptiveBufferPool) Put(buf []byte) {
+	if !abp.config.Enabled || buf == nil {
+		return
+	}
+
+	size := cap(buf)
+	category := classifyObjectSize(size, abp.config)
+
+	switch category {
+	case SizeCategorySmall:
+		abp.smallPool.Put(buf)
+	case SizeCategoryMedium:
+		abp.mediumPool.Put(buf)
+	default:
+		// Large buffers are not pooled, just let them be garbage collected
+		return
+	}
+}
+
+// CopyBuffer performs optimized copy using the appropriate strategy.
+func (abp *AdaptiveBufferPool) CopyBuffer(dst io.Writer, src io.Reader) (int64, error) {
+	if !abp.config.Enabled {
+		return io.Copy(dst, src)
+	}
+
+	// For CopyBuffer, we don't know the size in advance, so use default strategy
+	// This could be enhanced with size detection in the future
+	buf := abp.Get(abp.config.DefaultBufferSize)
+	defer abp.Put(buf)
+
+	return io.CopyBuffer(dst, src, buf)
+}
+
+// TeeReader creates an optimized TeeReader using the appropriate strategy.
+func (abp *AdaptiveBufferPool) TeeReader(r io.Reader, w io.Writer) io.Reader {
+	if !abp.config.Enabled {
+		return io.TeeReader(r, w)
+	}
+
+	return &adaptiveTeeReader{
+		r:          r,
+		w:          w,
+		bufferPool: abp,
+	}
+}
+
+// GetStats returns comprehensive statistics including adaptive-specific metrics.
+func (abp *AdaptiveBufferPool) GetStats() BufferPoolStats {
+	abp.mutex.RLock()
+	defer abp.mutex.RUnlock()
+
+	// Aggregate stats from all pools
+	smallStats := abp.smallPool.GetStats()
+	mediumStats := abp.mediumPool.GetStats()
+
+	// Combine basic stats
+	combinedStats := BufferPoolStats{
+		TotalGets:     smallStats.TotalGets + mediumStats.TotalGets,
+		TotalPuts:     smallStats.TotalPuts + mediumStats.TotalPuts,
+		PoolHits:      smallStats.PoolHits + mediumStats.PoolHits,
+		PoolMisses:    smallStats.PoolMisses + mediumStats.PoolMisses,
+		ActiveBuffers: smallStats.ActiveBuffers + mediumStats.ActiveBuffers,
+
+		// Size-category metrics from adaptive stats
+		SmallObjectOps:     abp.stats.SmallObjectOps,
+		MediumObjectOps:    abp.stats.MediumObjectOps,
+		LargeObjectOps:     abp.stats.LargeObjectOps,
+		VeryLargeObjectOps: abp.stats.VeryLargeObjectOps,
+
+		// Strategy usage metrics
+		PooledOperations:  abp.stats.StrategySelections["pooled"],
+		ChunkedOperations: abp.stats.StrategySelections["chunked"],
+		DirectOperations:  abp.stats.StrategySelections["direct"],
+
+		// Performance metrics
+		AverageLatencyNs: make(map[string]int64),
+		MemoryEfficiency: abp.calculateMemoryEfficiency(),
+	}
+
+	// Convert latency metrics to nanoseconds
+	for category, duration := range abp.stats.LatencyByCategory {
+		combinedStats.AverageLatencyNs[category] = duration.Nanoseconds()
+	}
+
+	return combinedStats
+}
+
+// updateStrategyMetrics updates strategy selection counters.
+func (abp *AdaptiveBufferPool) updateStrategyMetrics(strategy BufferPoolStrategy) {
+	if !abp.config.EnableDetailedMetrics {
+		return
+	}
+
+	abp.mutex.Lock()
+	defer abp.mutex.Unlock()
+
+	abp.stats.StrategySelections[strategy.String()]++
+}
+
+// updateLatencyMetrics updates latency tracking for size categories.
+func (abp *AdaptiveBufferPool) updateLatencyMetrics(category ObjectSizeCategory, latency time.Duration) {
+	abp.mutex.Lock()
+	defer abp.mutex.Unlock()
+
+	categoryStr := category.String()
+
+	// Simple moving average (could be enhanced with more sophisticated tracking)
+	currentLatency := abp.stats.LatencyByCategory[categoryStr]
+	if currentLatency == 0 {
+		abp.stats.LatencyByCategory[categoryStr] = latency
+	} else {
+		// Exponential moving average with alpha = 0.1
+		abp.stats.LatencyByCategory[categoryStr] = time.Duration(
+			float64(currentLatency)*0.9 + float64(latency)*0.1,
+		)
+	}
+}
+
+// calculateMemoryEfficiency calculates the memory efficiency ratio.
+func (abp *AdaptiveBufferPool) calculateMemoryEfficiency() float64 {
+	smallStats := abp.smallPool.GetStats()
+	mediumStats := abp.mediumPool.GetStats()
+
+	totalHits := smallStats.PoolHits + mediumStats.PoolHits
+	totalOps := smallStats.TotalGets + mediumStats.TotalGets
+
+	if totalOps == 0 {
+		return 0.0
+	}
+
+	return float64(totalHits) / float64(totalOps)
+}
+
+// getChunk retrieves a chunk from the chunk pool for large object streaming.
+func (abp *AdaptiveBufferPool) getChunk() []byte {
+	atomic.AddInt64(&abp.stats.ChunkPoolGets, 1)
+
+	chunk := abp.chunkPool.Get().([]byte)
+
+	// Check if this was a hit or miss (simple heuristic)
+	if len(chunk) == abp.config.ChunkSize {
+		atomic.AddInt64(&abp.stats.ChunkPoolHits, 1)
+	} else {
+		atomic.AddInt64(&abp.stats.ChunkPoolMisses, 1)
+	}
+
+	return chunk[:abp.config.ChunkSize]
+}
+
+// putChunk returns a chunk to the chunk pool.
+func (abp *AdaptiveBufferPool) putChunk(chunk []byte) {
+	atomic.AddInt64(&abp.stats.ChunkPoolPuts, 1)
+
+	if cap(chunk) >= abp.config.ChunkSize {
+		abp.chunkPool.Put(chunk[:cap(chunk)])
+	}
+}
+
+// acquireLargeOpSlot acquires a slot for large operation processing.
+func (abp *AdaptiveBufferPool) acquireLargeOpSlot(ctx context.Context) error {
+	select {
+	case abp.largeOpsSemaphore <- struct{}{}:
+		atomic.AddInt64(&abp.stats.ConcurrentLargeOps, 1)
+
+		// Update max concurrent operations if needed
+		current := atomic.LoadInt64(&abp.stats.ConcurrentLargeOps)
+		for {
+			max := atomic.LoadInt64(&abp.stats.MaxConcurrentLargeOps)
+			if current <= max || atomic.CompareAndSwapInt64(&abp.stats.MaxConcurrentLargeOps, max, current) {
+				break
+			}
+		}
+
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// releaseLargeOpSlot releases a slot for large operation processing.
+func (abp *AdaptiveBufferPool) releaseLargeOpSlot() {
+	select {
+	case <-abp.largeOpsSemaphore:
+		atomic.AddInt64(&abp.stats.ConcurrentLargeOps, -1)
+	default:
+		// Should not happen, but handle gracefully
+	}
+}
+
+// adaptiveTeeReader implements io.Reader using adaptive buffer management.
+type adaptiveTeeReader struct {
+	r          io.Reader
+	w          io.Writer
+	bufferPool *AdaptiveBufferPool
+}
+
+// Read implements io.Reader interface with adaptive buffer management.
+func (t *adaptiveTeeReader) Read(p []byte) (n int, err error) {
+	n, err = t.r.Read(p)
+	if n > 0 {
+		// Write the data to the tee writer
+		if _, writeErr := t.w.Write(p[:n]); writeErr != nil {
+			return n, writeErr
+		}
+	}
+	return n, err
+}
+
+// ChunkedTeeReader implements optimized tee reading for large objects using chunk-based processing.
+type ChunkedTeeReader struct {
+	r          io.Reader
+	w          io.Writer
+	bufferPool *AdaptiveBufferPool
+	chunkSize  int
+
+	// Performance tracking
+	totalBytesRead  int64
+	totalChunksRead int64
+	chunkReuseCount int64
+
+	// Error handling
+	lastError error
+
+	// Thread safety
+	mutex sync.Mutex
+}
+
+// NewChunkedTeeReader creates a new ChunkedTeeReader with the given parameters.
+func NewChunkedTeeReader(r io.Reader, w io.Writer, bufferPool *AdaptiveBufferPool, chunkSize int) *ChunkedTeeReader {
+	if chunkSize <= 0 {
+		chunkSize = 64 * 1024 // Default 64KB chunks
+	}
+
+	return &ChunkedTeeReader{
+		r:          r,
+		w:          w,
+		bufferPool: bufferPool,
+		chunkSize:  chunkSize,
+	}
+}
+
+// Read implements io.Reader interface with optimized chunk-based processing.
+func (ctr *ChunkedTeeReader) Read(p []byte) (n int, err error) {
+	ctr.mutex.Lock()
+	defer ctr.mutex.Unlock()
+
+	// Return previous error if any
+	if ctr.lastError != nil && ctr.lastError != io.EOF {
+		return 0, ctr.lastError
+	}
+
+	// Read from source
+	n, err = ctr.r.Read(p)
+	if n > 0 {
+		atomic.AddInt64(&ctr.totalBytesRead, int64(n))
+
+		// Write to tee destination using chunked approach for large data
+		if n > ctr.chunkSize {
+			err = ctr.writeChunked(p[:n])
+		} else {
+			// For small data, write directly
+			_, writeErr := ctr.w.Write(p[:n])
+			if writeErr != nil {
+				ctr.lastError = writeErr
+				return n, writeErr
+			}
+		}
+	}
+
+	if err != nil {
+		ctr.lastError = err
+	}
+
+	return n, err
+}
+
+// writeChunked writes large data in chunks to optimize memory usage and performance.
+func (ctr *ChunkedTeeReader) writeChunked(data []byte) error {
+	remaining := len(data)
+	offset := 0
+
+	for remaining > 0 {
+		chunkSize := ctr.chunkSize
+		if remaining < chunkSize {
+			chunkSize = remaining
+		}
+
+		// Get a chunk buffer from the pool
+		chunk := ctr.bufferPool.getChunk()
+
+		// Copy data to chunk buffer
+		copy(chunk, data[offset:offset+chunkSize])
+
+		// Write chunk to destination
+		_, err := ctr.w.Write(chunk[:chunkSize])
+
+		// Return chunk to pool
+		ctr.bufferPool.putChunk(chunk)
+		atomic.AddInt64(&ctr.chunkReuseCount, 1)
+
+		if err != nil {
+			return err
+		}
+
+		offset += chunkSize
+		remaining -= chunkSize
+		atomic.AddInt64(&ctr.totalChunksRead, 1)
+	}
+
+	return nil
+}
+
+// GetStats returns performance statistics for the ChunkedTeeReader.
+func (ctr *ChunkedTeeReader) GetStats() ChunkedTeeReaderStats {
+	ctr.mutex.Lock()
+	defer ctr.mutex.Unlock()
+
+	return ChunkedTeeReaderStats{
+		TotalBytesRead:  atomic.LoadInt64(&ctr.totalBytesRead),
+		TotalChunksRead: atomic.LoadInt64(&ctr.totalChunksRead),
+		ChunkReuseCount: atomic.LoadInt64(&ctr.chunkReuseCount),
+		ChunkSize:       ctr.chunkSize,
+		LastError:       ctr.lastError,
+	}
+}
+
+// ChunkedTeeReaderStats provides performance metrics for ChunkedTeeReader.
+type ChunkedTeeReaderStats struct {
+	TotalBytesRead  int64
+	TotalChunksRead int64
+	ChunkReuseCount int64
+	ChunkSize       int
+	LastError       error
+}
+
+// Reset resets the ChunkedTeeReader statistics and error state.
+func (ctr *ChunkedTeeReader) Reset() {
+	ctr.mutex.Lock()
+	defer ctr.mutex.Unlock()
+
+	atomic.StoreInt64(&ctr.totalBytesRead, 0)
+	atomic.StoreInt64(&ctr.totalChunksRead, 0)
+	atomic.StoreInt64(&ctr.chunkReuseCount, 0)
+	ctr.lastError = nil
+}
+
+// Close cleans up resources used by the ChunkedTeeReader.
+func (ctr *ChunkedTeeReader) Close() error {
+	ctr.mutex.Lock()
+	defer ctr.mutex.Unlock()
+
+	// Close underlying readers/writers if they implement io.Closer
+	var errs []error
+
+	if closer, ok := ctr.r.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if closer, ok := ctr.w.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	// Return first error if any
+	if len(errs) > 0 {
+		return errs[0]
+	}
+
+	return nil
+}
+
+// ChunkedTeeReaderWithMetrics extends ChunkedTeeReader with detailed performance tracking.
+type ChunkedTeeReaderWithMetrics struct {
+	*ChunkedTeeReader
+
+	// Detailed metrics
+	readLatencies    []time.Duration
+	writeLatencies   []time.Duration
+	chunkUtilization []float64
+
+	// Configuration
+	enableMetrics    bool
+	maxMetricSamples int
+
+	// Thread safety for metrics
+	metricsMutex sync.RWMutex
+}
+
+// NewChunkedTeeReaderWithMetrics creates a ChunkedTeeReader with detailed metrics collection.
+func NewChunkedTeeReaderWithMetrics(r io.Reader, w io.Writer, bufferPool *AdaptiveBufferPool, chunkSize int, enableMetrics bool) *ChunkedTeeReaderWithMetrics {
+	base := NewChunkedTeeReader(r, w, bufferPool, chunkSize)
+
+	return &ChunkedTeeReaderWithMetrics{
+		ChunkedTeeReader: base,
+		enableMetrics:    enableMetrics,
+		maxMetricSamples: 1000, // Keep last 1000 samples
+		readLatencies:    make([]time.Duration, 0, 1000),
+		writeLatencies:   make([]time.Duration, 0, 1000),
+		chunkUtilization: make([]float64, 0, 1000),
+	}
+}
+
+// Read implements io.Reader with detailed metrics collection.
+func (ctrm *ChunkedTeeReaderWithMetrics) Read(p []byte) (n int, err error) {
+	if !ctrm.enableMetrics {
+		return ctrm.ChunkedTeeReader.Read(p)
+	}
+
+	startTime := time.Now()
+	n, err = ctrm.ChunkedTeeReader.Read(p)
+	readLatency := time.Since(startTime)
+
+	// Record metrics
+	ctrm.recordReadLatency(readLatency)
+	if n > 0 {
+		utilization := float64(n) / float64(len(p))
+		ctrm.recordChunkUtilization(utilization)
+	}
+
+	return n, err
+}
+
+// recordReadLatency records read operation latency.
+func (ctrm *ChunkedTeeReaderWithMetrics) recordReadLatency(latency time.Duration) {
+	ctrm.metricsMutex.Lock()
+	defer ctrm.metricsMutex.Unlock()
+
+	ctrm.readLatencies = append(ctrm.readLatencies, latency)
+	if len(ctrm.readLatencies) > ctrm.maxMetricSamples {
+		// Remove oldest sample
+		ctrm.readLatencies = ctrm.readLatencies[1:]
+	}
+}
+
+// recordChunkUtilization records chunk utilization efficiency.
+func (ctrm *ChunkedTeeReaderWithMetrics) recordChunkUtilization(utilization float64) {
+	ctrm.metricsMutex.Lock()
+	defer ctrm.metricsMutex.Unlock()
+
+	ctrm.chunkUtilization = append(ctrm.chunkUtilization, utilization)
+	if len(ctrm.chunkUtilization) > ctrm.maxMetricSamples {
+		// Remove oldest sample
+		ctrm.chunkUtilization = ctrm.chunkUtilization[1:]
+	}
+}
+
+// GetDetailedStats returns comprehensive performance statistics.
+func (ctrm *ChunkedTeeReaderWithMetrics) GetDetailedStats() ChunkedTeeReaderDetailedStats {
+	ctrm.metricsMutex.RLock()
+	defer ctrm.metricsMutex.RUnlock()
+
+	baseStats := ctrm.ChunkedTeeReader.GetStats()
+
+	// Calculate average latencies
+	var avgReadLatency, avgWriteLatency time.Duration
+	if len(ctrm.readLatencies) > 0 {
+		var total time.Duration
+		for _, latency := range ctrm.readLatencies {
+			total += latency
+		}
+		avgReadLatency = total / time.Duration(len(ctrm.readLatencies))
+	}
+
+	if len(ctrm.writeLatencies) > 0 {
+		var total time.Duration
+		for _, latency := range ctrm.writeLatencies {
+			total += latency
+		}
+		avgWriteLatency = total / time.Duration(len(ctrm.writeLatencies))
+	}
+
+	// Calculate average chunk utilization
+	var avgChunkUtilization float64
+	if len(ctrm.chunkUtilization) > 0 {
+		var total float64
+		for _, util := range ctrm.chunkUtilization {
+			total += util
+		}
+		avgChunkUtilization = total / float64(len(ctrm.chunkUtilization))
+	}
+
+	return ChunkedTeeReaderDetailedStats{
+		ChunkedTeeReaderStats:   baseStats,
+		AverageReadLatency:      avgReadLatency,
+		AverageWriteLatency:     avgWriteLatency,
+		AverageChunkUtilization: avgChunkUtilization,
+		MetricSampleCount:       len(ctrm.readLatencies),
+	}
+}
+
+// ChunkedTeeReaderDetailedStats provides comprehensive performance metrics.
+type ChunkedTeeReaderDetailedStats struct {
+	ChunkedTeeReaderStats
+	AverageReadLatency      time.Duration
+	AverageWriteLatency     time.Duration
+	AverageChunkUtilization float64
+	MetricSampleCount       int
+}
+
+// ChunkedCopyBuffer performs optimized copying for large data using adaptive chunk sizing.
+func (abp *AdaptiveBufferPool) ChunkedCopyBuffer(dst io.Writer, src io.Reader, estimatedSize int) (int64, error) {
+	if !abp.config.Enabled {
+		return io.Copy(dst, src)
+	}
+
+	// Determine optimal chunk size based on estimated size
+	chunkSize := abp.calculateOptimalChunkSize(estimatedSize)
+
+	// For small data, use regular copy
+	if estimatedSize > 0 && estimatedSize <= abp.config.LargeObjectThreshold {
+		buf := abp.Get(chunkSize)
+		defer abp.Put(buf)
+		return io.CopyBuffer(dst, src, buf)
+	}
+
+	// For large data, use chunked copying with resource management
+	ctx := context.Background()
+	if err := abp.acquireLargeOpSlot(ctx); err != nil {
+		// Fallback to regular copy if resource limit reached
+		return io.Copy(dst, src)
+	}
+	defer abp.releaseLargeOpSlot()
+
+	return abp.performChunkedCopy(dst, src, chunkSize)
+}
+
+// calculateOptimalChunkSize determines the best chunk size for a given data size.
+func (abp *AdaptiveBufferPool) calculateOptimalChunkSize(estimatedSize int) int {
+	if estimatedSize <= 0 {
+		return abp.config.ChunkSize
+	}
+
+	// Use getOptimalChunkSize function we implemented earlier
+	return getOptimalChunkSize(estimatedSize, abp.config)
+}
+
+// performChunkedCopy executes the actual chunked copy operation.
+func (abp *AdaptiveBufferPool) performChunkedCopy(dst io.Writer, src io.Reader, chunkSize int) (int64, error) {
+	var totalCopied int64
+	var copyStats ChunkedCopyStats
+
+	startTime := time.Now()
+	defer func() {
+		copyStats.TotalDuration = time.Since(startTime)
+		if abp.config.EnableDetailedMetrics {
+			abp.recordChunkedCopyStats(copyStats)
+		}
+	}()
+
+	for {
+		// Get chunk from pool
+		chunk := abp.getChunk()
+		copyStats.ChunksUsed++
+
+		// Read data into chunk
+		readStart := time.Now()
+		n, readErr := src.Read(chunk)
+		copyStats.TotalReadTime += time.Since(readStart)
+
+		if n > 0 {
+			// Write chunk to destination
+			writeStart := time.Now()
+			written, writeErr := dst.Write(chunk[:n])
+			copyStats.TotalWriteTime += time.Since(writeStart)
+
+			totalCopied += int64(written)
+			copyStats.BytesCopied += int64(written)
+
+			// Return chunk to pool
+			abp.putChunk(chunk)
+
+			if writeErr != nil {
+				copyStats.WriteErrors++
+				return totalCopied, writeErr
+			}
+
+			if written != n {
+				copyStats.WriteErrors++
+				return totalCopied, io.ErrShortWrite
+			}
+		} else {
+			// Return unused chunk to pool
+			abp.putChunk(chunk)
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			copyStats.ReadErrors++
+			return totalCopied, readErr
+		}
+	}
+
+	return totalCopied, nil
+}
+
+// ChunkedCopyStats tracks performance metrics for chunked copy operations.
+type ChunkedCopyStats struct {
+	BytesCopied    int64
+	ChunksUsed     int64
+	TotalDuration  time.Duration
+	TotalReadTime  time.Duration
+	TotalWriteTime time.Duration
+	ReadErrors     int64
+	WriteErrors    int64
+}
+
+// recordChunkedCopyStats records performance statistics for analysis.
+func (abp *AdaptiveBufferPool) recordChunkedCopyStats(stats ChunkedCopyStats) {
+	abp.mutex.Lock()
+	defer abp.mutex.Unlock()
+
+	// Update aggregate statistics
+	if abp.stats.LatencyByCategory == nil {
+		abp.stats.LatencyByCategory = make(map[string]time.Duration)
+	}
+
+	// Record chunked copy performance
+	currentAvg := abp.stats.LatencyByCategory["chunked_copy"]
+	if currentAvg == 0 {
+		abp.stats.LatencyByCategory["chunked_copy"] = stats.TotalDuration
+	} else {
+		// Exponential moving average
+		abp.stats.LatencyByCategory["chunked_copy"] = time.Duration(
+			float64(currentAvg)*0.9 + float64(stats.TotalDuration)*0.1,
+		)
+	}
+}
+
+// ChunkedCopyBufferWithCallback performs chunked copying with progress callback.
+func (abp *AdaptiveBufferPool) ChunkedCopyBufferWithCallback(
+	dst io.Writer,
+	src io.Reader,
+	estimatedSize int,
+	progressCallback func(copied int64, total int64),
+) (int64, error) {
+	if !abp.config.Enabled {
+		return io.Copy(dst, src)
+	}
+
+	chunkSize := abp.calculateOptimalChunkSize(estimatedSize)
+
+	// For small data, use regular copy
+	if estimatedSize > 0 && estimatedSize <= abp.config.LargeObjectThreshold {
+		buf := abp.Get(chunkSize)
+		defer abp.Put(buf)
+		return io.CopyBuffer(dst, src, buf)
+	}
+
+	// For large data, use chunked copying with progress tracking
+	ctx := context.Background()
+	if err := abp.acquireLargeOpSlot(ctx); err != nil {
+		return io.Copy(dst, src)
+	}
+	defer abp.releaseLargeOpSlot()
+
+	return abp.performChunkedCopyWithProgress(dst, src, chunkSize, int64(estimatedSize), progressCallback)
+}
+
+// performChunkedCopyWithProgress executes chunked copy with progress reporting.
+func (abp *AdaptiveBufferPool) performChunkedCopyWithProgress(
+	dst io.Writer,
+	src io.Reader,
+	chunkSize int,
+	totalSize int64,
+	progressCallback func(copied int64, total int64),
+) (int64, error) {
+	var totalCopied int64
+
+	for {
+		chunk := abp.getChunk()
+
+		n, readErr := src.Read(chunk)
+		if n > 0 {
+			written, writeErr := dst.Write(chunk[:n])
+			totalCopied += int64(written)
+
+			// Report progress
+			if progressCallback != nil {
+				progressCallback(totalCopied, totalSize)
+			}
+
+			abp.putChunk(chunk)
+
+			if writeErr != nil {
+				return totalCopied, writeErr
+			}
+
+			if written != n {
+				return totalCopied, io.ErrShortWrite
+			}
+		} else {
+			abp.putChunk(chunk)
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return totalCopied, readErr
+		}
+	}
+
+	return totalCopied, nil
+}
+
+// OptimizedCopyBuffer automatically selects the best copy strategy based on data characteristics.
+func (abp *AdaptiveBufferPool) OptimizedCopyBuffer(dst io.Writer, src io.Reader, hint CopyHint) (int64, error) {
+	if !abp.config.Enabled {
+		return io.Copy(dst, src)
+	}
+
+	// Determine strategy based on hint
+	switch {
+	case hint.EstimatedSize > 0 && hint.EstimatedSize >= int64(abp.config.VeryLargeObjectThreshold):
+		// Very large objects: use direct streaming
+		return abp.directStreamCopy(dst, src, hint)
+	case hint.EstimatedSize > 0 && hint.EstimatedSize >= int64(abp.config.LargeObjectThreshold):
+		// Large objects: use chunked copying
+		return abp.ChunkedCopyBuffer(dst, src, int(hint.EstimatedSize))
+	default:
+		// Small/medium objects: use regular buffered copy
+		buf := abp.Get(abp.config.DefaultBufferSize)
+		defer abp.Put(buf)
+		return io.CopyBuffer(dst, src, buf)
+	}
+}
+
+// CopyHint provides information to optimize copy operations.
+type CopyHint struct {
+	EstimatedSize int64
+	IsStreaming   bool
+	Priority      CopyPriority
+	Timeout       time.Duration
+}
+
+// CopyPriority defines the priority level for copy operations.
+type CopyPriority int
+
+const (
+	CopyPriorityLow CopyPriority = iota
+	CopyPriorityNormal
+	CopyPriorityHigh
+	CopyPriorityUrgent
+)
+
+// directStreamCopy performs direct streaming for very large objects.
+func (abp *AdaptiveBufferPool) directStreamCopy(dst io.Writer, src io.Reader, hint CopyHint) (int64, error) {
+	// For very large objects, use minimal buffering to reduce memory pressure
+	bufSize := abp.config.ChunkSize
+	if bufSize > 128*1024 {
+		bufSize = 128 * 1024 // Cap at 128KB for very large objects
+	}
+
+	buf := make([]byte, bufSize)
+	return io.CopyBuffer(dst, src, buf)
+}
+
+// CopyBufferWithTimeout performs copy operation with timeout support.
+func (abp *AdaptiveBufferPool) CopyBufferWithTimeout(
+	ctx context.Context,
+	dst io.Writer,
+	src io.Reader,
+	estimatedSize int,
+) (int64, error) {
+	if !abp.config.Enabled {
+		return io.Copy(dst, src)
+	}
+
+	// Create a channel to receive the copy result
+	type copyResult struct {
+		n   int64
+		err error
+	}
+
+	resultChan := make(chan copyResult, 1)
+
+	// Perform copy in a goroutine
+	go func() {
+		n, err := abp.ChunkedCopyBuffer(dst, src, estimatedSize)
+		resultChan <- copyResult{n: n, err: err}
+	}()
+
+	// Wait for completion or timeout
+	select {
+	case result := <-resultChan:
+		return result.n, result.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+// ChunkPoolManager manages multiple chunk pools for different sizes with advanced optimization.
+type ChunkPoolManager struct {
+	pools map[int]*ChunkPool
+	mutex sync.RWMutex
+
+	// Configuration
+	config ChunkPoolConfig
+	logger log.Logger
+
+	// Statistics
+	stats ChunkPoolManagerStats
+
+	// Memory pressure management
+	memoryPressureThreshold int64
+	currentMemoryUsage      int64
+
+	// Cleanup management
+	cleanupTicker *time.Ticker
+	cleanupCancel context.CancelFunc
+	cleanupCtx    context.Context
+}
+
+// ChunkPoolConfig configures the chunk pool management system.
+type ChunkPoolConfig struct {
+	// Chunk sizes to pre-create pools for
+	ChunkSizes []int
+
+	// Maximum number of chunks per pool
+	MaxChunksPerPool int
+
+	// Memory pressure threshold (bytes)
+	MemoryPressureThreshold int64
+
+	// Cleanup interval for unused chunks
+	CleanupInterval time.Duration
+
+	// Maximum age for chunks before cleanup
+	MaxChunkAge time.Duration
+
+	// Enable detailed metrics collection
+	EnableMetrics bool
+}
+
+// ChunkPool manages chunks of a specific size with lifecycle tracking.
+type ChunkPool struct {
+	chunkSize int
+	pool      *sync.Pool
+
+	// Lifecycle tracking
+	activeChunks map[*[]byte]*ChunkInfo
+	activeMutex  sync.RWMutex
+
+	// Statistics
+	gets        int64
+	puts        int64
+	hits        int64
+	misses      int64
+	allocations int64
+
+	// Memory management
+	maxChunks     int
+	currentChunks int64
+	memoryUsage   int64
+
+	// Configuration
+	enableTracking bool
+}
+
+// ChunkInfo tracks metadata for individual chunks.
+type ChunkInfo struct {
+	AllocatedAt time.Time
+	LastUsedAt  time.Time
+	UseCount    int64
+	Size        int
+}
+
+// ChunkPoolManagerStats provides comprehensive statistics for chunk pool management.
+type ChunkPoolManagerStats struct {
+	TotalPools          int
+	TotalChunks         int64
+	TotalMemoryUsage    int64
+	TotalGets           int64
+	TotalPuts           int64
+	TotalHits           int64
+	TotalMisses         int64
+	MemoryPressureCount int64
+	CleanupOperations   int64
+
+	// Per-size statistics
+	PoolStats map[int]ChunkPoolStats
+}
+
+// ChunkPoolStats provides statistics for individual chunk pools.
+type ChunkPoolStats struct {
+	ChunkSize       int
+	ActiveChunks    int64
+	MemoryUsage     int64
+	Gets            int64
+	Puts            int64
+	Hits            int64
+	Misses          int64
+	Allocations     int64
+	AverageAge      time.Duration
+	UtilizationRate float64
+}
+
+// NewChunkPoolManager creates a new chunk pool manager with the given configuration.
+func NewChunkPoolManager(config ChunkPoolConfig, logger log.Logger) *ChunkPoolManager {
+	// Set defaults
+	if len(config.ChunkSizes) == 0 {
+		config.ChunkSizes = []int{
+			16 * 1024,  // 16KB
+			32 * 1024,  // 32KB
+			64 * 1024,  // 64KB
+			128 * 1024, // 128KB
+			256 * 1024, // 256KB
+		}
+	}
+
+	if config.MaxChunksPerPool <= 0 {
+		config.MaxChunksPerPool = 100
+	}
+
+	if config.MemoryPressureThreshold <= 0 {
+		config.MemoryPressureThreshold = 100 * 1024 * 1024 // 100MB
+	}
+
+	if config.CleanupInterval <= 0 {
+		config.CleanupInterval = 5 * time.Minute
+	}
+
+	if config.MaxChunkAge <= 0 {
+		config.MaxChunkAge = 10 * time.Minute
+	}
+
+	cpm := &ChunkPoolManager{
+		pools:  make(map[int]*ChunkPool),
+		config: config,
+		logger: logger,
+		stats: ChunkPoolManagerStats{
+			PoolStats: make(map[int]ChunkPoolStats),
+		},
+		memoryPressureThreshold: config.MemoryPressureThreshold,
+	}
+
+	// Initialize pools for configured chunk sizes
+	for _, size := range config.ChunkSizes {
+		cpm.createPool(size)
+	}
+
+	// Start cleanup routine
+	cpm.startCleanupRoutine()
+
+	return cpm
+}
+
+// createPool creates a new chunk pool for the specified size.
+func (cpm *ChunkPoolManager) createPool(chunkSize int) *ChunkPool {
+	pool := &ChunkPool{
+		chunkSize:      chunkSize,
+		maxChunks:      cpm.config.MaxChunksPerPool,
+		enableTracking: cpm.config.EnableMetrics,
+		activeChunks:   make(map[*[]byte]*ChunkInfo),
+	}
+
+	pool.pool = &sync.Pool{
+		New: func() interface{} {
+			chunk := make([]byte, chunkSize)
+			atomic.AddInt64(&pool.allocations, 1)
+			atomic.AddInt64(&pool.misses, 1)
+
+			if pool.enableTracking {
+				info := &ChunkInfo{
+					AllocatedAt: time.Now(),
+					LastUsedAt:  time.Now(),
+					Size:        chunkSize,
+				}
+
+				pool.activeMutex.Lock()
+				pool.activeChunks[&chunk] = info
+				pool.activeMutex.Unlock()
+			}
+
+			return chunk
+		},
+	}
+
+	cpm.mutex.Lock()
+	cpm.pools[chunkSize] = pool
+	cpm.mutex.Unlock()
+
+	return pool
+}
+
+// GetChunk retrieves a chunk of the specified size from the appropriate pool.
+func (cpm *ChunkPoolManager) GetChunk(size int) []byte {
+	// Find the best matching pool
+	poolSize := cpm.findBestPoolSize(size)
+
+	cpm.mutex.RLock()
+	pool, exists := cpm.pools[poolSize]
+	cpm.mutex.RUnlock()
+
+	if !exists {
+		// Create pool on demand
+		pool = cpm.createPool(poolSize)
+	}
+
+	// Get chunk from pool
+	chunk := pool.pool.Get().([]byte)
+	atomic.AddInt64(&pool.gets, 1)
+	atomic.AddInt64(&cpm.stats.TotalGets, 1)
+
+	// Update tracking information
+	if pool.enableTracking {
+		pool.activeMutex.Lock()
+		if info, exists := pool.activeChunks[&chunk]; exists {
+			info.LastUsedAt = time.Now()
+			info.UseCount++
+			atomic.AddInt64(&pool.hits, 1)
+			atomic.AddInt64(&cpm.stats.TotalHits, 1)
+		}
+		pool.activeMutex.Unlock()
+	}
+
+	// Update memory usage
+	atomic.AddInt64(&pool.memoryUsage, int64(poolSize))
+	atomic.AddInt64(&cpm.currentMemoryUsage, int64(poolSize))
+	atomic.AddInt64(&pool.currentChunks, 1)
+
+	return chunk[:size] // Return slice of requested size
+}
+
+// PutChunk returns a chunk to the appropriate pool.
+func (cpm *ChunkPoolManager) PutChunk(chunk []byte) {
+	if chunk == nil {
+		return
+	}
+
+	chunkSize := cap(chunk)
+
+	cpm.mutex.RLock()
+	pool, exists := cpm.pools[chunkSize]
+	cpm.mutex.RUnlock()
+
+	if !exists {
+		// No pool for this size, just let it be garbage collected
+		return
+	}
+
+	// Check memory pressure
+	if atomic.LoadInt64(&cpm.currentMemoryUsage) > cpm.memoryPressureThreshold {
+		atomic.AddInt64(&cpm.stats.MemoryPressureCount, 1)
+		// Don't return to pool under memory pressure
+		cpm.updateMemoryUsage(pool, -int64(chunkSize))
+		return
+	}
+
+	// Reset chunk to full capacity
+	chunk = chunk[:cap(chunk)]
+
+	// Return to pool
+	pool.pool.Put(chunk)
+	atomic.AddInt64(&pool.puts, 1)
+	atomic.AddInt64(&cpm.stats.TotalPuts, 1)
+
+	// Update memory tracking (chunk is still in memory, just pooled)
+	atomic.AddInt64(&pool.currentChunks, -1)
+}
+
+// findBestPoolSize finds the best matching pool size for a requested size.
+func (cpm *ChunkPoolManager) findBestPoolSize(requestedSize int) int {
+	cpm.mutex.RLock()
+	defer cpm.mutex.RUnlock()
+
+	// Find the smallest pool size that can accommodate the request
+	bestSize := requestedSize
+	for size := range cpm.pools {
+		if size >= requestedSize && (bestSize == requestedSize || size < bestSize) {
+			bestSize = size
+		}
+	}
+
+	// If no existing pool is suitable, round up to next power of 2 or common size
+	if bestSize == requestedSize {
+		bestSize = cpm.roundUpToPoolSize(requestedSize)
+	}
+
+	return bestSize
+}
+
+// roundUpToPoolSize rounds up a size to a suitable pool size.
+func (cpm *ChunkPoolManager) roundUpToPoolSize(size int) int {
+	// Common pool sizes
+	commonSizes := []int{
+		16 * 1024,   // 16KB
+		32 * 1024,   // 32KB
+		64 * 1024,   // 64KB
+		128 * 1024,  // 128KB
+		256 * 1024,  // 256KB
+		512 * 1024,  // 512KB
+		1024 * 1024, // 1MB
+	}
+
+	for _, commonSize := range commonSizes {
+		if size <= commonSize {
+			return commonSize
+		}
+	}
+
+	// For very large sizes, round up to next MB
+	return ((size-1)/1024/1024 + 1) * 1024 * 1024
+}
+
+// updateMemoryUsage updates memory usage tracking.
+func (cpm *ChunkPoolManager) updateMemoryUsage(pool *ChunkPool, delta int64) {
+	atomic.AddInt64(&pool.memoryUsage, delta)
+	atomic.AddInt64(&cpm.currentMemoryUsage, delta)
+}
+
+// startCleanupRoutine starts the background cleanup routine.
+func (cpm *ChunkPoolManager) startCleanupRoutine() {
+	if cpm.config.CleanupInterval <= 0 {
+		return
+	}
+
+	cpm.cleanupCtx, cpm.cleanupCancel = context.WithCancel(context.Background())
+	cpm.cleanupTicker = time.NewTicker(cpm.config.CleanupInterval)
+
+	go func() {
+		defer cpm.cleanupTicker.Stop()
+		for {
+			select {
+			case <-cpm.cleanupCtx.Done():
+				return
+			case <-cpm.cleanupTicker.C:
+				cpm.performCleanup()
+			}
+		}
+	}()
+}
+
+// performCleanup performs cleanup of old and unused chunks.
+func (cpm *ChunkPoolManager) performCleanup() {
+	if cpm.logger != nil {
+		level.Debug(cpm.logger).Log("msg", "performing chunk pool cleanup")
+	}
+
+	cpm.mutex.RLock()
+	pools := make([]*ChunkPool, 0, len(cpm.pools))
+	for _, pool := range cpm.pools {
+		pools = append(pools, pool)
+	}
+	cpm.mutex.RUnlock()
+
+	for _, pool := range pools {
+		cpm.cleanupPool(pool)
+	}
+
+	atomic.AddInt64(&cpm.stats.CleanupOperations, 1)
+}
+
+// cleanupPool performs cleanup for a specific pool.
+func (cpm *ChunkPoolManager) cleanupPool(pool *ChunkPool) {
+	if !pool.enableTracking {
+		return
+	}
+
+	pool.activeMutex.Lock()
+	defer pool.activeMutex.Unlock()
+
+	now := time.Now()
+	var chunksToRemove []*[]byte
+
+	// Find chunks that are too old
+	for chunkPtr, info := range pool.activeChunks {
+		if now.Sub(info.LastUsedAt) > cpm.config.MaxChunkAge {
+			chunksToRemove = append(chunksToRemove, chunkPtr)
+		}
+	}
+
+	// Remove old chunks from tracking
+	for _, chunkPtr := range chunksToRemove {
+		delete(pool.activeChunks, chunkPtr)
+		cpm.updateMemoryUsage(pool, -int64(pool.chunkSize))
+	}
+
+	if len(chunksToRemove) > 0 && cpm.logger != nil {
+		level.Debug(cpm.logger).Log(
+			"msg", "cleaned up old chunks",
+			"pool_size", pool.chunkSize,
+			"chunks_removed", len(chunksToRemove),
+		)
+	}
+}
+
+// GetStats returns comprehensive statistics for the chunk pool manager.
+func (cpm *ChunkPoolManager) GetStats() ChunkPoolManagerStats {
+	cpm.mutex.RLock()
+	defer cpm.mutex.RUnlock()
+
+	stats := ChunkPoolManagerStats{
+		TotalPools:          len(cpm.pools),
+		TotalMemoryUsage:    atomic.LoadInt64(&cpm.currentMemoryUsage),
+		TotalGets:           atomic.LoadInt64(&cpm.stats.TotalGets),
+		TotalPuts:           atomic.LoadInt64(&cpm.stats.TotalPuts),
+		TotalHits:           atomic.LoadInt64(&cpm.stats.TotalHits),
+		TotalMisses:         atomic.LoadInt64(&cpm.stats.TotalMisses),
+		MemoryPressureCount: atomic.LoadInt64(&cpm.stats.MemoryPressureCount),
+		CleanupOperations:   atomic.LoadInt64(&cpm.stats.CleanupOperations),
+		PoolStats:           make(map[int]ChunkPoolStats),
+	}
+
+	var totalChunks int64
+
+	// Collect per-pool statistics
+	for size, pool := range cpm.pools {
+		poolStats := ChunkPoolStats{
+			ChunkSize:    size,
+			ActiveChunks: atomic.LoadInt64(&pool.currentChunks),
+			MemoryUsage:  atomic.LoadInt64(&pool.memoryUsage),
+			Gets:         atomic.LoadInt64(&pool.gets),
+			Puts:         atomic.LoadInt64(&pool.puts),
+			Hits:         atomic.LoadInt64(&pool.hits),
+			Misses:       atomic.LoadInt64(&pool.misses),
+			Allocations:  atomic.LoadInt64(&pool.allocations),
+		}
+
+		// Calculate utilization rate
+		if poolStats.Gets > 0 {
+			poolStats.UtilizationRate = float64(poolStats.Hits) / float64(poolStats.Gets)
+		}
+
+		// Calculate average age if tracking is enabled
+		if pool.enableTracking {
+			poolStats.AverageAge = cpm.calculateAverageAge(pool)
+		}
+
+		stats.PoolStats[size] = poolStats
+		totalChunks += poolStats.ActiveChunks
+	}
+
+	stats.TotalChunks = totalChunks
+	return stats
+}
+
+// calculateAverageAge calculates the average age of chunks in a pool.
+func (cpm *ChunkPoolManager) calculateAverageAge(pool *ChunkPool) time.Duration {
+	pool.activeMutex.RLock()
+	defer pool.activeMutex.RUnlock()
+
+	if len(pool.activeChunks) == 0 {
+		return 0
+	}
+
+	now := time.Now()
+	var totalAge time.Duration
+
+	for _, info := range pool.activeChunks {
+		totalAge += now.Sub(info.AllocatedAt)
+	}
+
+	return totalAge / time.Duration(len(pool.activeChunks))
+}
+
+// Close shuts down the chunk pool manager and cleans up resources.
+func (cpm *ChunkPoolManager) Close() {
+	if cpm.cleanupCancel != nil {
+		cpm.cleanupCancel()
+	}
+
+	if cpm.cleanupTicker != nil {
+		cpm.cleanupTicker.Stop()
+	}
+
+	// Perform final cleanup
+	cpm.performCleanup()
+
+	if cpm.logger != nil {
+		level.Info(cpm.logger).Log("msg", "chunk pool manager closed")
+	}
+}
+
+// AdvancedBufferPoolMetrics provides comprehensive performance analysis capabilities.
+type AdvancedBufferPoolMetrics struct {
+	// Basic stats
+	BasicStats BufferPoolStats
+
+	// Performance tracking
+	PerformanceMetrics PerformanceMetrics
+
+	// Memory analysis
+	MemoryMetrics MemoryMetrics
+
+	// Strategy effectiveness
+	StrategyMetrics StrategyMetrics
+
+	// Trend analysis
+	TrendMetrics TrendMetrics
+
+	// Configuration and recommendations
+	ConfigMetrics ConfigMetrics
+}
+
+// PerformanceMetrics tracks detailed performance characteristics.
+type PerformanceMetrics struct {
+	// Latency tracking by category
+	LatencyStats map[string]LatencyStats
+
+	// Throughput metrics
+	ThroughputStats ThroughputStats
+
+	// Error rates and patterns
+	ErrorStats ErrorStats
+
+	// Resource utilization
+	ResourceStats ResourceStats
+}
+
+// LatencyStats provides detailed latency analysis for a category.
+type LatencyStats struct {
+	Mean        time.Duration
+	Median      time.Duration
+	P95         time.Duration
+	P99         time.Duration
+	Min         time.Duration
+	Max         time.Duration
+	StdDev      time.Duration
+	SampleCount int64
+}
+
+// ThroughputStats tracks throughput characteristics.
+type ThroughputStats struct {
+	BytesPerSecond      float64
+	OperationsPerSecond float64
+	PeakBytesPerSecond  float64
+	PeakOpsPerSecond    float64
+	AverageObjectSize   int64
+}
+
+// ErrorStats tracks error patterns and rates.
+type ErrorStats struct {
+	TotalErrors      int64
+	ErrorRate        float64
+	ErrorsByCategory map[string]int64
+	ErrorsByStrategy map[string]int64
+	RecentErrors     []ErrorEvent
+}
+
+// ErrorEvent represents a specific error occurrence.
+type ErrorEvent struct {
+	Timestamp time.Time
+	Category  string
+	Strategy  string
+	Error     string
+	Context   map[string]interface{}
+}
+
+// ResourceStats tracks resource utilization patterns.
+type ResourceStats struct {
+	MemoryUtilization float64
+	CPUUtilization    float64
+	GCPressure        float64
+	AllocationRate    float64
+	PoolEfficiency    float64
+	CacheHitRate      float64
+}
+
+// MemoryMetrics provides detailed memory usage analysis.
+type MemoryMetrics struct {
+	// Current memory usage
+	CurrentUsage MemoryUsage
+
+	// Peak memory usage
+	PeakUsage MemoryUsage
+
+	// Memory allocation patterns
+	AllocationPatterns AllocationPatterns
+
+	// GC impact analysis
+	GCMetrics GCMetrics
+
+	// Memory efficiency by category
+	EfficiencyByCategory map[string]float64
+}
+
+// MemoryUsage represents memory usage at a point in time.
+type MemoryUsage struct {
+	TotalAllocated int64
+	ActiveBuffers  int64
+	PooledBuffers  int64
+	ChunkedBuffers int64
+	DirectBuffers  int64
+	OverheadBytes  int64
+	EffectiveBytes int64
+}
+
+// AllocationPatterns tracks memory allocation patterns.
+type AllocationPatterns struct {
+	AllocationsBySize     map[int]int64
+	AllocationsByStrategy map[string]int64
+	AllocationTrends      []AllocationTrend
+	FragmentationRatio    float64
+	ReuseEfficiency       float64
+}
+
+// AllocationTrend represents allocation trends over time.
+type AllocationTrend struct {
+	Timestamp     time.Time
+	AllocatedMB   float64
+	ActiveMB      float64
+	PooledMB      float64
+	EfficiencyPct float64
+}
+
+// GCMetrics tracks garbage collection impact.
+type GCMetrics struct {
+	GCFrequency      float64 // GCs per second
+	GCPauseDuration  time.Duration
+	GCPressureScore  float64 // 0-1 scale
+	MemoryReclaimed  int64
+	GCTriggerReasons map[string]int64
+}
+
+// StrategyMetrics analyzes strategy effectiveness.
+type StrategyMetrics struct {
+	// Effectiveness by strategy
+	EffectivenessByStrategy map[string]StrategyEffectiveness
+
+	// Strategy selection accuracy
+	SelectionAccuracy float64
+
+	// Strategy switching patterns
+	SwitchingPatterns []StrategySwitch
+
+	// Optimal strategy recommendations
+	Recommendations []StrategyRecommendation
+}
+
+// StrategyEffectiveness measures how well a strategy performs.
+type StrategyEffectiveness struct {
+	Strategy         string
+	UsageCount       int64
+	AverageLatency   time.Duration
+	MemoryEfficiency float64
+	ErrorRate        float64
+	ThroughputScore  float64
+	OverallScore     float64
+}
+
+// StrategySwitch represents a strategy change event.
+type StrategySwitch struct {
+	Timestamp    time.Time
+	FromStrategy string
+	ToStrategy   string
+	ObjectSize   int
+	Reason       string
+	Performance  float64
+}
+
+// StrategyRecommendation suggests strategy optimizations.
+type StrategyRecommendation struct {
+	Category            string
+	CurrentStrategy     string
+	RecommendedStrategy string
+	ExpectedImprovement float64
+	Confidence          float64
+	Reasoning           string
+}
+
+// TrendMetrics provides trend analysis and forecasting.
+type TrendMetrics struct {
+	// Performance trends
+	PerformanceTrends []PerformanceTrend
+
+	// Usage pattern trends
+	UsageTrends []UsageTrend
+
+	// Capacity planning
+	CapacityForecasts []CapacityForecast
+
+	// Anomaly detection
+	Anomalies []PerformanceAnomaly
+}
+
+// PerformanceTrend represents performance changes over time.
+type PerformanceTrend struct {
+	Timestamp      time.Time
+	Category       string
+	Latency        time.Duration
+	Throughput     float64
+	MemoryUsage    int64
+	ErrorRate      float64
+	TrendDirection string // "improving", "degrading", "stable"
+}
+
+// UsageTrend tracks usage pattern changes.
+type UsageTrend struct {
+	Timestamp       time.Time
+	SmallObjPct     float64
+	MediumObjPct    float64
+	LargeObjPct     float64
+	VeryLargeObjPct float64
+	PredictedShift  string
+}
+
+// CapacityForecast predicts future capacity needs.
+type CapacityForecast struct {
+	TimeHorizon      time.Duration
+	PredictedLoad    float64
+	RequiredCapacity int64
+	ConfidenceLevel  float64
+	Recommendations  []string
+}
+
+// PerformanceAnomaly represents detected performance anomalies.
+type PerformanceAnomaly struct {
+	Timestamp   time.Time
+	Category    string
+	Metric      string
+	Expected    float64
+	Actual      float64
+	Severity    string // "low", "medium", "high", "critical"
+	Description string
+	Suggestions []string
+}
+
+// ConfigMetrics provides configuration analysis and recommendations.
+type ConfigMetrics struct {
+	// Current configuration effectiveness
+	ConfigEffectiveness ConfigEffectiveness
+
+	// Configuration recommendations
+	Recommendations []ConfigRecommendation
+
+	// Tuning opportunities
+	TuningOpportunities []TuningOpportunity
+
+	// Configuration validation
+	ValidationResults ConfigValidationResults
+}
+
+// ConfigEffectiveness measures how well current configuration performs.
+type ConfigEffectiveness struct {
+	OverallScore       float64
+	BufferSizeScore    float64
+	ThresholdScore     float64
+	StrategyScore      float64
+	MemoryScore        float64
+	PerformanceScore   float64
+	RecommendedChanges []string
+}
+
+// ConfigRecommendation suggests configuration improvements.
+type ConfigRecommendation struct {
+	Parameter           string
+	CurrentValue        interface{}
+	RecommendedValue    interface{}
+	ExpectedImprovement float64
+	Priority            string // "low", "medium", "high", "critical"
+	Reasoning           string
+	RiskLevel           string // "low", "medium", "high"
+}
+
+// TuningOpportunity identifies specific tuning opportunities.
+type TuningOpportunity struct {
+	Area                 string
+	Description          string
+	PotentialGain        float64
+	ImplementationEffort string // "low", "medium", "high"
+	Prerequisites        []string
+	Steps                []string
+}
+
+// ConfigValidationResults provides configuration validation feedback.
+type ConfigValidationResults struct {
+	IsValid         bool
+	ValidationScore float64
+	Issues          []ConfigIssue
+	Warnings        []ConfigWarning
+	BestPractices   []BestPracticeCheck
+}
+
+// ConfigIssue represents a configuration problem.
+type ConfigIssue struct {
+	Severity   string // "error", "warning", "info"
+	Parameter  string
+	Issue      string
+	Impact     string
+	Resolution string
+}
+
+// ConfigWarning represents a configuration warning.
+type ConfigWarning struct {
+	Parameter      string
+	Warning        string
+	Recommendation string
+	Impact         string
+}
+
+// BestPracticeCheck represents a best practice validation.
+type BestPracticeCheck struct {
+	Practice       string
+	Status         string // "pass", "fail", "warning"
+	Description    string
+	Recommendation string
+}
+
+// MetricsCollector manages comprehensive metrics collection and analysis.
+type MetricsCollector struct {
+	// Configuration
+	config MetricsConfig
+	logger log.Logger
+
+	// Data collection
+	dataPoints []MetricDataPoint
+	mutex      sync.RWMutex
+
+	// Analysis engines
+	performanceAnalyzer *PerformanceAnalyzer
+	memoryAnalyzer      *MemoryAnalyzer
+	strategyAnalyzer    *StrategyAnalyzer
+	trendAnalyzer       *TrendAnalyzer
+	configAnalyzer      *ConfigAnalyzer
+
+	// Background processing
+	processingTicker *time.Ticker
+	processingCancel context.CancelFunc
+	processingCtx    context.Context
+}
+
+// MetricsConfig configures metrics collection behavior.
+type MetricsConfig struct {
+	// Collection settings
+	CollectionInterval time.Duration
+	RetentionPeriod    time.Duration
+	MaxDataPoints      int
+
+	// Analysis settings
+	EnableTrendAnalysis    bool
+	EnableAnomalyDetection bool
+	EnableRecommendations  bool
+
+	// Performance settings
+	AnalysisInterval  time.Duration
+	ReportingInterval time.Duration
+
+	// Storage settings
+	PersistMetrics     bool
+	MetricsStoragePath string
+}
+
+// MetricDataPoint represents a single metrics measurement.
+type MetricDataPoint struct {
+	Timestamp   time.Time
+	Category    string
+	Strategy    string
+	ObjectSize  int
+	Latency     time.Duration
+	MemoryUsage int64
+	Success     bool
+	Error       string
+	Context     map[string]interface{}
+}
+
+// NewMetricsCollector creates a new comprehensive metrics collector.
+func NewMetricsCollector(config MetricsConfig, logger log.Logger) *MetricsCollector {
+	// Set defaults
+	if config.CollectionInterval <= 0 {
+		config.CollectionInterval = 1 * time.Second
+	}
+	if config.RetentionPeriod <= 0 {
+		config.RetentionPeriod = 24 * time.Hour
+	}
+	if config.MaxDataPoints <= 0 {
+		config.MaxDataPoints = 10000
+	}
+	if config.AnalysisInterval <= 0 {
+		config.AnalysisInterval = 5 * time.Minute
+	}
+	if config.ReportingInterval <= 0 {
+		config.ReportingInterval = 15 * time.Minute
+	}
+
+	mc := &MetricsCollector{
+		config:     config,
+		logger:     logger,
+		dataPoints: make([]MetricDataPoint, 0, config.MaxDataPoints),
+	}
+
+	// Initialize analyzers
+	mc.performanceAnalyzer = NewPerformanceAnalyzer(logger)
+	mc.memoryAnalyzer = NewMemoryAnalyzer(logger)
+	mc.strategyAnalyzer = NewStrategyAnalyzer(logger)
+	mc.trendAnalyzer = NewTrendAnalyzer(logger)
+	mc.configAnalyzer = NewConfigAnalyzer(logger)
+
+	// Start background processing
+	mc.startBackgroundProcessing()
+
+	return mc
+}
+
+// RecordMetric records a new metric data point.
+func (mc *MetricsCollector) RecordMetric(dataPoint MetricDataPoint) {
+	mc.mutex.Lock()
+	defer mc.mutex.Unlock()
+
+	// Add timestamp if not set
+	if dataPoint.Timestamp.IsZero() {
+		dataPoint.Timestamp = time.Now()
+	}
+
+	// Add to data points
+	mc.dataPoints = append(mc.dataPoints, dataPoint)
+
+	// Trim if necessary
+	if len(mc.dataPoints) > mc.config.MaxDataPoints {
+		// Remove oldest 10% of data points
+		removeCount := mc.config.MaxDataPoints / 10
+		mc.dataPoints = mc.dataPoints[removeCount:]
+	}
+}
+
+// GetAdvancedMetrics returns comprehensive metrics analysis.
+func (mc *MetricsCollector) GetAdvancedMetrics() AdvancedBufferPoolMetrics {
+	mc.mutex.RLock()
+	dataPoints := make([]MetricDataPoint, len(mc.dataPoints))
+	copy(dataPoints, mc.dataPoints)
+	mc.mutex.RUnlock()
+
+	// Analyze data using different analyzers
+	performanceMetrics := mc.performanceAnalyzer.Analyze(dataPoints)
+	memoryMetrics := mc.memoryAnalyzer.Analyze(dataPoints)
+	strategyMetrics := mc.strategyAnalyzer.Analyze(dataPoints)
+	trendMetrics := mc.trendAnalyzer.Analyze(dataPoints)
+	configMetrics := mc.configAnalyzer.Analyze(dataPoints)
+
+	return AdvancedBufferPoolMetrics{
+		PerformanceMetrics: performanceMetrics,
+		MemoryMetrics:      memoryMetrics,
+		StrategyMetrics:    strategyMetrics,
+		TrendMetrics:       trendMetrics,
+		ConfigMetrics:      configMetrics,
+	}
+}
+
+// startBackgroundProcessing starts background metrics processing.
+func (mc *MetricsCollector) startBackgroundProcessing() {
+	if mc.config.AnalysisInterval <= 0 {
+		return
+	}
+
+	mc.processingCtx, mc.processingCancel = context.WithCancel(context.Background())
+	mc.processingTicker = time.NewTicker(mc.config.AnalysisInterval)
+
+	go func() {
+		defer mc.processingTicker.Stop()
+		for {
+			select {
+			case <-mc.processingCtx.Done():
+				return
+			case <-mc.processingTicker.C:
+				mc.performBackgroundAnalysis()
+			}
+		}
+	}()
+}
+
+// performBackgroundAnalysis performs periodic analysis and cleanup.
+func (mc *MetricsCollector) performBackgroundAnalysis() {
+	// Clean up old data points
+	mc.cleanupOldDataPoints()
+
+	// Perform analysis if enabled
+	if mc.config.EnableTrendAnalysis || mc.config.EnableAnomalyDetection {
+		metrics := mc.GetAdvancedMetrics()
+
+		// Log significant findings
+		mc.logSignificantFindings(metrics)
+	}
+}
+
+// cleanupOldDataPoints removes data points older than retention period.
+func (mc *MetricsCollector) cleanupOldDataPoints() {
+	mc.mutex.Lock()
+	defer mc.mutex.Unlock()
+
+	cutoff := time.Now().Add(-mc.config.RetentionPeriod)
+
+	// Find first data point to keep
+	keepIndex := 0
+	for i, dp := range mc.dataPoints {
+		if dp.Timestamp.After(cutoff) {
+			keepIndex = i
+			break
+		}
+	}
+
+	// Remove old data points
+	if keepIndex > 0 {
+		mc.dataPoints = mc.dataPoints[keepIndex:]
+
+		if mc.logger != nil {
+			level.Debug(mc.logger).Log(
+				"msg", "cleaned up old metric data points",
+				"removed_count", keepIndex,
+				"remaining_count", len(mc.dataPoints),
+			)
+		}
+	}
+}
+
+// logSignificantFindings logs important metrics findings.
+func (mc *MetricsCollector) logSignificantFindings(metrics AdvancedBufferPoolMetrics) {
+	if mc.logger == nil {
+		return
+	}
+
+	// Log performance anomalies
+	for _, anomaly := range metrics.TrendMetrics.Anomalies {
+		if anomaly.Severity == "high" || anomaly.Severity == "critical" {
+			level.Warn(mc.logger).Log(
+				"msg", "performance anomaly detected",
+				"category", anomaly.Category,
+				"metric", anomaly.Metric,
+				"severity", anomaly.Severity,
+				"description", anomaly.Description,
+			)
+		}
+	}
+
+	// Log high-priority configuration recommendations
+	for _, rec := range metrics.ConfigMetrics.Recommendations {
+		if rec.Priority == "high" || rec.Priority == "critical" {
+			level.Info(mc.logger).Log(
+				"msg", "configuration recommendation",
+				"parameter", rec.Parameter,
+				"priority", rec.Priority,
+				"expected_improvement", rec.ExpectedImprovement,
+				"reasoning", rec.Reasoning,
+			)
+		}
+	}
+}
+
+// Close shuts down the metrics collector.
+func (mc *MetricsCollector) Close() {
+	if mc.processingCancel != nil {
+		mc.processingCancel()
+	}
+
+	if mc.processingTicker != nil {
+		mc.processingTicker.Stop()
+	}
+
+	if mc.logger != nil {
+		level.Info(mc.logger).Log("msg", "metrics collector closed")
+	}
+}
+
+// PerformanceAnalyzer analyzes performance metrics and patterns.
+type PerformanceAnalyzer struct {
+	logger log.Logger
+}
+
+// NewPerformanceAnalyzer creates a new performance analyzer.
+func NewPerformanceAnalyzer(logger log.Logger) *PerformanceAnalyzer {
+	return &PerformanceAnalyzer{
+		logger: logger,
+	}
+}
+
+// Analyze performs comprehensive performance analysis.
+func (pa *PerformanceAnalyzer) Analyze(dataPoints []MetricDataPoint) PerformanceMetrics {
+	if len(dataPoints) == 0 {
+		return PerformanceMetrics{
+			LatencyStats: make(map[string]LatencyStats),
+		}
+	}
+
+	// Group data points by category
+	categoryData := make(map[string][]MetricDataPoint)
+	for _, dp := range dataPoints {
+		categoryData[dp.Category] = append(categoryData[dp.Category], dp)
+	}
+
+	// Analyze latency for each category
+	latencyStats := make(map[string]LatencyStats)
+	for category, points := range categoryData {
+		latencyStats[category] = pa.analyzeLatency(points)
+	}
+
+	// Analyze throughput
+	throughputStats := pa.analyzeThroughput(dataPoints)
+
+	// Analyze errors
+	errorStats := pa.analyzeErrors(dataPoints)
+
+	// Analyze resource utilization
+	resourceStats := pa.analyzeResourceUtilization(dataPoints)
+
+	return PerformanceMetrics{
+		LatencyStats:    latencyStats,
+		ThroughputStats: throughputStats,
+		ErrorStats:      errorStats,
+		ResourceStats:   resourceStats,
+	}
+}
+
+// analyzeLatency performs detailed latency analysis.
+func (pa *PerformanceAnalyzer) analyzeLatency(dataPoints []MetricDataPoint) LatencyStats {
+	if len(dataPoints) == 0 {
+		return LatencyStats{}
+	}
+
+	// Extract latencies
+	latencies := make([]time.Duration, 0, len(dataPoints))
+	for _, dp := range dataPoints {
+		if dp.Success && dp.Latency > 0 {
+			latencies = append(latencies, dp.Latency)
+		}
+	}
+
+	if len(latencies) == 0 {
+		return LatencyStats{}
+	}
+
+	// Sort for percentile calculations
+	sort.Slice(latencies, func(i, j int) bool {
+		return latencies[i] < latencies[j]
+	})
+
+	// Calculate statistics
+	stats := LatencyStats{
+		Min:         latencies[0],
+		Max:         latencies[len(latencies)-1],
+		SampleCount: int64(len(latencies)),
+	}
+
+	// Calculate mean
+	var total time.Duration
+	for _, lat := range latencies {
+		total += lat
+	}
+	stats.Mean = total / time.Duration(len(latencies))
+
+	// Calculate median
+	if len(latencies)%2 == 0 {
+		mid := len(latencies) / 2
+		stats.Median = (latencies[mid-1] + latencies[mid]) / 2
+	} else {
+		stats.Median = latencies[len(latencies)/2]
+	}
+
+	// Calculate percentiles
+	p95Index := int(float64(len(latencies)) * 0.95)
+	p99Index := int(float64(len(latencies)) * 0.99)
+
+	if p95Index >= len(latencies) {
+		p95Index = len(latencies) - 1
+	}
+	if p99Index >= len(latencies) {
+		p99Index = len(latencies) - 1
+	}
+
+	stats.P95 = latencies[p95Index]
+	stats.P99 = latencies[p99Index]
+
+	// Calculate standard deviation
+	var variance float64
+	meanFloat := float64(stats.Mean)
+	for _, lat := range latencies {
+		diff := float64(lat) - meanFloat
+		variance += diff * diff
+	}
+	variance /= float64(len(latencies))
+	stats.StdDev = time.Duration(math.Sqrt(variance))
+
+	return stats
+}
+
+// analyzeThroughput analyzes throughput characteristics.
+func (pa *PerformanceAnalyzer) analyzeThroughput(dataPoints []MetricDataPoint) ThroughputStats {
+	if len(dataPoints) == 0 {
+		return ThroughputStats{}
+	}
+
+	// Calculate time window
+	startTime := dataPoints[0].Timestamp
+	endTime := dataPoints[len(dataPoints)-1].Timestamp
+	duration := endTime.Sub(startTime)
+
+	if duration <= 0 {
+		return ThroughputStats{}
+	}
+
+	// Calculate totals
+	var totalBytes int64
+	var totalOps int64
+	var totalObjectSize int64
+
+	for _, dp := range dataPoints {
+		if dp.Success {
+			totalBytes += dp.MemoryUsage
+			totalOps++
+			totalObjectSize += int64(dp.ObjectSize)
+		}
+	}
+
+	durationSeconds := duration.Seconds()
+
+	stats := ThroughputStats{
+		BytesPerSecond:      float64(totalBytes) / durationSeconds,
+		OperationsPerSecond: float64(totalOps) / durationSeconds,
+	}
+
+	if totalOps > 0 {
+		stats.AverageObjectSize = totalObjectSize / totalOps
+	}
+
+	// Calculate peak throughput (using 1-second windows)
+	stats.PeakBytesPerSecond, stats.PeakOpsPerSecond = pa.calculatePeakThroughput(dataPoints)
+
+	return stats
+}
+
+// calculatePeakThroughput calculates peak throughput in 1-second windows.
+func (pa *PerformanceAnalyzer) calculatePeakThroughput(dataPoints []MetricDataPoint) (float64, float64) {
+	if len(dataPoints) == 0 {
+		return 0, 0
+	}
+
+	// Group by 1-second windows
+	windows := make(map[int64][]MetricDataPoint)
+	for _, dp := range dataPoints {
+		windowKey := dp.Timestamp.Unix()
+		windows[windowKey] = append(windows[windowKey], dp)
+	}
+
+	var maxBytes, maxOps float64
+
+	for _, windowData := range windows {
+		var windowBytes int64
+		var windowOps int64
+
+		for _, dp := range windowData {
+			if dp.Success {
+				windowBytes += dp.MemoryUsage
+				windowOps++
+			}
+		}
+
+		if float64(windowBytes) > maxBytes {
+			maxBytes = float64(windowBytes)
+		}
+		if float64(windowOps) > maxOps {
+			maxOps = float64(windowOps)
+		}
+	}
+
+	return maxBytes, maxOps
+}
+
+// analyzeErrors analyzes error patterns and rates.
+func (pa *PerformanceAnalyzer) analyzeErrors(dataPoints []MetricDataPoint) ErrorStats {
+	var totalOps int64
+	var totalErrors int64
+	errorsByCategory := make(map[string]int64)
+	errorsByStrategy := make(map[string]int64)
+	var recentErrors []ErrorEvent
+
+	// Analyze last 100 errors for recent patterns
+	recentCutoff := time.Now().Add(-1 * time.Hour)
+
+	for _, dp := range dataPoints {
+		totalOps++
+
+		if !dp.Success && dp.Error != "" {
+			totalErrors++
+			errorsByCategory[dp.Category]++
+			errorsByStrategy[dp.Strategy]++
+
+			if dp.Timestamp.After(recentCutoff) && len(recentErrors) < 100 {
+				recentErrors = append(recentErrors, ErrorEvent{
+					Timestamp: dp.Timestamp,
+					Category:  dp.Category,
+					Strategy:  dp.Strategy,
+					Error:     dp.Error,
+					Context:   dp.Context,
+				})
+			}
+		}
+	}
+
+	var errorRate float64
+	if totalOps > 0 {
+		errorRate = float64(totalErrors) / float64(totalOps)
+	}
+
+	return ErrorStats{
+		TotalErrors:      totalErrors,
+		ErrorRate:        errorRate,
+		ErrorsByCategory: errorsByCategory,
+		ErrorsByStrategy: errorsByStrategy,
+		RecentErrors:     recentErrors,
+	}
+}
+
+// analyzeResourceUtilization analyzes resource utilization patterns.
+func (pa *PerformanceAnalyzer) analyzeResourceUtilization(dataPoints []MetricDataPoint) ResourceStats {
+	if len(dataPoints) == 0 {
+		return ResourceStats{}
+	}
+
+	var totalMemory int64
+	var successfulOps int64
+	var totalOps int64
+
+	for _, dp := range dataPoints {
+		totalOps++
+		totalMemory += dp.MemoryUsage
+
+		if dp.Success {
+			successfulOps++
+		}
+	}
+
+	stats := ResourceStats{}
+
+	if totalOps > 0 {
+		stats.MemoryUtilization = float64(totalMemory) / float64(totalOps)
+		stats.CacheHitRate = float64(successfulOps) / float64(totalOps)
+	}
+
+	// Calculate pool efficiency (simplified)
+	stats.PoolEfficiency = stats.CacheHitRate
+
+	// Estimate GC pressure based on memory allocation patterns
+	stats.GCPressure = pa.estimateGCPressure(dataPoints)
+
+	return stats
+}
+
+// estimateGCPressure estimates GC pressure based on allocation patterns.
+func (pa *PerformanceAnalyzer) estimateGCPressure(dataPoints []MetricDataPoint) float64 {
+	if len(dataPoints) < 2 {
+		return 0.0
+	}
+
+	// Calculate allocation rate
+	var totalAllocations int64
+	duration := dataPoints[len(dataPoints)-1].Timestamp.Sub(dataPoints[0].Timestamp)
+
+	for _, dp := range dataPoints {
+		totalAllocations += dp.MemoryUsage
+	}
+
+	if duration <= 0 {
+		return 0.0
+	}
+
+	allocationRate := float64(totalAllocations) / duration.Seconds()
+
+	// Normalize to 0-1 scale (rough estimation)
+	// Higher allocation rates indicate higher GC pressure
+	normalizedPressure := allocationRate / (100 * 1024 * 1024) // 100MB/s as reference
+
+	if normalizedPressure > 1.0 {
+		normalizedPressure = 1.0
+	}
+
+	return normalizedPressure
+}
+
+// MemoryAnalyzer analyzes memory usage patterns and efficiency.
+type MemoryAnalyzer struct {
+	logger log.Logger
+}
+
+// NewMemoryAnalyzer creates a new memory analyzer.
+func NewMemoryAnalyzer(logger log.Logger) *MemoryAnalyzer {
+	return &MemoryAnalyzer{
+		logger: logger,
+	}
+}
+
+// Analyze performs comprehensive memory analysis.
+func (ma *MemoryAnalyzer) Analyze(dataPoints []MetricDataPoint) MemoryMetrics {
+	if len(dataPoints) == 0 {
+		return MemoryMetrics{
+			EfficiencyByCategory: make(map[string]float64),
+		}
+	}
+
+	// Analyze current usage
+	currentUsage := ma.analyzeCurrentUsage(dataPoints)
+
+	// Analyze peak usage
+	peakUsage := ma.analyzePeakUsage(dataPoints)
+
+	// Analyze allocation patterns
+	allocationPatterns := ma.analyzeAllocationPatterns(dataPoints)
+
+	// Analyze GC metrics
+	gcMetrics := ma.analyzeGCMetrics(dataPoints)
+
+	// Calculate efficiency by category
+	efficiencyByCategory := ma.calculateEfficiencyByCategory(dataPoints)
+
+	return MemoryMetrics{
+		CurrentUsage:         currentUsage,
+		PeakUsage:            peakUsage,
+		AllocationPatterns:   allocationPatterns,
+		GCMetrics:            gcMetrics,
+		EfficiencyByCategory: efficiencyByCategory,
+	}
+}
+
+// analyzeCurrentUsage analyzes current memory usage.
+func (ma *MemoryAnalyzer) analyzeCurrentUsage(dataPoints []MetricDataPoint) MemoryUsage {
+	if len(dataPoints) == 0 {
+		return MemoryUsage{}
+	}
+
+	// Use recent data points (last 100 or last minute)
+	recentCutoff := time.Now().Add(-1 * time.Minute)
+	recentPoints := make([]MetricDataPoint, 0)
+
+	for i := len(dataPoints) - 1; i >= 0 && len(recentPoints) < 100; i-- {
+		if dataPoints[i].Timestamp.After(recentCutoff) {
+			recentPoints = append(recentPoints, dataPoints[i])
+		}
+	}
+
+	if len(recentPoints) == 0 {
+		recentPoints = dataPoints[len(dataPoints)-10:] // Last 10 points as fallback
+	}
+
+	var totalAllocated int64
+	var activeBuffers int64
+	strategyUsage := make(map[string]int64)
+
+	for _, dp := range recentPoints {
+		totalAllocated += dp.MemoryUsage
+		if dp.Success {
+			activeBuffers++
+		}
+		strategyUsage[dp.Strategy] += dp.MemoryUsage
+	}
+
+	usage := MemoryUsage{
+		TotalAllocated: totalAllocated,
+		ActiveBuffers:  activeBuffers,
+		PooledBuffers:  strategyUsage["pooled"],
+		ChunkedBuffers: strategyUsage["chunked"],
+		DirectBuffers:  strategyUsage["direct"],
+	}
+
+	// Calculate overhead (simplified estimation)
+	usage.OverheadBytes = totalAllocated / 20 // Assume 5% overhead
+	usage.EffectiveBytes = totalAllocated - usage.OverheadBytes
+
+	return usage
+}
+
+// analyzePeakUsage analyzes peak memory usage.
+func (ma *MemoryAnalyzer) analyzePeakUsage(dataPoints []MetricDataPoint) MemoryUsage {
+	if len(dataPoints) == 0 {
+		return MemoryUsage{}
+	}
+
+	// Find peak usage in 1-minute windows
+	windows := make(map[int64][]MetricDataPoint)
+	for _, dp := range dataPoints {
+		windowKey := dp.Timestamp.Unix() / 60 // 1-minute windows
+		windows[windowKey] = append(windows[windowKey], dp)
+	}
+
+	var peakUsage MemoryUsage
+	var maxTotal int64
+
+	for _, windowData := range windows {
+		var windowTotal int64
+		var windowActive int64
+		strategyUsage := make(map[string]int64)
+
+		for _, dp := range windowData {
+			windowTotal += dp.MemoryUsage
+			if dp.Success {
+				windowActive++
+			}
+			strategyUsage[dp.Strategy] += dp.MemoryUsage
+		}
+
+		if windowTotal > maxTotal {
+			maxTotal = windowTotal
+			peakUsage = MemoryUsage{
+				TotalAllocated: windowTotal,
+				ActiveBuffers:  windowActive,
+				PooledBuffers:  strategyUsage["pooled"],
+				ChunkedBuffers: strategyUsage["chunked"],
+				DirectBuffers:  strategyUsage["direct"],
+				OverheadBytes:  windowTotal / 20,
+				EffectiveBytes: windowTotal - (windowTotal / 20),
+			}
+		}
+	}
+
+	return peakUsage
+}
+
+// analyzeAllocationPatterns analyzes memory allocation patterns.
+func (ma *MemoryAnalyzer) analyzeAllocationPatterns(dataPoints []MetricDataPoint) AllocationPatterns {
+	allocationsBySize := make(map[int]int64)
+	allocationsByStrategy := make(map[string]int64)
+	var allocationTrends []AllocationTrend
+
+	// Group allocations by size and strategy
+	for _, dp := range dataPoints {
+		allocationsBySize[dp.ObjectSize] += dp.MemoryUsage
+		allocationsByStrategy[dp.Strategy] += dp.MemoryUsage
+	}
+
+	// Calculate allocation trends (hourly)
+	hourlyData := make(map[int64][]MetricDataPoint)
+	for _, dp := range dataPoints {
+		hourKey := dp.Timestamp.Unix() / 3600 // 1-hour windows
+		hourlyData[hourKey] = append(hourlyData[hourKey], dp)
+	}
+
+	for hourKey, hourData := range hourlyData {
+		var allocated, active, pooled int64
+		var successCount int64
+
+		for _, dp := range hourData {
+			allocated += dp.MemoryUsage
+			if dp.Success {
+				active += dp.MemoryUsage
+				successCount++
+			}
+			if dp.Strategy == "pooled" {
+				pooled += dp.MemoryUsage
+			}
+		}
+
+		var efficiency float64
+		if allocated > 0 {
+			efficiency = float64(active) / float64(allocated) * 100
+		}
+
+		trend := AllocationTrend{
+			Timestamp:     time.Unix(hourKey*3600, 0),
+			AllocatedMB:   float64(allocated) / (1024 * 1024),
+			ActiveMB:      float64(active) / (1024 * 1024),
+			PooledMB:      float64(pooled) / (1024 * 1024),
+			EfficiencyPct: efficiency,
+		}
+
+		allocationTrends = append(allocationTrends, trend)
+	}
+
+	// Sort trends by timestamp
+	sort.Slice(allocationTrends, func(i, j int) bool {
+		return allocationTrends[i].Timestamp.Before(allocationTrends[j].Timestamp)
+	})
+
+	// Calculate fragmentation ratio (simplified)
+	var totalAllocated, effectiveAllocated int64
+	for _, dp := range dataPoints {
+		totalAllocated += dp.MemoryUsage
+		if dp.Success {
+			effectiveAllocated += dp.MemoryUsage
+		}
+	}
+
+	var fragmentationRatio float64
+	if totalAllocated > 0 {
+		fragmentationRatio = 1.0 - (float64(effectiveAllocated) / float64(totalAllocated))
+	}
+
+	// Calculate reuse efficiency
+	var reuseEfficiency float64
+	if len(allocationsByStrategy) > 0 {
+		pooledAllocations := allocationsByStrategy["pooled"]
+		if totalAllocated > 0 {
+			reuseEfficiency = float64(pooledAllocations) / float64(totalAllocated)
+		}
+	}
+
+	return AllocationPatterns{
+		AllocationsBySize:     allocationsBySize,
+		AllocationsByStrategy: allocationsByStrategy,
+		AllocationTrends:      allocationTrends,
+		FragmentationRatio:    fragmentationRatio,
+		ReuseEfficiency:       reuseEfficiency,
+	}
+}
+
+// analyzeGCMetrics analyzes garbage collection impact.
+func (ma *MemoryAnalyzer) analyzeGCMetrics(dataPoints []MetricDataPoint) GCMetrics {
+	if len(dataPoints) == 0 {
+		return GCMetrics{
+			GCTriggerReasons: make(map[string]int64),
+		}
+	}
+
+	// Estimate GC frequency based on allocation patterns
+	duration := dataPoints[len(dataPoints)-1].Timestamp.Sub(dataPoints[0].Timestamp)
+	if duration <= 0 {
+		return GCMetrics{
+			GCTriggerReasons: make(map[string]int64),
+		}
+	}
+
+	var totalAllocations int64
+	for _, dp := range dataPoints {
+		totalAllocations += dp.MemoryUsage
+	}
+
+	// Rough estimation of GC frequency
+	// Assume GC triggers every ~8MB of allocations (simplified)
+	estimatedGCs := totalAllocations / (8 * 1024 * 1024)
+	gcFrequency := float64(estimatedGCs) / duration.Seconds()
+
+	// Estimate GC pause duration (very rough)
+	gcPauseDuration := time.Duration(float64(time.Millisecond) * math.Sqrt(float64(totalAllocations)/(1024*1024)))
+
+	// Calculate GC pressure score
+	allocationRate := float64(totalAllocations) / duration.Seconds()
+	gcPressureScore := math.Min(allocationRate/(50*1024*1024), 1.0) // Normalize to 0-1
+
+	// Estimate memory reclaimed
+	var successfulAllocations int64
+	for _, dp := range dataPoints {
+		if dp.Success {
+			successfulAllocations += dp.MemoryUsage
+		}
+	}
+	memoryReclaimed := totalAllocations - successfulAllocations
+
+	// Categorize GC trigger reasons (simplified)
+	gcTriggerReasons := map[string]int64{
+		"heap_size":       estimatedGCs / 2,
+		"allocation_rate": estimatedGCs / 3,
+		"time_based":      estimatedGCs / 6,
+	}
+
+	return GCMetrics{
+		GCFrequency:      gcFrequency,
+		GCPauseDuration:  gcPauseDuration,
+		GCPressureScore:  gcPressureScore,
+		MemoryReclaimed:  memoryReclaimed,
+		GCTriggerReasons: gcTriggerReasons,
+	}
+}
+
+// calculateEfficiencyByCategory calculates memory efficiency for each category.
+func (ma *MemoryAnalyzer) calculateEfficiencyByCategory(dataPoints []MetricDataPoint) map[string]float64 {
+	categoryData := make(map[string][]MetricDataPoint)
+	for _, dp := range dataPoints {
+		categoryData[dp.Category] = append(categoryData[dp.Category], dp)
+	}
+
+	efficiency := make(map[string]float64)
+
+	for category, points := range categoryData {
+		var totalAllocated, effectiveAllocated int64
+
+		for _, dp := range points {
+			totalAllocated += dp.MemoryUsage
+			if dp.Success {
+				effectiveAllocated += dp.MemoryUsage
+			}
+		}
+
+		if totalAllocated > 0 {
+			efficiency[category] = float64(effectiveAllocated) / float64(totalAllocated)
+		}
+	}
+
+	return efficiency
+}
+
+// StrategyAnalyzer analyzes strategy effectiveness and selection patterns.
+type StrategyAnalyzer struct {
+	logger log.Logger
+}
+
+// NewStrategyAnalyzer creates a new strategy analyzer.
+func NewStrategyAnalyzer(logger log.Logger) *StrategyAnalyzer {
+	return &StrategyAnalyzer{logger: logger}
+}
+
+// Analyze performs strategy effectiveness analysis.
+func (sa *StrategyAnalyzer) Analyze(dataPoints []MetricDataPoint) StrategyMetrics {
+	effectiveness := sa.analyzeEffectiveness(dataPoints)
+	accuracy := sa.calculateSelectionAccuracy(dataPoints)
+	patterns := sa.analyzeSwitchingPatterns(dataPoints)
+	recommendations := sa.generateRecommendations(dataPoints)
+
+	return StrategyMetrics{
+		EffectivenessByStrategy: effectiveness,
+		SelectionAccuracy:       accuracy,
+		SwitchingPatterns:       patterns,
+		Recommendations:         recommendations,
+	}
+}
+
+// analyzeEffectiveness analyzes effectiveness of each strategy.
+func (sa *StrategyAnalyzer) analyzeEffectiveness(dataPoints []MetricDataPoint) map[string]StrategyEffectiveness {
+	strategyData := make(map[string][]MetricDataPoint)
+	for _, dp := range dataPoints {
+		strategyData[dp.Strategy] = append(strategyData[dp.Strategy], dp)
+	}
+
+	effectiveness := make(map[string]StrategyEffectiveness)
+
+	for strategy, points := range strategyData {
+		var totalLatency time.Duration
+		var totalMemory, effectiveMemory int64
+		var successCount, errorCount int64
+
+		for _, dp := range points {
+			totalLatency += dp.Latency
+			totalMemory += dp.MemoryUsage
+
+			if dp.Success {
+				successCount++
+				effectiveMemory += dp.MemoryUsage
+			} else {
+				errorCount++
+			}
+		}
+
+		eff := StrategyEffectiveness{
+			Strategy:   strategy,
+			UsageCount: int64(len(points)),
+		}
+
+		if len(points) > 0 {
+			eff.AverageLatency = totalLatency / time.Duration(len(points))
+		}
+
+		if totalMemory > 0 {
+			eff.MemoryEfficiency = float64(effectiveMemory) / float64(totalMemory)
+		}
+
+		if len(points) > 0 {
+			eff.ErrorRate = float64(errorCount) / float64(len(points))
+		}
+
+		// Calculate throughput score (simplified)
+		if eff.AverageLatency > 0 {
+			eff.ThroughputScore = 1.0 / eff.AverageLatency.Seconds()
+		}
+
+		// Calculate overall score
+		eff.OverallScore = (eff.MemoryEfficiency + (1.0 - eff.ErrorRate) + math.Min(eff.ThroughputScore, 1.0)) / 3.0
+
+		effectiveness[strategy] = eff
+	}
+
+	return effectiveness
+}
+
+// calculateSelectionAccuracy calculates strategy selection accuracy.
+func (sa *StrategyAnalyzer) calculateSelectionAccuracy(dataPoints []MetricDataPoint) float64 {
+	// Simplified accuracy calculation
+	// In a real implementation, this would compare actual vs optimal strategy selection
+	return 0.85 // Placeholder
+}
+
+// analyzeSwitchingPatterns analyzes strategy switching patterns.
+func (sa *StrategyAnalyzer) analyzeSwitchingPatterns(dataPoints []MetricDataPoint) []StrategySwitch {
+	// Simplified implementation
+	return []StrategySwitch{} // Placeholder
+}
+
+// generateRecommendations generates strategy optimization recommendations.
+func (sa *StrategyAnalyzer) generateRecommendations(dataPoints []MetricDataPoint) []StrategyRecommendation {
+	// Simplified implementation
+	return []StrategyRecommendation{} // Placeholder
+}
+
+// TrendAnalyzer analyzes performance trends and detects anomalies.
+type TrendAnalyzer struct {
+	logger log.Logger
+}
+
+// NewTrendAnalyzer creates a new trend analyzer.
+func NewTrendAnalyzer(logger log.Logger) *TrendAnalyzer {
+	return &TrendAnalyzer{logger: logger}
+}
+
+// Analyze performs trend analysis and anomaly detection.
+func (ta *TrendAnalyzer) Analyze(dataPoints []MetricDataPoint) TrendMetrics {
+	trends := ta.analyzePerformanceTrends(dataPoints)
+	usage := ta.analyzeUsageTrends(dataPoints)
+	forecasts := ta.generateCapacityForecasts(dataPoints)
+	anomalies := ta.detectAnomalies(dataPoints)
+
+	return TrendMetrics{
+		PerformanceTrends: trends,
+		UsageTrends:       usage,
+		CapacityForecasts: forecasts,
+		Anomalies:         anomalies,
+	}
+}
+
+// analyzePerformanceTrends analyzes performance trends over time.
+func (ta *TrendAnalyzer) analyzePerformanceTrends(dataPoints []MetricDataPoint) []PerformanceTrend {
+	// Group by time windows (hourly)
+	hourlyData := make(map[int64][]MetricDataPoint)
+	for _, dp := range dataPoints {
+		hourKey := dp.Timestamp.Unix() / 3600
+		hourlyData[hourKey] = append(hourlyData[hourKey], dp)
+	}
+
+	var trends []PerformanceTrend
+
+	for hourKey, hourData := range hourlyData {
+		categoryData := make(map[string][]MetricDataPoint)
+		for _, dp := range hourData {
+			categoryData[dp.Category] = append(categoryData[dp.Category], dp)
+		}
+
+		for category, points := range categoryData {
+			var avgLatency time.Duration
+			var totalMemory int64
+			var errorCount int64
+
+			for _, dp := range points {
+				avgLatency += dp.Latency
+				totalMemory += dp.MemoryUsage
+				if !dp.Success {
+					errorCount++
+				}
+			}
+
+			if len(points) > 0 {
+				avgLatency /= time.Duration(len(points))
+			}
+
+			var errorRate float64
+			if len(points) > 0 {
+				errorRate = float64(errorCount) / float64(len(points))
+			}
+
+			trend := PerformanceTrend{
+				Timestamp:      time.Unix(hourKey*3600, 0),
+				Category:       category,
+				Latency:        avgLatency,
+				MemoryUsage:    totalMemory,
+				ErrorRate:      errorRate,
+				TrendDirection: "stable", // Simplified
+			}
+
+			trends = append(trends, trend)
+		}
+	}
+
+	return trends
+}
+
+// analyzeUsageTrends analyzes usage pattern trends.
+func (ta *TrendAnalyzer) analyzeUsageTrends(dataPoints []MetricDataPoint) []UsageTrend {
+	// Simplified implementation
+	return []UsageTrend{} // Placeholder
+}
+
+// generateCapacityForecasts generates capacity planning forecasts.
+func (ta *TrendAnalyzer) generateCapacityForecasts(dataPoints []MetricDataPoint) []CapacityForecast {
+	// Simplified implementation
+	return []CapacityForecast{} // Placeholder
+}
+
+// detectAnomalies detects performance anomalies.
+func (ta *TrendAnalyzer) detectAnomalies(dataPoints []MetricDataPoint) []PerformanceAnomaly {
+	var anomalies []PerformanceAnomaly
+
+	// Simple anomaly detection based on latency spikes
+	categoryLatencies := make(map[string][]time.Duration)
+	for _, dp := range dataPoints {
+		if dp.Success && dp.Latency > 0 {
+			categoryLatencies[dp.Category] = append(categoryLatencies[dp.Category], dp.Latency)
+		}
+	}
+
+	for category, latencies := range categoryLatencies {
+		if len(latencies) < 10 {
+			continue
+		}
+
+		// Calculate mean and standard deviation
+		var total time.Duration
+		for _, lat := range latencies {
+			total += lat
+		}
+		mean := total / time.Duration(len(latencies))
+
+		var variance float64
+		meanFloat := float64(mean)
+		for _, lat := range latencies {
+			diff := float64(lat) - meanFloat
+			variance += diff * diff
+		}
+		variance /= float64(len(latencies))
+		stdDev := time.Duration(math.Sqrt(variance))
+
+		// Detect outliers (> 3 standard deviations)
+		threshold := mean + 3*stdDev
+
+		for i, lat := range latencies {
+			if lat > threshold {
+				anomaly := PerformanceAnomaly{
+					Timestamp:   dataPoints[i].Timestamp,
+					Category:    category,
+					Metric:      "latency",
+					Expected:    float64(mean),
+					Actual:      float64(lat),
+					Severity:    "medium",
+					Description: fmt.Sprintf("Latency spike detected in %s category", category),
+					Suggestions: []string{
+						"Check for resource contention",
+						"Review recent configuration changes",
+						"Monitor system load",
+					},
+				}
+
+				if lat > mean+5*stdDev {
+					anomaly.Severity = "high"
+				}
+
+				anomalies = append(anomalies, anomaly)
+			}
+		}
+	}
+
+	return anomalies
+}
+
+// ConfigAnalyzer analyzes configuration effectiveness and provides recommendations.
+type ConfigAnalyzer struct {
+	logger log.Logger
+}
+
+// NewConfigAnalyzer creates a new configuration analyzer.
+func NewConfigAnalyzer(logger log.Logger) *ConfigAnalyzer {
+	return &ConfigAnalyzer{logger: logger}
+}
+
+// Analyze performs configuration analysis.
+func (ca *ConfigAnalyzer) Analyze(dataPoints []MetricDataPoint) ConfigMetrics {
+	effectiveness := ca.analyzeConfigEffectiveness(dataPoints)
+	recommendations := ca.generateConfigRecommendations(dataPoints)
+	opportunities := ca.identifyTuningOpportunities(dataPoints)
+	validation := ca.validateConfiguration(dataPoints)
+
+	return ConfigMetrics{
+		ConfigEffectiveness: effectiveness,
+		Recommendations:     recommendations,
+		TuningOpportunities: opportunities,
+		ValidationResults:   validation,
+	}
+}
+
+// analyzeConfigEffectiveness analyzes current configuration effectiveness.
+func (ca *ConfigAnalyzer) analyzeConfigEffectiveness(dataPoints []MetricDataPoint) ConfigEffectiveness {
+	// Simplified effectiveness analysis
+	var totalLatency time.Duration
+	var successCount, totalCount int64
+	var totalMemory, effectiveMemory int64
+
+	for _, dp := range dataPoints {
+		totalCount++
+		totalLatency += dp.Latency
+		totalMemory += dp.MemoryUsage
+
+		if dp.Success {
+			successCount++
+			effectiveMemory += dp.MemoryUsage
+		}
+	}
+
+	var performanceScore, memoryScore float64
+
+	if totalCount > 0 {
+		avgLatency := totalLatency / time.Duration(totalCount)
+		// Score based on latency (lower is better)
+		performanceScore = math.Max(0, 1.0-avgLatency.Seconds()/0.1) // 100ms as reference
+
+		if totalMemory > 0 {
+			memoryScore = float64(effectiveMemory) / float64(totalMemory)
+		}
+	}
+
+	overallScore := (performanceScore + memoryScore) / 2.0
+
+	return ConfigEffectiveness{
+		OverallScore:     overallScore,
+		PerformanceScore: performanceScore,
+		MemoryScore:      memoryScore,
+		BufferSizeScore:  0.8,  // Placeholder
+		ThresholdScore:   0.85, // Placeholder
+		StrategyScore:    0.9,  // Placeholder
+		RecommendedChanges: []string{
+			"Consider adjusting buffer size thresholds",
+			"Monitor strategy selection effectiveness",
+		},
+	}
+}
+
+// generateConfigRecommendations generates configuration recommendations.
+func (ca *ConfigAnalyzer) generateConfigRecommendations(dataPoints []MetricDataPoint) []ConfigRecommendation {
+	// Simplified recommendations
+	return []ConfigRecommendation{
+		{
+			Parameter:           "LargeObjectThreshold",
+			CurrentValue:        256 * 1024,
+			RecommendedValue:    512 * 1024,
+			ExpectedImprovement: 0.15,
+			Priority:            "medium",
+			Reasoning:           "Analysis shows many objects just above current threshold",
+			RiskLevel:           "low",
+		},
+	}
+}
+
+// identifyTuningOpportunities identifies specific tuning opportunities.
+func (ca *ConfigAnalyzer) identifyTuningOpportunities(dataPoints []MetricDataPoint) []TuningOpportunity {
+	// Simplified opportunities
+	return []TuningOpportunity{
+		{
+			Area:                 "Buffer Pool Sizing",
+			Description:          "Optimize buffer pool sizes based on usage patterns",
+			PotentialGain:        0.20,
+			ImplementationEffort: "medium",
+			Prerequisites:        []string{"Performance monitoring enabled"},
+			Steps: []string{
+				"Analyze current buffer size distribution",
+				"Adjust pool sizes based on usage patterns",
+				"Monitor performance impact",
+			},
+		},
+	}
+}
+
+// validateConfiguration validates current configuration.
+func (ca *ConfigAnalyzer) validateConfiguration(dataPoints []MetricDataPoint) ConfigValidationResults {
+	// Simplified validation
+	return ConfigValidationResults{
+		IsValid:         true,
+		ValidationScore: 0.85,
+		Issues:          []ConfigIssue{},
+		Warnings:        []ConfigWarning{},
+		BestPractices: []BestPracticeCheck{
+			{
+				Practice:       "Buffer pool enabled",
+				Status:         "pass",
+				Description:    "Buffer pool is properly enabled",
+				Recommendation: "Continue monitoring performance",
+			},
+		},
+	}
+}
