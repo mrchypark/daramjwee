@@ -966,3 +966,210 @@ func WithBufferPoolAdvanced(config BufferPoolConfig) Option {
 		return nil
 	}
 }
+
+// WithLargeObjectOptimization enables adaptive buffer pool with large object optimization.
+//
+// This option configures the cache to use adaptive buffer management strategies
+// based on object size, providing optimal performance across different data sizes.
+// It addresses performance degradation observed with large objects in standard buffer pools.
+//
+// Parameters:
+//   - largeThreshold: Size threshold for large object detection (e.g., 256KB)
+//   - veryLargeThreshold: Size threshold for very large objects (e.g., 1MB)
+//   - chunkSize: Chunk size for streaming operations (e.g., 64KB)
+//   - maxConcurrentLargeOps: Maximum concurrent large object operations
+//
+// Performance benefits:
+//   - Eliminates performance degradation for large objects (256KB+)
+//   - Maintains optimal performance for small and medium objects
+//   - Reduces memory pressure and GC overhead for large transfers
+//   - Provides adaptive strategy selection based on object size
+//
+// Example usage:
+//
+//	// Enable large object optimization with default settings
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithLargeObjectOptimization(256*1024, 1024*1024, 64*1024, 4),
+//	    // ... other options
+//	)
+//
+//	// Conservative settings for memory-constrained environments
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithLargeObjectOptimization(128*1024, 512*1024, 32*1024, 2),
+//	    // ... other options
+//	)
+//
+//	// Aggressive settings for high-memory systems
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithLargeObjectOptimization(512*1024, 2048*1024, 128*1024, 8),
+//	    // ... other options
+//	)
+//
+// Configuration guidelines:
+//   - largeThreshold should be larger than MaxBufferSize
+//   - veryLargeThreshold should be larger than largeThreshold
+//   - chunkSize should be optimized for I/O patterns (typically 64KB-128KB)
+//   - maxConcurrentLargeOps should consider available memory and I/O capacity
+//
+// Use cases:
+//   - Applications handling mixed object sizes
+//   - Systems experiencing performance issues with large objects
+//   - High-throughput scenarios with variable data sizes
+//   - Memory-efficient processing of large data streams
+func WithLargeObjectOptimization(largeThreshold, veryLargeThreshold, chunkSize, maxConcurrentLargeOps int) Option {
+	return func(cfg *Config) error {
+		if largeThreshold <= 0 {
+			return &ConfigError{"large object threshold must be positive"}
+		}
+		if veryLargeThreshold <= largeThreshold {
+			return &ConfigError{"very large object threshold must be larger than large object threshold"}
+		}
+		if chunkSize <= 0 {
+			return &ConfigError{"chunk size must be positive"}
+		}
+		if maxConcurrentLargeOps <= 0 {
+			return &ConfigError{"max concurrent large operations must be positive"}
+		}
+
+		// Enable buffer pool if not already configured
+		if !cfg.BufferPool.Enabled {
+			cfg.BufferPool.Enabled = true
+			if cfg.BufferPool.DefaultBufferSize <= 0 {
+				cfg.BufferPool.DefaultBufferSize = 32 * 1024 // 32KB default
+			}
+			if cfg.BufferPool.MaxBufferSize <= 0 {
+				cfg.BufferPool.MaxBufferSize = 64 * 1024 // 64KB default
+			}
+			if cfg.BufferPool.MinBufferSize <= 0 {
+				cfg.BufferPool.MinBufferSize = 4 * 1024 // 4KB default
+			}
+		}
+
+		// Validate that large threshold is larger than max buffer size
+		if largeThreshold <= cfg.BufferPool.MaxBufferSize {
+			return &ConfigError{"large object threshold must be larger than max buffer size"}
+		}
+
+		cfg.BufferPool.LargeObjectThreshold = largeThreshold
+		cfg.BufferPool.VeryLargeObjectThreshold = veryLargeThreshold
+		cfg.BufferPool.ChunkSize = chunkSize
+		cfg.BufferPool.MaxConcurrentLargeOps = maxConcurrentLargeOps
+		cfg.BufferPool.LargeObjectStrategy = StrategyAdaptive
+		cfg.BufferPool.EnableDetailedMetrics = true
+
+		return nil
+	}
+}
+
+// WithAdaptiveBufferPool provides comprehensive configuration for adaptive buffer pool behavior.
+//
+// This option allows fine-grained control over all adaptive buffer pool parameters,
+// including size thresholds, strategies, and performance monitoring settings.
+//
+// Parameters:
+//   - config: Complete BufferPoolConfig with adaptive settings
+//
+// Advanced configuration example:
+//
+//	config := daramjwee.BufferPoolConfig{
+//	    // Basic buffer pool settings
+//	    Enabled:           true,
+//	    DefaultBufferSize: 32 * 1024,  // 32KB
+//	    MaxBufferSize:     128 * 1024, // 128KB
+//	    MinBufferSize:     4 * 1024,   // 4KB
+//
+//	    // Large object optimization settings
+//	    LargeObjectThreshold:     256 * 1024,  // 256KB
+//	    VeryLargeObjectThreshold: 1024 * 1024, // 1MB
+//	    LargeObjectStrategy:      daramjwee.StrategyAdaptive,
+//	    ChunkSize:                64 * 1024,   // 64KB
+//	    MaxConcurrentLargeOps:    4,
+//
+//	    // Monitoring and logging
+//	    EnableDetailedMetrics: true,
+//	    EnableLogging:         true,
+//	    LoggingInterval:       5 * time.Minute,
+//	}
+//
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithAdaptiveBufferPool(config),
+//	    // ... other options
+//	)
+//
+// Validation and error handling:
+//   - All configuration parameters are validated for consistency
+//   - Threshold values must be in ascending order
+//   - Strategy selection must be compatible with thresholds
+//   - Resource limits must be reasonable for the system
+//
+// Performance tuning guidelines:
+//   - Monitor metrics to optimize threshold values
+//   - Adjust chunk sizes based on I/O patterns
+//   - Configure concurrent operation limits based on available resources
+//   - Enable detailed metrics during tuning, disable in production if needed
+func WithAdaptiveBufferPool(config BufferPoolConfig) Option {
+	return func(cfg *Config) error {
+		// Validate adaptive-specific configuration
+		if err := config.validateAdaptive(); err != nil {
+			return err
+		}
+
+		cfg.BufferPool = config
+		return nil
+	}
+}
+
+// WithBufferPoolMetrics enables detailed metrics collection for buffer pool monitoring.
+//
+// This option enables comprehensive metrics collection for buffer pool performance
+// analysis, including size-category breakdowns and strategy effectiveness tracking.
+//
+// Parameters:
+//   - enabled: Whether to enable detailed metrics collection
+//   - loggingInterval: How often to log metrics (0 disables periodic logging)
+//
+// Metrics collected:
+//   - Operation counts by object size category
+//   - Strategy usage statistics
+//   - Performance latency by category
+//   - Memory efficiency measurements
+//   - Pool hit/miss ratios
+//
+// Example usage:
+//
+//	// Enable metrics with periodic logging every 5 minutes
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithBufferPoolMetrics(true, 5*time.Minute),
+//	    // ... other options
+//	)
+//
+//	// Enable metrics without periodic logging
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithBufferPoolMetrics(true, 0),
+//	    // ... other options
+//	)
+//
+//	// Disable detailed metrics for production
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithBufferPoolMetrics(false, 0),
+//	    // ... other options
+//	)
+//
+// Performance considerations:
+//   - Detailed metrics add minimal overhead
+//   - Periodic logging can increase log volume
+//   - Metrics are useful for performance tuning and troubleshooting
+//   - Consider disabling in stable production environments
+//
+// Monitoring integration:
+//   - Metrics can be exported to monitoring systems
+//   - Use GetStats() method to retrieve current metrics
+//   - Integrate with application performance monitoring (APM) tools
+func WithBufferPoolMetrics(enabled bool, loggingInterval time.Duration) Option {
+	return func(cfg *Config) error {
+		cfg.BufferPool.EnableDetailedMetrics = enabled
+		cfg.BufferPool.EnableLogging = enabled
+		cfg.BufferPool.LoggingInterval = loggingInterval
+		return nil
+	}
+}

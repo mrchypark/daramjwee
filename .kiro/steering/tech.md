@@ -43,7 +43,7 @@ go mod tidy          # Clean up dependencies
 - Stress tests for concurrent operations
 - Benchmark tests for performance validation
 - Race condition detection with `-race` flag
-- go test with timeout
+- go test with timeout all the time
 
 ## Code
 - code first and import with ide and check correct

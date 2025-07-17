@@ -3,6 +3,7 @@ package daramjwee
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,36 +233,45 @@ func TestAdaptiveBufferPool_LargeOpsSemaphore(t *testing.T) {
 	logger := log.NewNopLogger()
 	pool, err := NewAdaptiveBufferPool(config, logger)
 	require.NoError(t, err)
+	defer pool.Close()
 
 	ctx := context.Background()
 
 	// Acquire first slot
-	err = pool.acquireLargeOpSlot(ctx)
-	assert.NoError(t, err)
+	token1, err := pool.acquireLargeOpSlot(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, token1)
 
 	// Acquire second slot
-	err = pool.acquireLargeOpSlot(ctx)
-	assert.NoError(t, err)
+	token2, err := pool.acquireLargeOpSlot(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, token2)
 
-	// Third acquisition should block, so test with timeout
+	// Third acquisition should timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err = pool.acquireLargeOpSlot(ctx)
-	assert.Error(t, err)
-	assert.Equal(t, context.DeadlineExceeded, err)
+	token3, err := pool.acquireLargeOpSlot(ctx)
+	require.Error(t, err)
+	assert.Nil(t, token3)
+	// Should be context deadline exceeded or timeout
+	assert.True(t, err == context.DeadlineExceeded || strings.Contains(err.Error(), "timeout"))
 
 	// Release one slot
-	pool.releaseLargeOpSlot()
+	err = pool.releaseLargeOpSlot(token1)
+	assert.NoError(t, err)
 
 	// Now acquisition should succeed
 	ctx = context.Background()
-	err = pool.acquireLargeOpSlot(ctx)
-	assert.NoError(t, err)
+	token4, err := pool.acquireLargeOpSlot(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, token4)
 
-	// Clean up
-	pool.releaseLargeOpSlot()
-	pool.releaseLargeOpSlot()
+	// Clean up remaining tokens
+	err = pool.releaseLargeOpSlot(token2)
+	assert.NoError(t, err)
+	err = pool.releaseLargeOpSlot(token4)
+	assert.NoError(t, err)
 }
 
 func TestObjectSizeClassification(t *testing.T) {

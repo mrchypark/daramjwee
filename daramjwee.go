@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -2051,11 +2052,31 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		return nil, err
 	}
 
-	// Initialize buffer pool
+	// Initialize buffer pool with adaptive strategy
 	var bufferPool BufferPool
 	if cfg.BufferPool.Enabled {
-		bufferPool = NewDefaultBufferPoolWithLogger(cfg.BufferPool, logger)
-		level.Debug(logger).Log("msg", "buffer pool initialized", "enabled", true, "default_size", cfg.BufferPool.DefaultBufferSize, "logging_enabled", cfg.BufferPool.EnableLogging, "logging_interval", cfg.BufferPool.LoggingInterval)
+		// Check if large object optimization is configured
+		if cfg.BufferPool.LargeObjectThreshold > 0 || cfg.BufferPool.VeryLargeObjectThreshold > 0 {
+			// Use adaptive buffer pool for large object optimization
+			adaptivePool, err := NewAdaptiveBufferPoolImpl(cfg.BufferPool, logger)
+			if err != nil {
+				level.Warn(logger).Log("msg", "failed to create adaptive buffer pool, falling back to default", "err", err)
+				bufferPool = NewDefaultBufferPoolWithLogger(cfg.BufferPool, logger)
+			} else {
+				bufferPool = adaptivePool
+				level.Debug(logger).Log("msg", "adaptive buffer pool initialized",
+					"enabled", true,
+					"default_size", cfg.BufferPool.DefaultBufferSize,
+					"large_threshold", cfg.BufferPool.LargeObjectThreshold,
+					"very_large_threshold", cfg.BufferPool.VeryLargeObjectThreshold,
+					"chunk_size", cfg.BufferPool.ChunkSize,
+					"max_concurrent_large_ops", cfg.BufferPool.MaxConcurrentLargeOps)
+			}
+		} else {
+			// Use default buffer pool for backward compatibility
+			bufferPool = NewDefaultBufferPoolWithLogger(cfg.BufferPool, logger)
+			level.Debug(logger).Log("msg", "default buffer pool initialized", "enabled", true, "default_size", cfg.BufferPool.DefaultBufferSize, "logging_enabled", cfg.BufferPool.EnableLogging, "logging_interval", cfg.BufferPool.LoggingInterval)
+		}
 	} else {
 		// Create a disabled buffer pool that falls back to standard operations
 		bufferPool = NewDefaultBufferPoolWithLogger(BufferPoolConfig{
@@ -3423,6 +3444,309 @@ func (f SimpleFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*Fetch
 // 7. Improper resource cleanup during error conditions
 // 8. Not implementing timeout and cancellation handling
 
+// BufferLifecycleManager manages buffer lifecycle, age tracking, and cleanup.
+type BufferLifecycleManager struct {
+	config BufferLifecycleConfig
+	logger log.Logger
+
+	// Buffer tracking
+	bufferRegistry map[uintptr]*BufferMetadata // Track active buffers by address
+	registryMutex  sync.RWMutex
+
+	// Age-based cleanup
+	cleanupTicker  *time.Ticker
+	cleanupCancel  context.CancelFunc
+	cleanupContext context.Context
+
+	// Pool health monitoring
+	poolHealthMonitor *PoolHealthMonitor
+
+	// Leak detection
+	leakDetector *BufferLeakDetector
+
+	// Statistics
+	stats *BufferLifecycleStats
+}
+
+// BufferLifecycleConfig configures buffer lifecycle management.
+type BufferLifecycleConfig struct {
+	MaxBufferAge        time.Duration // Maximum age before buffer cleanup
+	CleanupInterval     time.Duration // Interval for cleanup operations
+	LeakDetectionWindow time.Duration // Window for leak detection
+	MaxBuffersPerPool   int           // Maximum buffers per pool before cleanup
+	HealthCheckInterval time.Duration // Interval for pool health checks
+	EnableLeakDetection bool          // Enable buffer leak detection
+	EnableAgeTracking   bool          // Enable buffer age tracking
+	EnableHealthMonitor bool          // Enable pool health monitoring
+}
+
+// BufferMetadata tracks metadata for individual buffers.
+type BufferMetadata struct {
+	Address     uintptr   // Buffer memory address
+	Size        int       // Buffer size
+	CreatedAt   time.Time // Creation timestamp
+	LastUsedAt  time.Time // Last usage timestamp
+	UsageCount  int64     // Number of times buffer was used
+	PoolSize    int       // Pool size this buffer belongs to
+	IsActive    bool      // Whether buffer is currently in use
+	LeakSuspect bool      // Whether buffer is suspected of leaking
+}
+
+// BufferLifecycleStats tracks buffer lifecycle statistics.
+type BufferLifecycleStats struct {
+	// Age tracking
+	TotalBuffersCreated int64
+	TotalBuffersCleanup int64
+	AverageBufferAge    time.Duration
+	OldestBufferAge     time.Duration
+
+	// Pool optimization
+	PoolSizeOptimizations int64
+	BuffersReclaimed      int64
+	MemoryReclaimed       int64
+
+	// Leak detection
+	LeakSuspectsDetected int64
+	LeaksConfirmed       int64
+	LeaksPrevented       int64
+
+	// Health monitoring
+	HealthChecksPerformed  int64
+	UnhealthyPoolsDetected int64
+	PoolMaintenanceActions int64
+
+	// Reuse efficiency
+	BufferReuseRate   float64
+	AverageUsageCount float64
+	EfficiencyScore   float64
+}
+
+// PoolHealthMonitor monitors pool health and performance.
+type PoolHealthMonitor struct {
+	config PoolHealthConfig
+	logger log.Logger
+
+	// Health metrics
+	poolMetrics  map[int]*PoolHealthMetrics // Metrics by pool size
+	metricsMutex sync.RWMutex
+
+	// Monitoring
+	monitorTicker  *time.Ticker
+	monitorCancel  context.CancelFunc
+	monitorContext context.Context
+}
+
+// PoolHealthConfig configures pool health monitoring.
+type PoolHealthConfig struct {
+	CheckInterval       time.Duration
+	UnhealthyThreshold  float64 // Threshold for marking pool as unhealthy
+	MaintenanceInterval time.Duration
+	MaxPoolSize         int
+	MinEfficiencyRate   float64
+}
+
+// PoolHealthMetrics tracks health metrics for a specific pool.
+type PoolHealthMetrics struct {
+	PoolSize           int
+	ActiveBuffers      int64
+	TotalAllocations   int64
+	TotalDeallocations int64
+	HitRate            float64
+	MemoryUtilization  float64
+	AverageAge         time.Duration
+	HealthScore        float64
+	LastMaintenance    time.Time
+	IsHealthy          bool
+}
+
+// BufferLeakDetector detects and prevents buffer leaks.
+type BufferLeakDetector struct {
+	config LeakDetectorConfig
+	logger log.Logger
+
+	// Leak tracking
+	suspectedLeaks map[uintptr]*LeakSuspect
+	leaksMutex     sync.RWMutex
+
+	// Detection
+	detectionTicker  *time.Ticker
+	detectionCancel  context.CancelFunc
+	detectionContext context.Context
+
+	// Statistics
+	stats *LeakDetectionStats
+}
+
+// LeakDetectorConfig configures buffer leak detection.
+type LeakDetectorConfig struct {
+	DetectionInterval  time.Duration
+	SuspicionThreshold time.Duration // Time before buffer becomes leak suspect
+	ConfirmationWindow time.Duration // Time to confirm leak
+	MaxSuspectedLeaks  int           // Maximum number of suspected leaks to track
+	EnableAutoCleanup  bool          // Automatically cleanup confirmed leaks
+	EnableAlerts       bool          // Enable leak alerts
+}
+
+// LeakSuspect represents a suspected buffer leak.
+type LeakSuspect struct {
+	Address        uintptr
+	Size           int
+	CreatedAt      time.Time
+	LastSeenAt     time.Time
+	SuspectedAt    time.Time
+	ConfirmationAt *time.Time
+	IsConfirmed    bool
+	CleanedUp      bool
+}
+
+// LeakDetectionStats tracks leak detection statistics.
+type LeakDetectionStats struct {
+	SuspectsIdentified int64
+	LeaksConfirmed     int64
+	LeaksCleaned       int64
+	FalsePositives     int64
+	MemoryLeaked       int64
+	MemoryRecovered    int64
+}
+
+// LargeOperationManager manages resource allocation for large operations.
+type LargeOperationManager struct {
+	config LargeOperationConfig
+	logger log.Logger
+
+	// Resource limiting
+	semaphore chan struct{} // Semaphore for limiting concurrent operations
+
+	// Queuing and backpressure
+	requestQueue   chan *LargeOpRequest
+	queueProcessor *QueueProcessor
+
+	// Priority handling
+	priorityQueues map[OperationPriority]chan *LargeOpRequest
+
+	// Monitoring and statistics
+	stats *LargeOperationStats
+
+	// Lifecycle management
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	// Thread safety
+	mutex sync.RWMutex
+}
+
+// LargeOperationConfig configures large operation resource management.
+type LargeOperationConfig struct {
+	MaxConcurrentOps     int           // Maximum concurrent large operations
+	QueueSize            int           // Size of the operation queue
+	RequestTimeout       time.Duration // Timeout for resource acquisition
+	QueueTimeout         time.Duration // Timeout for queue processing
+	EnablePriorityQueues bool          // Enable priority-based queuing
+	EnableBackpressure   bool          // Enable backpressure mechanisms
+	EnableFairness       bool          // Enable fairness in resource allocation
+	MonitoringInterval   time.Duration // Interval for monitoring and alerting
+}
+
+// LargeOpRequest represents a request for large operation resources.
+type LargeOpRequest struct {
+	ID          string
+	Priority    OperationPriority
+	Size        int
+	RequestedAt time.Time
+	Context     context.Context
+	Response    chan *LargeOpResponse
+	Metadata    map[string]interface{}
+}
+
+// LargeOpResponse represents the response to a large operation request.
+type LargeOpResponse struct {
+	Granted   bool
+	Token     *ResourceToken
+	Error     error
+	WaitTime  time.Duration
+	QueueTime time.Duration
+	GrantedAt time.Time
+}
+
+// ResourceToken represents a granted resource for large operations.
+type ResourceToken struct {
+	ID        string
+	GrantedAt time.Time
+	ExpiresAt time.Time
+	Size      int
+	Priority  OperationPriority
+	manager   *LargeOperationManager
+}
+
+// OperationPriority defines priority levels for large operations.
+type OperationPriority int
+
+const (
+	PriorityLow OperationPriority = iota
+	PriorityNormal
+	PriorityHigh
+	PriorityCritical
+)
+
+// LargeOperationStats tracks statistics for large operation management.
+type LargeOperationStats struct {
+	// Request statistics
+	TotalRequests   int64
+	GrantedRequests int64
+	DeniedRequests  int64
+	TimeoutRequests int64
+	QueuedRequests  int64
+
+	// Timing statistics
+	AverageWaitTime  time.Duration
+	AverageQueueTime time.Duration
+	MaxWaitTime      time.Duration
+	MaxQueueTime     time.Duration
+
+	// Resource utilization
+	CurrentConcurrentOps int64
+	MaxConcurrentOps     int64
+	ResourceUtilization  float64
+
+	// Queue statistics
+	CurrentQueueSize int64
+	MaxQueueSize     int64
+	QueueOverflows   int64
+
+	// Priority statistics
+	RequestsByPriority map[OperationPriority]int64
+	GrantedByPriority  map[OperationPriority]int64
+
+	// Fairness metrics
+	FairnessScore    float64
+	StarvationEvents int64
+}
+
+// QueueProcessor handles queued operation requests.
+type QueueProcessor struct {
+	config  QueueProcessorConfig
+	logger  log.Logger
+	manager *LargeOperationManager
+
+	// Processing control
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	// Fairness tracking
+	lastGrantedPriority OperationPriority
+	priorityCounters    map[OperationPriority]int64
+}
+
+// QueueProcessorConfig configures queue processing behavior.
+type QueueProcessorConfig struct {
+	ProcessingInterval  time.Duration
+	FairnessWindow      int64 // Number of operations to consider for fairness
+	StarvationThreshold time.Duration
+	MaxRetries          int
+}
+
 // AdaptiveBufferPool implements size-aware buffer management with strategy delegation.
 type AdaptiveBufferPool struct {
 	config BufferPoolConfig
@@ -3436,15 +3760,18 @@ type AdaptiveBufferPool struct {
 	chunkPool        *sync.Pool        // Pool of reusable chunks for streaming
 	chunkPoolManager *ChunkPoolManager // Advanced chunk pool management
 
+	// Buffer lifecycle management
+	lifecycleManager *BufferLifecycleManager
+
+	// Resource management for large operations
+	largeOpManager *LargeOperationManager
+
 	// Metrics and monitoring
 	stats            *AdaptiveBufferPoolStats
 	metricsCollector *MetricsCollector
 
 	// Memory pressure management
 	memoryPressureDetector *MemoryPressureDetector
-
-	// Resource management for large operations
-	largeOpsSemaphore chan struct{} // Semaphore for limiting concurrent large operations
 
 	// Thread safety
 	mutex sync.RWMutex
@@ -3515,8 +3842,37 @@ func NewAdaptiveBufferPool(config BufferPoolConfig, logger log.Logger) (*Adaptiv
 	}
 	chunkPoolManager := NewChunkPoolManager(chunkPoolConfig, logger)
 
-	// Create semaphore for limiting concurrent large operations
-	largeOpsSemaphore := make(chan struct{}, config.MaxConcurrentLargeOps)
+	// Create large operation manager
+	largeOpConfig := LargeOperationConfig{
+		MaxConcurrentOps:     config.MaxConcurrentLargeOps,
+		QueueSize:            config.MaxConcurrentLargeOps * 2, // Queue size = 2x concurrent ops
+		RequestTimeout:       30 * time.Second,
+		QueueTimeout:         5 * time.Second,
+		EnablePriorityQueues: config.EnableDetailedMetrics,
+		EnableBackpressure:   true,
+		EnableFairness:       true,
+		MonitoringInterval:   10 * time.Second,
+	}
+	largeOpManager, err := NewLargeOperationManager(largeOpConfig, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create large operation manager: %w", err)
+	}
+
+	// Initialize buffer lifecycle manager
+	lifecycleConfig := BufferLifecycleConfig{
+		MaxBufferAge:        10 * time.Minute,
+		CleanupInterval:     2 * time.Minute,
+		LeakDetectionWindow: 5 * time.Minute,
+		MaxBuffersPerPool:   1000,
+		HealthCheckInterval: 1 * time.Minute,
+		EnableLeakDetection: config.EnableDetailedMetrics,
+		EnableAgeTracking:   true,
+		EnableHealthMonitor: config.EnableDetailedMetrics,
+	}
+	lifecycleManager, err := NewBufferLifecycleManager(lifecycleConfig, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create buffer lifecycle manager: %w", err)
+	}
 
 	// Initialize statistics
 	stats := &AdaptiveBufferPoolStats{
@@ -3541,15 +3897,16 @@ func NewAdaptiveBufferPool(config BufferPoolConfig, logger log.Logger) (*Adaptiv
 	}
 
 	return &AdaptiveBufferPool{
-		config:            config,
-		logger:            logger,
-		smallPool:         smallPool,
-		mediumPool:        mediumPool,
-		chunkPool:         chunkPool,
-		chunkPoolManager:  chunkPoolManager,
-		stats:             stats,
-		metricsCollector:  metricsCollector,
-		largeOpsSemaphore: largeOpsSemaphore,
+		config:           config,
+		logger:           logger,
+		smallPool:        smallPool,
+		mediumPool:       mediumPool,
+		chunkPool:        chunkPool,
+		chunkPoolManager: chunkPoolManager,
+		lifecycleManager: lifecycleManager,
+		stats:            stats,
+		metricsCollector: metricsCollector,
+		largeOpManager:   largeOpManager,
 	}, nil
 }
 
@@ -3620,16 +3977,25 @@ func (abp *AdaptiveBufferPool) Get(size int) []byte {
 
 	abp.updateStrategyMetrics(strategy)
 
+	var buf []byte
 	switch strategy {
 	case StrategyPooled:
-		return abp.getPooledBuffer(size)
+		buf = abp.getPooledBuffer(size)
 	case StrategyChunked, StrategyDirect:
 		// For large objects, return a buffer but don't use pooling
-		return make([]byte, size)
+		buf = make([]byte, size)
 	default:
 		// Fallback to pooled strategy
-		return abp.getPooledBuffer(size)
+		buf = abp.getPooledBuffer(size)
 	}
+
+	// Register buffer for lifecycle tracking
+	if abp.lifecycleManager != nil {
+		poolSize := abp.selectPoolSize(size)
+		abp.lifecycleManager.RegisterBuffer(buf, poolSize)
+	}
+
+	return buf
 }
 
 // getPooledBuffer retrieves a buffer from the appropriate size-specific pool.
@@ -3653,6 +4019,11 @@ func (abp *AdaptiveBufferPool) Put(buf []byte) {
 		return
 	}
 
+	// Update buffer usage in lifecycle manager
+	if abp.lifecycleManager != nil {
+		abp.lifecycleManager.UpdateBufferUsage(buf)
+	}
+
 	size := cap(buf)
 	category := classifyObjectSize(size, abp.config)
 
@@ -3662,7 +4033,10 @@ func (abp *AdaptiveBufferPool) Put(buf []byte) {
 	case SizeCategoryMedium:
 		abp.mediumPool.Put(buf)
 	default:
-		// Large buffers are not pooled, just let them be garbage collected
+		// Large buffers are not pooled, unregister from lifecycle tracking
+		if abp.lifecycleManager != nil {
+			abp.lifecycleManager.UnregisterBuffer(buf)
+		}
 		return
 	}
 }
@@ -3856,34 +4230,747 @@ func (abp *AdaptiveBufferPool) putChunk(chunk []byte) {
 }
 
 // acquireLargeOpSlot acquires a slot for large operation processing.
-func (abp *AdaptiveBufferPool) acquireLargeOpSlot(ctx context.Context) error {
-	select {
-	case abp.largeOpsSemaphore <- struct{}{}:
-		atomic.AddInt64(&abp.stats.ConcurrentLargeOps, 1)
+func (abp *AdaptiveBufferPool) acquireLargeOpSlot(ctx context.Context) (*ResourceToken, error) {
+	if abp.largeOpManager == nil {
+		return nil, ErrResourceUnavailable
+	}
 
-		// Update max concurrent operations if needed
-		current := atomic.LoadInt64(&abp.stats.ConcurrentLargeOps)
-		for {
-			max := atomic.LoadInt64(&abp.stats.MaxConcurrentLargeOps)
-			if current <= max || atomic.CompareAndSwapInt64(&abp.stats.MaxConcurrentLargeOps, max, current) {
-				break
-			}
+	// Determine priority based on context or default to normal
+	priority := PriorityNormal
+	if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+		timeLeft := time.Until(deadline)
+		if timeLeft < 5*time.Second {
+			priority = PriorityHigh
+		} else if timeLeft < 1*time.Second {
+			priority = PriorityCritical
+		}
+	}
+
+	token, err := abp.largeOpManager.RequestResource(ctx, 0, priority)
+	if err != nil {
+		if abp.logger != nil {
+			level.Warn(abp.logger).Log(
+				"msg", "failed to acquire large operation slot",
+				"error", err,
+				"priority", priority,
+			)
+		}
+		return nil, err
+	}
+
+	atomic.AddInt64(&abp.stats.ConcurrentLargeOps, 1)
+	return token, nil
+}
+
+// selectPoolSize determines the appropriate pool size for a given buffer size.
+func (abp *AdaptiveBufferPool) selectPoolSize(size int) int {
+	// Common sizes in ascending order
+	commonSizes := []int{
+		4 * 1024,    // 4KB
+		16 * 1024,   // 16KB
+		32 * 1024,   // 32KB
+		64 * 1024,   // 64KB
+		128 * 1024,  // 128KB
+		256 * 1024,  // 256KB
+		512 * 1024,  // 512KB
+		1024 * 1024, // 1MB
+	}
+
+	// Find the smallest common size that fits
+	for _, commonSize := range commonSizes {
+		if size <= commonSize && commonSize >= abp.config.MinBufferSize && commonSize <= abp.config.MaxBufferSize {
+			return commonSize
+		}
+	}
+
+	// If no common size fits, use the default size if it's large enough
+	if size <= abp.config.DefaultBufferSize {
+		return abp.config.DefaultBufferSize
+	}
+
+	// For very large sizes, don't pool them
+	return size
+}
+
+// GetLifecycleStats returns buffer lifecycle statistics.
+func (abp *AdaptiveBufferPool) GetLifecycleStats() BufferLifecycleStats {
+	if abp.lifecycleManager != nil {
+		return abp.lifecycleManager.GetLifecycleStats()
+	}
+	return BufferLifecycleStats{}
+}
+
+// OptimizePoolSizes analyzes usage patterns and optimizes pool sizes.
+func (abp *AdaptiveBufferPool) OptimizePoolSizes() map[int]int {
+	if abp.lifecycleManager != nil {
+		return abp.lifecycleManager.OptimizePoolSizes()
+	}
+	return nil
+}
+
+// PerformLifecycleCleanup manually triggers buffer lifecycle cleanup.
+func (abp *AdaptiveBufferPool) PerformLifecycleCleanup() {
+	if abp.lifecycleManager != nil {
+		abp.lifecycleManager.PerformCleanup()
+	}
+}
+
+// Close shuts down the adaptive buffer pool and all its components.
+func (abp *AdaptiveBufferPool) Close() {
+	if abp.lifecycleManager != nil {
+		abp.lifecycleManager.Close()
+	}
+	if abp.chunkPoolManager != nil {
+		abp.chunkPoolManager.Close()
+	}
+	if abp.metricsCollector != nil {
+		abp.metricsCollector.Close()
+	}
+	if abp.memoryPressureDetector != nil {
+		abp.memoryPressureDetector.Close()
+	}
+}
+
+// NewBufferLifecycleManager creates a new buffer lifecycle manager.
+func NewBufferLifecycleManager(config BufferLifecycleConfig, logger log.Logger) (*BufferLifecycleManager, error) {
+	if config.MaxBufferAge <= 0 {
+		config.MaxBufferAge = 10 * time.Minute
+	}
+	if config.CleanupInterval <= 0 {
+		config.CleanupInterval = 2 * time.Minute
+	}
+	if config.LeakDetectionWindow <= 0 {
+		config.LeakDetectionWindow = 5 * time.Minute
+	}
+	if config.MaxBuffersPerPool <= 0 {
+		config.MaxBuffersPerPool = 1000
+	}
+	if config.HealthCheckInterval <= 0 {
+		config.HealthCheckInterval = 1 * time.Minute
+	}
+
+	blm := &BufferLifecycleManager{
+		config:         config,
+		logger:         logger,
+		bufferRegistry: make(map[uintptr]*BufferMetadata),
+		stats: &BufferLifecycleStats{
+			AverageBufferAge:  0,
+			OldestBufferAge:   0,
+			BufferReuseRate:   0.0,
+			AverageUsageCount: 0.0,
+			EfficiencyScore:   0.0,
+		},
+	}
+
+	// Initialize pool health monitor if enabled
+	if config.EnableHealthMonitor {
+		healthConfig := PoolHealthConfig{
+			CheckInterval:       config.HealthCheckInterval,
+			UnhealthyThreshold:  0.5, // 50% efficiency threshold
+			MaintenanceInterval: config.CleanupInterval * 2,
+			MaxPoolSize:         config.MaxBuffersPerPool,
+			MinEfficiencyRate:   0.7, // 70% minimum efficiency
+		}
+		blm.poolHealthMonitor = NewPoolHealthMonitor(healthConfig, logger)
+	}
+
+	// Initialize leak detector if enabled
+	if config.EnableLeakDetection {
+		leakConfig := LeakDetectorConfig{
+			DetectionInterval:  config.LeakDetectionWindow / 2,
+			SuspicionThreshold: config.LeakDetectionWindow,
+			ConfirmationWindow: config.LeakDetectionWindow * 2,
+			MaxSuspectedLeaks:  100,
+			EnableAutoCleanup:  true,
+			EnableAlerts:       true,
+		}
+		blm.leakDetector = NewBufferLeakDetector(leakConfig, logger)
+	}
+
+	// Start cleanup routine
+	blm.startCleanupRoutine()
+
+	return blm, nil
+}
+
+// RegisterBuffer registers a new buffer for lifecycle tracking.
+func (blm *BufferLifecycleManager) RegisterBuffer(buf []byte, poolSize int) {
+	if !blm.config.EnableAgeTracking {
+		return
+	}
+
+	addr := uintptr(unsafe.Pointer(&buf[0]))
+	now := time.Now()
+
+	metadata := &BufferMetadata{
+		Address:    addr,
+		Size:       len(buf),
+		CreatedAt:  now,
+		LastUsedAt: now,
+		UsageCount: 1,
+		PoolSize:   poolSize,
+		IsActive:   true,
+	}
+
+	blm.registryMutex.Lock()
+	blm.bufferRegistry[addr] = metadata
+	blm.registryMutex.Unlock()
+
+	atomic.AddInt64(&blm.stats.TotalBuffersCreated, 1)
+
+	if blm.logger != nil {
+		level.Debug(blm.logger).Log(
+			"msg", "buffer registered for lifecycle tracking",
+			"address", fmt.Sprintf("0x%x", addr),
+			"size", len(buf),
+			"pool_size", poolSize,
+		)
+	}
+}
+
+// UpdateBufferUsage updates buffer usage statistics.
+func (blm *BufferLifecycleManager) UpdateBufferUsage(buf []byte) {
+	if !blm.config.EnableAgeTracking {
+		return
+	}
+
+	addr := uintptr(unsafe.Pointer(&buf[0]))
+	now := time.Now()
+
+	blm.registryMutex.Lock()
+	if metadata, exists := blm.bufferRegistry[addr]; exists {
+		metadata.LastUsedAt = now
+		metadata.UsageCount++
+		metadata.IsActive = true
+	}
+	blm.registryMutex.Unlock()
+}
+
+// UnregisterBuffer removes a buffer from lifecycle tracking.
+func (blm *BufferLifecycleManager) UnregisterBuffer(buf []byte) {
+	if !blm.config.EnableAgeTracking {
+		return
+	}
+
+	addr := uintptr(unsafe.Pointer(&buf[0]))
+
+	blm.registryMutex.Lock()
+	if metadata, exists := blm.bufferRegistry[addr]; exists {
+		metadata.IsActive = false
+		delete(blm.bufferRegistry, addr)
+	}
+	blm.registryMutex.Unlock()
+
+	if blm.logger != nil {
+		level.Debug(blm.logger).Log(
+			"msg", "buffer unregistered from lifecycle tracking",
+			"address", fmt.Sprintf("0x%x", addr),
+		)
+	}
+}
+
+// PerformCleanup performs age-based buffer cleanup.
+func (blm *BufferLifecycleManager) PerformCleanup() {
+	if !blm.config.EnableAgeTracking {
+		return
+	}
+
+	now := time.Now()
+	var toCleanup []uintptr
+	var totalAge time.Duration
+	var oldestAge time.Duration
+	var totalUsage int64
+	var bufferCount int64
+
+	blm.registryMutex.RLock()
+	for addr, metadata := range blm.bufferRegistry {
+		age := now.Sub(metadata.CreatedAt)
+		totalAge += age
+		bufferCount++
+		totalUsage += metadata.UsageCount
+
+		if age > oldestAge {
+			oldestAge = age
 		}
 
+		// Mark old buffers for cleanup
+		if age > blm.config.MaxBufferAge {
+			toCleanup = append(toCleanup, addr)
+		}
+
+		// Check for leak suspects
+		if blm.leakDetector != nil {
+			timeSinceLastUse := now.Sub(metadata.LastUsedAt)
+			if timeSinceLastUse > blm.config.LeakDetectionWindow && metadata.IsActive {
+				blm.leakDetector.ReportSuspect(addr, metadata.Size, metadata.CreatedAt)
+				metadata.LeakSuspect = true
+			}
+		}
+	}
+	blm.registryMutex.RUnlock()
+
+	// Update statistics
+	if bufferCount > 0 {
+		blm.stats.AverageBufferAge = totalAge / time.Duration(bufferCount)
+		blm.stats.AverageUsageCount = float64(totalUsage) / float64(bufferCount)
+	}
+	blm.stats.OldestBufferAge = oldestAge
+
+	// Perform cleanup
+	if len(toCleanup) > 0 {
+		blm.registryMutex.Lock()
+		for _, addr := range toCleanup {
+			delete(blm.bufferRegistry, addr)
+		}
+		blm.registryMutex.Unlock()
+
+		atomic.AddInt64(&blm.stats.TotalBuffersCleanup, int64(len(toCleanup)))
+
+		if blm.logger != nil {
+			level.Info(blm.logger).Log(
+				"msg", "performed buffer lifecycle cleanup",
+				"cleaned_buffers", len(toCleanup),
+				"total_buffers", bufferCount,
+				"average_age", blm.stats.AverageBufferAge,
+				"oldest_age", oldestAge,
+			)
+		}
+	}
+
+	// Update efficiency metrics
+	blm.updateEfficiencyMetrics()
+}
+
+// OptimizePoolSizes analyzes usage patterns and optimizes pool sizes.
+func (blm *BufferLifecycleManager) OptimizePoolSizes() map[int]int {
+	if !blm.config.EnableAgeTracking {
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	}
+
+	poolUsage := make(map[int]*PoolUsageStats)
+
+	blm.registryMutex.RLock()
+	for _, metadata := range blm.bufferRegistry {
+		if stats, exists := poolUsage[metadata.PoolSize]; exists {
+			stats.TotalBuffers++
+			stats.TotalUsage += metadata.UsageCount
+			stats.TotalAge += time.Since(metadata.CreatedAt)
+		} else {
+			poolUsage[metadata.PoolSize] = &PoolUsageStats{
+				PoolSize:     metadata.PoolSize,
+				TotalBuffers: 1,
+				TotalUsage:   metadata.UsageCount,
+				TotalAge:     time.Since(metadata.CreatedAt),
+			}
+		}
+	}
+	blm.registryMutex.RUnlock()
+
+	// Calculate optimal pool sizes based on usage patterns
+	recommendations := make(map[int]int)
+	for poolSize, stats := range poolUsage {
+		if stats.TotalBuffers > 0 {
+			avgUsage := float64(stats.TotalUsage) / float64(stats.TotalBuffers)
+			avgAge := stats.TotalAge / time.Duration(stats.TotalBuffers)
+
+			// Calculate optimal pool size based on usage patterns
+			utilizationFactor := avgUsage / float64(avgAge.Minutes())
+			optimalSize := int(float64(stats.TotalBuffers) * utilizationFactor)
+
+			// Apply constraints
+			if optimalSize < stats.TotalBuffers/2 {
+				optimalSize = stats.TotalBuffers / 2 // Don't reduce too aggressively
+			}
+			if optimalSize > blm.config.MaxBuffersPerPool {
+				optimalSize = blm.config.MaxBuffersPerPool
+			}
+
+			recommendations[poolSize] = optimalSize
+		}
+	}
+
+	atomic.AddInt64(&blm.stats.PoolSizeOptimizations, 1)
+
+	if blm.logger != nil {
+		level.Info(blm.logger).Log(
+			"msg", "pool size optimization completed",
+			"pools_analyzed", len(poolUsage),
+			"recommendations", len(recommendations),
+		)
+	}
+
+	return recommendations
+}
+
+// GetLifecycleStats returns current buffer lifecycle statistics.
+func (blm *BufferLifecycleManager) GetLifecycleStats() BufferLifecycleStats {
+	return *blm.stats
+}
+
+// startCleanupRoutine starts the background cleanup routine.
+func (blm *BufferLifecycleManager) startCleanupRoutine() {
+	blm.cleanupContext, blm.cleanupCancel = context.WithCancel(context.Background())
+	blm.cleanupTicker = time.NewTicker(blm.config.CleanupInterval)
+
+	go func() {
+		defer blm.cleanupTicker.Stop()
+		for {
+			select {
+			case <-blm.cleanupContext.Done():
+				return
+			case <-blm.cleanupTicker.C:
+				blm.PerformCleanup()
+				if blm.poolHealthMonitor != nil {
+					blm.poolHealthMonitor.PerformHealthCheck()
+				}
+			}
+		}
+	}()
+}
+
+// updateEfficiencyMetrics updates buffer reuse efficiency metrics.
+func (blm *BufferLifecycleManager) updateEfficiencyMetrics() {
+	var totalReuses int64
+	var totalBuffers int64
+	var totalUsage int64
+
+	blm.registryMutex.RLock()
+	for _, metadata := range blm.bufferRegistry {
+		totalBuffers++
+		totalUsage += metadata.UsageCount
+		if metadata.UsageCount > 1 {
+			totalReuses++
+		}
+	}
+	blm.registryMutex.RUnlock()
+
+	if totalBuffers > 0 {
+		blm.stats.BufferReuseRate = float64(totalReuses) / float64(totalBuffers) * 100
+		blm.stats.AverageUsageCount = float64(totalUsage) / float64(totalBuffers)
+
+		// Calculate efficiency score (0-100)
+		reuseScore := blm.stats.BufferReuseRate
+		usageScore := math.Min(blm.stats.AverageUsageCount*10, 100) // Cap at 100
+		blm.stats.EfficiencyScore = (reuseScore + usageScore) / 2
+	}
+}
+
+// Close shuts down the buffer lifecycle manager.
+func (blm *BufferLifecycleManager) Close() {
+	if blm.cleanupCancel != nil {
+		blm.cleanupCancel()
+	}
+	if blm.cleanupTicker != nil {
+		blm.cleanupTicker.Stop()
+	}
+	if blm.poolHealthMonitor != nil {
+		blm.poolHealthMonitor.Close()
+	}
+	if blm.leakDetector != nil {
+		blm.leakDetector.Close()
+	}
+}
+
+// PoolUsageStats tracks usage statistics for a specific pool size.
+type PoolUsageStats struct {
+	PoolSize     int
+	TotalBuffers int
+	TotalUsage   int64
+	TotalAge     time.Duration
+}
+
+// NewPoolHealthMonitor creates a new pool health monitor.
+func NewPoolHealthMonitor(config PoolHealthConfig, logger log.Logger) *PoolHealthMonitor {
+	phm := &PoolHealthMonitor{
+		config:      config,
+		logger:      logger,
+		poolMetrics: make(map[int]*PoolHealthMetrics),
+	}
+
+	phm.startMonitoring()
+	return phm
+}
+
+// PerformHealthCheck performs a health check on all monitored pools.
+func (phm *PoolHealthMonitor) PerformHealthCheck() {
+	now := time.Now()
+
+	phm.metricsMutex.Lock()
+	defer phm.metricsMutex.Unlock()
+
+	for poolSize, metrics := range phm.poolMetrics {
+		// Calculate health score based on various factors
+		hitRate := metrics.HitRate
+		memoryUtil := metrics.MemoryUtilization
+		avgAge := metrics.AverageAge.Minutes()
+
+		// Health score calculation (0-1 scale)
+		healthScore := (hitRate + (1.0 - memoryUtil) + math.Max(0, 1.0-avgAge/60.0)) / 3.0
+
+		metrics.HealthScore = healthScore
+		metrics.IsHealthy = healthScore >= phm.config.UnhealthyThreshold
+
+		// Perform maintenance if needed
+		if !metrics.IsHealthy && now.Sub(metrics.LastMaintenance) > phm.config.MaintenanceInterval {
+			phm.performPoolMaintenance(poolSize, metrics)
+			metrics.LastMaintenance = now
+		}
+	}
+
+	atomic.AddInt64(&phm.getStatsPointer().HealthChecksPerformed, 1)
+}
+
+// performPoolMaintenance performs maintenance on an unhealthy pool.
+func (phm *PoolHealthMonitor) performPoolMaintenance(poolSize int, metrics *PoolHealthMetrics) {
+	if phm.logger != nil {
+		level.Warn(phm.logger).Log(
+			"msg", "performing pool maintenance",
+			"pool_size", poolSize,
+			"health_score", metrics.HealthScore,
+			"hit_rate", metrics.HitRate,
+			"memory_utilization", metrics.MemoryUtilization,
+		)
+	}
+
+	// Maintenance actions could include:
+	// - Reducing pool size if memory utilization is high
+	// - Clearing old buffers if average age is high
+	// - Adjusting allocation strategy
+
+	atomic.AddInt64(&phm.getStatsPointer().PoolMaintenanceActions, 1)
+}
+
+// getStatsPointer returns a pointer to health check stats (placeholder implementation).
+func (phm *PoolHealthMonitor) getStatsPointer() *struct{ HealthChecksPerformed, PoolMaintenanceActions int64 } {
+	// This is a simplified implementation - in practice, this would be part of the lifecycle stats
+	return &struct{ HealthChecksPerformed, PoolMaintenanceActions int64 }{}
+}
+
+// startMonitoring starts the background monitoring routine.
+func (phm *PoolHealthMonitor) startMonitoring() {
+	phm.monitorContext, phm.monitorCancel = context.WithCancel(context.Background())
+	phm.monitorTicker = time.NewTicker(phm.config.CheckInterval)
+
+	go func() {
+		defer phm.monitorTicker.Stop()
+		for {
+			select {
+			case <-phm.monitorContext.Done():
+				return
+			case <-phm.monitorTicker.C:
+				phm.PerformHealthCheck()
+			}
+		}
+	}()
+}
+
+// Close shuts down the pool health monitor.
+func (phm *PoolHealthMonitor) Close() {
+	if phm.monitorCancel != nil {
+		phm.monitorCancel()
+	}
+	if phm.monitorTicker != nil {
+		phm.monitorTicker.Stop()
+	}
+}
+
+// NewBufferLeakDetector creates a new buffer leak detector.
+func NewBufferLeakDetector(config LeakDetectorConfig, logger log.Logger) *BufferLeakDetector {
+	bld := &BufferLeakDetector{
+		config:         config,
+		logger:         logger,
+		suspectedLeaks: make(map[uintptr]*LeakSuspect),
+		stats: &LeakDetectionStats{
+			SuspectsIdentified: 0,
+			LeaksConfirmed:     0,
+			LeaksCleaned:       0,
+			FalsePositives:     0,
+			MemoryLeaked:       0,
+			MemoryRecovered:    0,
+		},
+	}
+
+	bld.startDetection()
+	return bld
+}
+
+// ReportSuspect reports a suspected buffer leak.
+func (bld *BufferLeakDetector) ReportSuspect(addr uintptr, size int, createdAt time.Time) {
+	now := time.Now()
+
+	bld.leaksMutex.Lock()
+	defer bld.leaksMutex.Unlock()
+
+	if len(bld.suspectedLeaks) >= bld.config.MaxSuspectedLeaks {
+		// Remove oldest suspect to make room
+		var oldestAddr uintptr
+		var oldestTime time.Time
+		for suspectAddr, suspect := range bld.suspectedLeaks {
+			if oldestTime.IsZero() || suspect.SuspectedAt.Before(oldestTime) {
+				oldestAddr = suspectAddr
+				oldestTime = suspect.SuspectedAt
+			}
+		}
+		delete(bld.suspectedLeaks, oldestAddr)
+	}
+
+	suspect := &LeakSuspect{
+		Address:     addr,
+		Size:        size,
+		CreatedAt:   createdAt,
+		LastSeenAt:  now,
+		SuspectedAt: now,
+		IsConfirmed: false,
+		CleanedUp:   false,
+	}
+
+	bld.suspectedLeaks[addr] = suspect
+	atomic.AddInt64(&bld.stats.SuspectsIdentified, 1)
+
+	if bld.logger != nil {
+		level.Warn(bld.logger).Log(
+			"msg", "buffer leak suspect detected",
+			"address", fmt.Sprintf("0x%x", addr),
+			"size", size,
+			"age", now.Sub(createdAt),
+		)
+	}
+}
+
+// startDetection starts the background leak detection routine.
+func (bld *BufferLeakDetector) startDetection() {
+	bld.detectionContext, bld.detectionCancel = context.WithCancel(context.Background())
+	bld.detectionTicker = time.NewTicker(bld.config.DetectionInterval)
+
+	go func() {
+		defer bld.detectionTicker.Stop()
+		for {
+			select {
+			case <-bld.detectionContext.Done():
+				return
+			case <-bld.detectionTicker.C:
+				bld.performLeakDetection()
+			}
+		}
+	}()
+}
+
+// performLeakDetection performs leak detection and confirmation.
+func (bld *BufferLeakDetector) performLeakDetection() {
+	now := time.Now()
+	var confirmedLeaks []uintptr
+
+	bld.leaksMutex.Lock()
+	for addr, suspect := range bld.suspectedLeaks {
+		if !suspect.IsConfirmed {
+			// Check if suspect should be confirmed as leak
+			if now.Sub(suspect.SuspectedAt) > bld.config.ConfirmationWindow {
+				suspect.IsConfirmed = true
+				suspect.ConfirmationAt = &now
+				confirmedLeaks = append(confirmedLeaks, addr)
+				atomic.AddInt64(&bld.stats.LeaksConfirmed, 1)
+				atomic.AddInt64(&bld.stats.MemoryLeaked, int64(suspect.Size))
+			}
+		}
+	}
+	bld.leaksMutex.Unlock()
+
+	// Handle confirmed leaks
+	for _, addr := range confirmedLeaks {
+		bld.handleConfirmedLeak(addr)
+	}
+}
+
+// handleConfirmedLeak handles a confirmed buffer leak.
+func (bld *BufferLeakDetector) handleConfirmedLeak(addr uintptr) {
+	bld.leaksMutex.Lock()
+	suspect, exists := bld.suspectedLeaks[addr]
+	if !exists {
+		bld.leaksMutex.Unlock()
+		return
+	}
+	bld.leaksMutex.Unlock()
+
+	if bld.logger != nil {
+		level.Error(bld.logger).Log(
+			"msg", "buffer leak confirmed",
+			"address", fmt.Sprintf("0x%x", addr),
+			"size", suspect.Size,
+			"age", time.Since(suspect.CreatedAt),
+			"suspected_duration", time.Since(suspect.SuspectedAt),
+		)
+	}
+
+	// Auto-cleanup if enabled
+	if bld.config.EnableAutoCleanup {
+		bld.cleanupLeak(addr, suspect)
+	}
+
+	// Send alert if enabled
+	if bld.config.EnableAlerts {
+		bld.sendLeakAlert(suspect)
+	}
+}
+
+// cleanupLeak performs cleanup for a confirmed leak.
+func (bld *BufferLeakDetector) cleanupLeak(addr uintptr, suspect *LeakSuspect) {
+	bld.leaksMutex.Lock()
+	suspect.CleanedUp = true
+	delete(bld.suspectedLeaks, addr)
+	bld.leaksMutex.Unlock()
+
+	atomic.AddInt64(&bld.stats.LeaksCleaned, 1)
+	atomic.AddInt64(&bld.stats.MemoryRecovered, int64(suspect.Size))
+
+	if bld.logger != nil {
+		level.Info(bld.logger).Log(
+			"msg", "buffer leak cleaned up",
+			"address", fmt.Sprintf("0x%x", addr),
+			"size", suspect.Size,
+		)
+	}
+}
+
+// sendLeakAlert sends an alert for a confirmed leak.
+func (bld *BufferLeakDetector) sendLeakAlert(suspect *LeakSuspect) {
+	// In a real implementation, this would send alerts via monitoring systems
+	if bld.logger != nil {
+		level.Error(bld.logger).Log(
+			"msg", "ALERT: Buffer leak detected",
+			"address", fmt.Sprintf("0x%x", suspect.Address),
+			"size", suspect.Size,
+			"age", time.Since(suspect.CreatedAt),
+			"action_required", "investigate buffer lifecycle management",
+		)
+	}
+}
+
+// GetLeakStats returns current leak detection statistics.
+func (bld *BufferLeakDetector) GetLeakStats() LeakDetectionStats {
+	return *bld.stats
+}
+
+// Close shuts down the buffer leak detector.
+func (bld *BufferLeakDetector) Close() {
+	if bld.detectionCancel != nil {
+		bld.detectionCancel()
+	}
+	if bld.detectionTicker != nil {
+		bld.detectionTicker.Stop()
 	}
 }
 
 // releaseLargeOpSlot releases a slot for large operation processing.
-func (abp *AdaptiveBufferPool) releaseLargeOpSlot() {
-	select {
-	case <-abp.largeOpsSemaphore:
-		atomic.AddInt64(&abp.stats.ConcurrentLargeOps, -1)
-	default:
-		// Should not happen, but handle gracefully
+func (abp *AdaptiveBufferPool) releaseLargeOpSlot(token *ResourceToken) error {
+	if token == nil {
+		return ErrInvalidToken
 	}
+
+	err := token.Release()
+	if err == nil {
+		atomic.AddInt64(&abp.stats.ConcurrentLargeOps, -1)
+	}
+	return err
 }
 
 // adaptiveTeeReader implements io.Reader using adaptive buffer management.
@@ -4217,11 +5304,16 @@ func (abp *AdaptiveBufferPool) ChunkedCopyBuffer(dst io.Writer, src io.Reader, e
 
 	// For large data, use chunked copying with resource management
 	ctx := context.Background()
-	if err := abp.acquireLargeOpSlot(ctx); err != nil {
+	token, err := abp.acquireLargeOpSlot(ctx)
+	if err != nil {
 		// Fallback to regular copy if resource limit reached
 		return io.Copy(dst, src)
 	}
-	defer abp.releaseLargeOpSlot()
+	defer func() {
+		if releaseErr := abp.releaseLargeOpSlot(token); releaseErr != nil && abp.logger != nil {
+			level.Warn(abp.logger).Log("msg", "failed to release large op slot", "error", releaseErr)
+		}
+	}()
 
 	return abp.performChunkedCopy(dst, src, chunkSize)
 }
@@ -4352,10 +5444,15 @@ func (abp *AdaptiveBufferPool) ChunkedCopyBufferWithCallback(
 
 	// For large data, use chunked copying with progress tracking
 	ctx := context.Background()
-	if err := abp.acquireLargeOpSlot(ctx); err != nil {
+	token, err := abp.acquireLargeOpSlot(ctx)
+	if err != nil {
 		return io.Copy(dst, src)
 	}
-	defer abp.releaseLargeOpSlot()
+	defer func() {
+		if releaseErr := abp.releaseLargeOpSlot(token); releaseErr != nil && abp.logger != nil {
+			level.Warn(abp.logger).Log("msg", "failed to release large op slot", "error", releaseErr)
+		}
+	}()
 
 	return abp.performChunkedCopyWithProgress(dst, src, chunkSize, int64(estimatedSize), progressCallback)
 }
@@ -6977,5 +8074,622 @@ func (mpd *MemoryPressureDetector) Close() {
 
 	if mpd.logger != nil {
 		level.Info(mpd.logger).Log("msg", "memory pressure detector closed")
+	}
+}
+
+// NewLargeOperationManager creates a new large operation manager.
+func NewLargeOperationManager(config LargeOperationConfig, logger log.Logger) (*LargeOperationManager, error) {
+	if config.MaxConcurrentOps <= 0 {
+		config.MaxConcurrentOps = 10
+	}
+	if config.QueueSize < 0 {
+		config.QueueSize = 0 // Allow 0 to disable queuing
+	}
+	if config.RequestTimeout <= 0 {
+		config.RequestTimeout = 30 * time.Second
+	}
+	if config.QueueTimeout <= 0 {
+		config.QueueTimeout = 5 * time.Second
+	}
+	if config.MonitoringInterval <= 0 {
+		config.MonitoringInterval = 10 * time.Second
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	lom := &LargeOperationManager{
+		config:    config,
+		logger:    logger,
+		semaphore: make(chan struct{}, config.MaxConcurrentOps),
+		ctx:       ctx,
+		cancel:    cancel,
+		stats: &LargeOperationStats{
+			RequestsByPriority: make(map[OperationPriority]int64),
+			GrantedByPriority:  make(map[OperationPriority]int64),
+		},
+	}
+
+	// Initialize request queue
+	if config.QueueSize > 0 {
+		lom.requestQueue = make(chan *LargeOpRequest, config.QueueSize)
+	}
+
+	// Initialize priority queues if enabled
+	if config.EnablePriorityQueues {
+		lom.priorityQueues = make(map[OperationPriority]chan *LargeOpRequest)
+		for priority := PriorityLow; priority <= PriorityCritical; priority++ {
+			queueSize := config.QueueSize / 4 // Distribute queue size among priorities
+			if priority == PriorityCritical {
+				queueSize = config.QueueSize / 2 // Give more space to critical operations
+			}
+			lom.priorityQueues[priority] = make(chan *LargeOpRequest, queueSize)
+		}
+	}
+
+	// Initialize queue processor
+	if config.QueueSize > 0 {
+		processorConfig := QueueProcessorConfig{
+			ProcessingInterval:  100 * time.Millisecond,
+			FairnessWindow:      100,
+			StarvationThreshold: 30 * time.Second,
+			MaxRetries:          3,
+		}
+		lom.queueProcessor = NewQueueProcessor(processorConfig, logger, lom)
+	}
+
+	return lom, nil
+}
+
+// RequestResource requests a resource slot for a large operation.
+func (lom *LargeOperationManager) RequestResource(ctx context.Context, size int, priority OperationPriority) (*ResourceToken, error) {
+	requestID := fmt.Sprintf("req_%d_%d", time.Now().UnixNano(), size)
+
+	request := &LargeOpRequest{
+		ID:          requestID,
+		Priority:    priority,
+		Size:        size,
+		RequestedAt: time.Now(),
+		Context:     ctx,
+		Response:    make(chan *LargeOpResponse, 1),
+		Metadata:    make(map[string]interface{}),
+	}
+
+	atomic.AddInt64(&lom.stats.TotalRequests, 1)
+	lom.mutex.Lock()
+	lom.stats.RequestsByPriority[priority]++
+	lom.mutex.Unlock()
+
+	// Try immediate allocation first
+	if lom.tryImmediateAllocation(request) {
+		return lom.createResourceToken(request)
+	}
+
+	// If immediate allocation fails, handle queuing
+	if lom.config.QueueSize > 0 {
+		return lom.handleQueuedRequest(request)
+	}
+
+	// No queuing available, reject immediately
+	atomic.AddInt64(&lom.stats.DeniedRequests, 1)
+	return nil, ErrResourceUnavailable
+}
+
+// tryImmediateAllocation attempts to allocate resources immediately.
+func (lom *LargeOperationManager) tryImmediateAllocation(request *LargeOpRequest) bool {
+	select {
+	case lom.semaphore <- struct{}{}:
+		atomic.AddInt64(&lom.stats.GrantedRequests, 1)
+		lom.mutex.Lock()
+		lom.stats.GrantedByPriority[request.Priority]++
+		lom.mutex.Unlock()
+		atomic.AddInt64(&lom.stats.CurrentConcurrentOps, 1)
+
+		// Update max concurrent ops if needed
+		current := atomic.LoadInt64(&lom.stats.CurrentConcurrentOps)
+		for {
+			max := atomic.LoadInt64(&lom.stats.MaxConcurrentOps)
+			if current <= max || atomic.CompareAndSwapInt64(&lom.stats.MaxConcurrentOps, max, current) {
+				break
+			}
+		}
+
+		return true
+	default:
+		return false
+	}
+}
+
+// handleQueuedRequest handles a request that needs to be queued.
+func (lom *LargeOperationManager) handleQueuedRequest(request *LargeOpRequest) (*ResourceToken, error) {
+	queueStartTime := time.Now()
+
+	// Select appropriate queue
+	var targetQueue chan *LargeOpRequest
+	if lom.config.EnablePriorityQueues {
+		targetQueue = lom.priorityQueues[request.Priority]
+	} else {
+		targetQueue = lom.requestQueue
+	}
+
+	// Try to enqueue the request
+	select {
+	case targetQueue <- request:
+		atomic.AddInt64(&lom.stats.QueuedRequests, 1)
+
+		// Update queue size statistics
+		queueSize := int64(len(targetQueue))
+		for {
+			maxQueue := atomic.LoadInt64(&lom.stats.MaxQueueSize)
+			if queueSize <= maxQueue || atomic.CompareAndSwapInt64(&lom.stats.MaxQueueSize, maxQueue, queueSize) {
+				break
+			}
+		}
+		atomic.StoreInt64(&lom.stats.CurrentQueueSize, queueSize)
+
+	case <-time.After(lom.config.QueueTimeout):
+		atomic.AddInt64(&lom.stats.QueueOverflows, 1)
+		return nil, ErrQueueFull
+	case <-request.Context.Done():
+		return nil, request.Context.Err()
+	}
+
+	// Wait for response
+	select {
+	case response := <-request.Response:
+		queueTime := time.Since(queueStartTime)
+		lom.updateTimingStats(response.WaitTime, queueTime)
+
+		if response.Granted {
+			return response.Token, nil
+		}
+		return nil, response.Error
+
+	case <-time.After(lom.config.RequestTimeout):
+		atomic.AddInt64(&lom.stats.TimeoutRequests, 1)
+		return nil, ErrRequestTimeout
+
+	case <-request.Context.Done():
+		return nil, request.Context.Err()
+	}
+}
+
+// createResourceToken creates a new resource token for a granted request.
+func (lom *LargeOperationManager) createResourceToken(request *LargeOpRequest) (*ResourceToken, error) {
+	token := &ResourceToken{
+		ID:        fmt.Sprintf("token_%s", request.ID),
+		GrantedAt: time.Now(),
+		ExpiresAt: time.Now().Add(lom.config.RequestTimeout * 2), // Token expires after 2x request timeout
+		Size:      request.Size,
+		Priority:  request.Priority,
+		manager:   lom,
+	}
+
+	if lom.logger != nil {
+		level.Debug(lom.logger).Log(
+			"msg", "resource token granted",
+			"token_id", token.ID,
+			"request_id", request.ID,
+			"size", request.Size,
+			"priority", request.Priority,
+		)
+	}
+
+	return token, nil
+}
+
+// ReleaseResource releases a resource token.
+func (lom *LargeOperationManager) ReleaseResource(token *ResourceToken) error {
+	if token == nil {
+		return ErrInvalidToken
+	}
+
+	select {
+	case <-lom.semaphore:
+		atomic.AddInt64(&lom.stats.CurrentConcurrentOps, -1)
+
+		if lom.logger != nil {
+			level.Debug(lom.logger).Log(
+				"msg", "resource token released",
+				"token_id", token.ID,
+				"duration", time.Since(token.GrantedAt),
+			)
+		}
+
+		return nil
+	default:
+		return ErrTokenNotHeld
+	}
+}
+
+// updateTimingStats updates timing statistics.
+func (lom *LargeOperationManager) updateTimingStats(waitTime, queueTime time.Duration) {
+	// Update average wait time
+	lom.mutex.Lock()
+	if lom.stats.AverageWaitTime == 0 {
+		lom.stats.AverageWaitTime = waitTime
+	} else {
+		lom.stats.AverageWaitTime = (lom.stats.AverageWaitTime + waitTime) / 2
+	}
+
+	// Update average queue time
+	if lom.stats.AverageQueueTime == 0 {
+		lom.stats.AverageQueueTime = queueTime
+	} else {
+		lom.stats.AverageQueueTime = (lom.stats.AverageQueueTime + queueTime) / 2
+	}
+
+	// Update max times
+	if waitTime > lom.stats.MaxWaitTime {
+		lom.stats.MaxWaitTime = waitTime
+	}
+	if queueTime > lom.stats.MaxQueueTime {
+		lom.stats.MaxQueueTime = queueTime
+	}
+	lom.mutex.Unlock()
+}
+
+// startBackgroundProcessing starts background processing routines.
+func (lom *LargeOperationManager) startBackgroundProcessing() {
+	// Start queue processor if available
+	if lom.queueProcessor != nil {
+		lom.wg.Add(1)
+		go func() {
+			defer lom.wg.Done()
+			lom.queueProcessor.Start()
+		}()
+	}
+
+	// Start monitoring routine
+	lom.wg.Add(1)
+	go func() {
+		defer lom.wg.Done()
+		lom.monitoringRoutine()
+	}()
+}
+
+// monitoringRoutine runs periodic monitoring and alerting.
+func (lom *LargeOperationManager) monitoringRoutine() {
+	ticker := time.NewTicker(lom.config.MonitoringInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-lom.ctx.Done():
+			return
+		case <-ticker.C:
+			lom.performMonitoring()
+		}
+	}
+}
+
+// performMonitoring performs periodic monitoring and updates statistics.
+func (lom *LargeOperationManager) performMonitoring() {
+	// Update resource utilization
+	currentOps := atomic.LoadInt64(&lom.stats.CurrentConcurrentOps)
+	maxOps := int64(lom.config.MaxConcurrentOps)
+	utilization := float64(currentOps) / float64(maxOps) * 100
+	lom.stats.ResourceUtilization = utilization
+
+	// Calculate fairness score
+	lom.calculateFairnessScore()
+
+	// Log monitoring information
+	if lom.logger != nil && utilization > 80 {
+		level.Warn(lom.logger).Log(
+			"msg", "high resource utilization detected",
+			"utilization_percent", utilization,
+			"current_ops", currentOps,
+			"max_ops", maxOps,
+			"queue_size", atomic.LoadInt64(&lom.stats.CurrentQueueSize),
+		)
+	}
+}
+
+// calculateFairnessScore calculates a fairness score based on priority distribution.
+func (lom *LargeOperationManager) calculateFairnessScore() {
+	lom.mutex.RLock()
+	defer lom.mutex.RUnlock()
+
+	totalRequests := int64(0)
+	totalGranted := int64(0)
+
+	for priority := PriorityLow; priority <= PriorityCritical; priority++ {
+		totalRequests += lom.stats.RequestsByPriority[priority]
+		totalGranted += lom.stats.GrantedByPriority[priority]
+	}
+
+	if totalRequests == 0 {
+		lom.stats.FairnessScore = 1.0
+		return
+	}
+
+	// Calculate fairness using coefficient of variation
+	var variance float64
+	expectedRate := float64(totalGranted) / float64(totalRequests)
+
+	for priority := PriorityLow; priority <= PriorityCritical; priority++ {
+		requests := lom.stats.RequestsByPriority[priority]
+		granted := lom.stats.GrantedByPriority[priority]
+
+		if requests > 0 {
+			actualRate := float64(granted) / float64(requests)
+			variance += math.Pow(actualRate-expectedRate, 2)
+		}
+	}
+
+	variance /= 4 // Number of priority levels
+	stdDev := math.Sqrt(variance)
+
+	if expectedRate > 0 {
+		cv := stdDev / expectedRate
+		lom.stats.FairnessScore = math.Max(0, 1.0-cv) // Higher score = more fair
+	} else {
+		lom.stats.FairnessScore = 1.0
+	}
+}
+
+// GetStats returns current large operation statistics.
+func (lom *LargeOperationManager) GetStats() LargeOperationStats {
+	lom.mutex.RLock()
+	defer lom.mutex.RUnlock()
+
+	// Create a copy of the stats
+	stats := *lom.stats
+
+	// Copy maps
+	stats.RequestsByPriority = make(map[OperationPriority]int64)
+	stats.GrantedByPriority = make(map[OperationPriority]int64)
+
+	for priority := PriorityLow; priority <= PriorityCritical; priority++ {
+		stats.RequestsByPriority[priority] = lom.stats.RequestsByPriority[priority]
+		stats.GrantedByPriority[priority] = lom.stats.GrantedByPriority[priority]
+	}
+
+	return stats
+}
+
+// Close shuts down the large operation manager.
+func (lom *LargeOperationManager) Close() error {
+	lom.cancel()
+	lom.wg.Wait()
+
+	// Close all queues
+	if lom.requestQueue != nil {
+		close(lom.requestQueue)
+	}
+
+	if lom.priorityQueues != nil {
+		for _, queue := range lom.priorityQueues {
+			close(queue)
+		}
+	}
+
+	if lom.logger != nil {
+		level.Info(lom.logger).Log("msg", "large operation manager closed")
+	}
+
+	return nil
+}
+
+// NewQueueProcessor creates a new queue processor.
+func NewQueueProcessor(config QueueProcessorConfig, logger log.Logger, manager *LargeOperationManager) *QueueProcessor {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	return &QueueProcessor{
+		config:              config,
+		logger:              logger,
+		manager:             manager,
+		ctx:                 ctx,
+		cancel:              cancel,
+		priorityCounters:    make(map[OperationPriority]int64),
+		lastGrantedPriority: PriorityNormal,
+	}
+}
+
+// Start starts the queue processor.
+func (qp *QueueProcessor) Start() {
+	ticker := time.NewTicker(qp.config.ProcessingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-qp.ctx.Done():
+			return
+		case <-ticker.C:
+			qp.processQueues()
+		}
+	}
+}
+
+// processQueues processes pending requests from queues.
+func (qp *QueueProcessor) processQueues() {
+	if qp.manager.config.EnablePriorityQueues {
+		qp.processPriorityQueues()
+	} else {
+		qp.processStandardQueue()
+	}
+}
+
+// processPriorityQueues processes requests from priority queues.
+func (qp *QueueProcessor) processPriorityQueues() {
+	// Process in priority order, but with fairness considerations
+	priorities := []OperationPriority{PriorityCritical, PriorityHigh, PriorityNormal, PriorityLow}
+
+	for _, priority := range priorities {
+		queue := qp.manager.priorityQueues[priority]
+		if queue == nil {
+			continue
+		}
+
+		// Check for starvation prevention
+		if qp.shouldPreventStarvation(priority) {
+			continue
+		}
+
+		// Try to process one request from this priority level
+		select {
+		case request := <-queue:
+			qp.processRequest(request)
+			qp.updateFairnessCounters(priority)
+			return // Process one request per cycle
+		default:
+			// No requests in this priority queue
+		}
+	}
+}
+
+// processStandardQueue processes requests from the standard queue.
+func (qp *QueueProcessor) processStandardQueue() {
+	select {
+	case request := <-qp.manager.requestQueue:
+		qp.processRequest(request)
+	default:
+		// No requests in queue
+	}
+}
+
+// processRequest processes a single request.
+func (qp *QueueProcessor) processRequest(request *LargeOpRequest) {
+	startTime := time.Now()
+
+	// Check if request context is still valid
+	select {
+	case <-request.Context.Done():
+		qp.sendResponse(request, &LargeOpResponse{
+			Granted:   false,
+			Error:     request.Context.Err(),
+			WaitTime:  time.Since(request.RequestedAt),
+			QueueTime: time.Since(startTime),
+			GrantedAt: time.Now(),
+		})
+		return
+	default:
+	}
+
+	// Try to allocate resource
+	if qp.manager.tryImmediateAllocation(request) {
+		token, err := qp.manager.createResourceToken(request)
+		qp.sendResponse(request, &LargeOpResponse{
+			Granted:   err == nil,
+			Token:     token,
+			Error:     err,
+			WaitTime:  time.Since(request.RequestedAt),
+			QueueTime: time.Since(startTime),
+			GrantedAt: time.Now(),
+		})
+	} else {
+		// Resource still not available, put back in queue or reject
+		atomic.AddInt64(&qp.manager.stats.DeniedRequests, 1)
+		qp.sendResponse(request, &LargeOpResponse{
+			Granted:   false,
+			Error:     ErrResourceUnavailable,
+			WaitTime:  time.Since(request.RequestedAt),
+			QueueTime: time.Since(startTime),
+			GrantedAt: time.Now(),
+		})
+	}
+}
+
+// sendResponse sends a response to the request.
+func (qp *QueueProcessor) sendResponse(request *LargeOpRequest, response *LargeOpResponse) {
+	select {
+	case request.Response <- response:
+		// Response sent successfully
+	case <-time.After(1 * time.Second):
+		// Response channel blocked, log warning
+		if qp.logger != nil {
+			level.Warn(qp.logger).Log(
+				"msg", "failed to send response to request",
+				"request_id", request.ID,
+				"timeout", "1s",
+			)
+		}
+	}
+}
+
+// shouldPreventStarvation checks if processing should be skipped to prevent starvation.
+func (qp *QueueProcessor) shouldPreventStarvation(priority OperationPriority) bool {
+	if !qp.manager.config.EnableFairness {
+		return false
+	}
+
+	// Simple fairness: don't process same priority too many times in a row
+	if priority == qp.lastGrantedPriority {
+		counter := qp.priorityCounters[priority]
+		if counter >= qp.config.FairnessWindow/4 { // Max 25% of window for same priority
+			return true
+		}
+	}
+
+	return false
+}
+
+// updateFairnessCounters updates fairness tracking counters.
+func (qp *QueueProcessor) updateFairnessCounters(priority OperationPriority) {
+	qp.priorityCounters[priority]++
+	qp.lastGrantedPriority = priority
+
+	// Reset counters periodically
+	total := int64(0)
+	for _, count := range qp.priorityCounters {
+		total += count
+	}
+
+	if total >= qp.config.FairnessWindow {
+		for p := range qp.priorityCounters {
+			qp.priorityCounters[p] = 0
+		}
+	}
+}
+
+// Stop stops the queue processor.
+func (qp *QueueProcessor) Stop() {
+	qp.cancel()
+}
+
+// String methods for enums
+func (p OperationPriority) String() string {
+	switch p {
+	case PriorityLow:
+		return "low"
+	case PriorityNormal:
+		return "normal"
+	case PriorityHigh:
+		return "high"
+	case PriorityCritical:
+		return "critical"
+	default:
+		return "unknown"
+	}
+}
+
+// Release releases the resource token.
+func (rt *ResourceToken) Release() error {
+	return rt.manager.ReleaseResource(rt)
+}
+
+// IsExpired checks if the token has expired.
+func (rt *ResourceToken) IsExpired() bool {
+	return time.Now().After(rt.ExpiresAt)
+}
+
+// Error definitions for large operation management
+var (
+	ErrResourceUnavailable = errors.New("resource unavailable")
+	ErrQueueFull           = errors.New("request queue is full")
+	ErrRequestTimeout      = errors.New("request timeout")
+	ErrInvalidToken        = errors.New("invalid resource token")
+	ErrTokenNotHeld        = errors.New("token not held")
+)
+
+// ensureBackgroundProcessing ensures background processing is started if needed.
+func (lom *LargeOperationManager) ensureBackgroundProcessing() {
+	lom.mutex.Lock()
+	defer lom.mutex.Unlock()
+
+	// Check if already started (simple flag check)
+	if lom.queueProcessor != nil && lom.config.QueueSize > 0 {
+		// Start background processing once
+		go lom.startBackgroundProcessing()
 	}
 }
