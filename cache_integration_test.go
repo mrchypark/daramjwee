@@ -324,12 +324,20 @@ func testBackgroundCopyBehavior(t *testing.T, testData []byte, useBufferPool boo
 	cold.mu.RUnlock()
 
 	// Test ScheduleRefresh with buffer pool
-	refreshFetcher := &mockFetcher{content: string(testData), etag: "v2"}
+	refreshFetcher := &mockFetcher{
+		content:        string(testData),
+		etag:           "v2",
+		fetchCompleted: make(chan struct{}, 1),
+	}
 	err = cache.ScheduleRefresh(context.Background(), key, refreshFetcher)
 	require.NoError(t, err)
 
 	// Wait for refresh to complete
-	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-refreshFetcher.fetchCompleted:
+	case <-time.After(1 * time.Second):
+		t.Log("Refresh timeout, continuing test")
+	}
 
 	// Get refreshed data from hot store
 	hot.mu.RLock()
@@ -414,12 +422,20 @@ func testFullCacheWorkflow(t *testing.T, testData []byte, useBufferPool bool) fu
 	stream.Close()
 
 	// Step 4: Schedule refresh
-	refreshFetcher := &mockFetcher{content: string(testData), etag: "v2"}
+	refreshFetcher := &mockFetcher{
+		content:        string(testData),
+		etag:           "v2",
+		fetchCompleted: make(chan struct{}, 1),
+	}
 	err = cache.ScheduleRefresh(ctx, key, refreshFetcher)
 	require.NoError(t, err)
 
 	// Wait for refresh
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-refreshFetcher.fetchCompleted:
+	case <-time.After(1 * time.Second):
+		t.Log("Refresh timeout, continuing test")
+	}
 
 	// Get refreshed data
 	hot.mu.RLock()

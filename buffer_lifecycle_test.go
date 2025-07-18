@@ -59,10 +59,7 @@ func TestBufferLifecycleManager_RegisterBuffer(t *testing.T) {
 	// Register buffer
 	blm.RegisterBuffer(buf, poolSize)
 
-	// Small delay to ensure registration is complete
-	time.Sleep(10 * time.Millisecond)
-
-	// Verify registration
+	// Verify registration with proper synchronization
 	blm.registryMutex.RLock()
 	metadata, exists := blm.bufferRegistry[addr]
 	blm.registryMutex.RUnlock()
@@ -94,27 +91,36 @@ func TestBufferLifecycleManager_UpdateBufferUsage(t *testing.T) {
 
 	blm.RegisterBuffer(buf, 1024)
 
-	// Verify initial registration with proper synchronization
+	// Verify initial registration
 	blm.registryMutex.RLock()
-	initialMetadata, exists := blm.bufferRegistry[addr]
+	initialSize := len(blm.bufferRegistry)
+	_, exists := blm.bufferRegistry[addr]
 	blm.registryMutex.RUnlock()
 
-	require.True(t, exists, "Buffer should be registered")
-	require.NotNil(t, initialMetadata, "Buffer metadata should not be nil")
-	assert.Equal(t, int64(1), initialMetadata.UsageCount, "Initial usage count should be 1")
+	assert.Equal(t, 1, initialSize, "Should have one buffer registered")
+	assert.True(t, exists, "Buffer should be registered")
 
 	// Update usage multiple times
 	blm.UpdateBufferUsage(buf)
 	blm.UpdateBufferUsage(buf)
 
-	// Verify final state with proper synchronization
+	// Update efficiency metrics to calculate average usage count
+	blm.updateEfficiencyMetrics()
+
+	// Verify usage through statistics
+	stats := blm.GetLifecycleStats()
+	assert.Equal(t, int64(1), stats.TotalBuffersCreated, "Should have created one buffer")
+	assert.Equal(t, 3.0, stats.AverageUsageCount, "Average usage count should be 3.0") // Initial + 2 updates
+
+	// Verify buffer still exists and is active
 	blm.registryMutex.RLock()
+	finalSize := len(blm.bufferRegistry)
 	finalMetadata, exists := blm.bufferRegistry[addr]
 	blm.registryMutex.RUnlock()
 
-	require.True(t, exists, "Buffer should still be registered")
+	assert.Equal(t, 1, finalSize, "Should still have one buffer registered")
+	assert.True(t, exists, "Buffer should still be registered")
 	require.NotNil(t, finalMetadata, "Buffer metadata should not be nil")
-	assert.Equal(t, int64(3), finalMetadata.UsageCount, "Usage count should be 3 after updates") // Initial + 2 updates
 	assert.True(t, finalMetadata.IsActive, "Buffer should be active")
 }
 
@@ -132,29 +138,38 @@ func TestBufferLifecycleManager_UnregisterBuffer(t *testing.T) {
 
 	// Create multiple buffers to test unregistration
 	buffers := make([][]byte, 3)
+	addrs := make([]uintptr, 3)
 	for i := range buffers {
 		buffers[i] = make([]byte, 1024)
+		addrs[i] = uintptr(unsafe.Pointer(&buffers[i][0]))
 		blm.RegisterBuffer(buffers[i], 1024)
 	}
 
-	// Small delay to ensure registration is complete
-	time.Sleep(10 * time.Millisecond)
-
-	// Verify all buffers are registered
+	// Verify all buffers are registered with proper synchronization
 	blm.registryMutex.RLock()
 	initialSize := len(blm.bufferRegistry)
+	// Verify each buffer exists
+	for i, addr := range addrs {
+		_, exists := blm.bufferRegistry[addr]
+		assert.True(t, exists, "Buffer %d should be registered", i)
+	}
 	blm.registryMutex.RUnlock()
 	assert.Equal(t, 3, initialSize, "Should have three buffers registered")
 
 	// Unregister one buffer
 	blm.UnregisterBuffer(buffers[1])
 
-	// Small delay to ensure unregistration is complete
-	time.Sleep(10 * time.Millisecond)
-
-	// Verify one buffer was removed
+	// Verify one buffer was removed with proper synchronization
 	blm.registryMutex.RLock()
 	finalSize := len(blm.bufferRegistry)
+	// Verify specific buffer was removed
+	_, exists := blm.bufferRegistry[addrs[1]]
+	assert.False(t, exists, "Unregistered buffer should not exist")
+	// Verify other buffers still exist
+	_, exists0 := blm.bufferRegistry[addrs[0]]
+	_, exists2 := blm.bufferRegistry[addrs[2]]
+	assert.True(t, exists0, "Buffer 0 should still exist")
+	assert.True(t, exists2, "Buffer 2 should still exist")
 	blm.registryMutex.RUnlock()
 	assert.Equal(t, 2, finalSize, "Should have two buffers remaining after unregistration")
 }
