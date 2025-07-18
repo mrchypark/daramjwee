@@ -415,7 +415,7 @@ func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key string, me
 		// Fallback to standard io.TeeReader if buffer pool is not available
 		teeReader = io.TeeReader(stream, primaryWriter)
 	}
-	return newMultiCloser(teeReader, stream, primaryWriter), nil
+	return newMultiCloser(teeReader, []io.Closer{stream, primaryWriter}), nil
 }
 
 // cacheAndTeeStream caches the origin stream in the primary cache while simultaneously returning it to the user.
@@ -433,7 +433,7 @@ func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, resu
 			// Fallback to standard io.TeeReader if buffer pool is not available
 			teeReader = io.TeeReader(result.Body, cacheWriter)
 		}
-		return newMultiCloser(teeReader, result.Body, cacheWriter), nil
+		return newMultiCloser(teeReader, []io.Closer{result.Body, cacheWriter}), nil
 	}
 	return result.Body, nil
 }
@@ -498,7 +498,7 @@ func (c *DaramjweeCache) promoteToUpperTiers(ctx context.Context, key string, ti
 	level.Debug(c.Logger).Log("msg", "promoting to upper tiers", "key", key, "source_tier", tierIndex, "target_tiers", tierIndex)
 
 	// Return a multiCloser that will close all writers and the original stream
-	return newMultiCloser(teeReader, closers...), nil
+	return newMultiCloser(teeReader, closers), nil
 }
 
 // multiCloser combines multiple io.Closer instances into one.
@@ -507,7 +507,7 @@ type multiCloser struct {
 	closers []io.Closer
 }
 
-func newMultiCloser(r io.Reader, closers ...io.Closer) io.ReadCloser {
+func newMultiCloser(r io.Reader, closers []io.Closer) io.ReadCloser {
 	return &multiCloser{reader: r, closers: closers}
 }
 func (mc *multiCloser) Read(p []byte) (n int, err error) { return mc.reader.Read(p) }

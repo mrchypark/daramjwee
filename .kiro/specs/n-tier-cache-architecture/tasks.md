@@ -98,14 +98,14 @@
   - Write unit tests for configuration validation scenarios
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 8.4_
 
-- [ ] 15. Update multiCloser to handle variable number of closers
+- [x] 15. Update multiCloser to handle variable number of closers
   - Modify multiCloser to accept slice of closers instead of varargs
   - Ensure proper resource cleanup for promotion operations
   - Update newMultiCloser function signature and usage
   - Write unit tests for multiCloser with multiple promotion targets
   - _Requirements: 3.1, 3.2, 3.3_
 
-- [ ] 16. Write integration tests for N-tier scenarios
+- [x] 16. Write integration tests for N-tier scenarios
   - Test 3-tier setup (memory → file → cloud)
   - Test single-tier configuration
   - Test promotion behavior across multiple tiers

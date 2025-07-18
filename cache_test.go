@@ -174,7 +174,7 @@ type mockWriteCloser struct {
 func (mwc *mockWriteCloser) Write(p []byte) (n int, err error) { return mwc.buf.Write(p) }
 
 // Close executes the onClose callback.
-func (mwc *mockWriteCloser) Close() error                      { return mwc.onClose() }
+func (mwc *mockWriteCloser) Close() error { return mwc.onClose() }
 
 // deterministicFetcher is a mock fetcher that allows controlling fetch start and end signals.
 type deterministicFetcher struct {
@@ -535,7 +535,7 @@ func TestMultiCloser_ClosesAll_EvenIfOneFails(t *testing.T) {
 	closer2 := &mockCloser{shouldError: true}
 	closer3 := &mockCloser{}
 
-	multi := newMultiCloser(nil, closer1, closer2, closer3)
+	multi := newMultiCloser(nil, []io.Closer{closer1, closer2, closer3})
 
 	err := multi.Close()
 

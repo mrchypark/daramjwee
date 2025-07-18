@@ -81,7 +81,7 @@ func TestNew_OptionValidation(t *testing.T) {
 			name:        "Failure without any options",
 			options:     []Option{},
 			expectErr:   true,
-			expectedMsg: "hotStore is required",
+			expectedMsg: "either WithStores or WithHotStore must be provided",
 		},
 		{
 			name:        "Failure with nil HotStore",

@@ -607,7 +607,7 @@ func setupBenchmarkStore(b *testing.B, opts ...Option) *FileStore {
 	require.NoError(b, err)
 	b.Cleanup(func() { os.RemoveAll(dir) })
 
-	logger := level.NewFilter(log.NewLogfmtLogger(os.Stderr), level.AllowDebug())
+	logger := log.NewNopLogger() // Use no-op logger for benchmarks to avoid log noise
 	fs, err := New(dir, logger, 0, nil, opts...)
 	require.NoError(b, err)
 	return fs

@@ -1,6 +1,5 @@
-.PHONY: test coverage coverage-text
+.PHONY: test coverage coverage-text bench
 
-# ... existing content ...
 
 # Generate and view coverage report
 coverage:

@@ -216,7 +216,7 @@ func TestMultiCloserFunctionality(t *testing.T) {
 		closer3 := &testCloser{}
 
 		reader := strings.NewReader("test data")
-		multiCloser := newMultiCloser(reader, closer1, closer2, closer3)
+		multiCloser := newMultiCloser(reader, []io.Closer{closer1, closer2, closer3})
 
 		// Read some data
 		data, err := io.ReadAll(multiCloser)
@@ -240,7 +240,7 @@ func TestMultiCloserFunctionality(t *testing.T) {
 		closer3 := &testCloser{}
 
 		reader := strings.NewReader("test data")
-		multiCloser := newMultiCloser(reader, closer1, closer2, closer3)
+		multiCloser := newMultiCloser(reader, []io.Closer{closer1, closer2, closer3})
 
 		// Close the multiCloser
 		err := multiCloser.Close()
