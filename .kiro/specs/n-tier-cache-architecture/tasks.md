@@ -91,7 +91,7 @@
   - Write unit tests for various error scenarios
   - _Requirements: 2.5, 5.3, 5.4_
 
-- [ ] 14. Add configuration validation and conversion logic
+- [x] 14. Add configuration validation and conversion logic
   - Implement Config.validate() method for legacy-to-new conversion
   - Add validation for store slice integrity
   - Implement clear error messages for configuration conflicts
@@ -112,7 +112,7 @@
   - Test failure scenarios and recovery
   - _Requirements: 1.1, 1.2, 1.3, 2.1, 2.2, 2.3_
 
-- [ ] 17. Write performance benchmarks
+- [x] 17. Write performance benchmarks
   - Benchmark N-tier vs 2-tier performance
   - Profile memory allocation patterns
   - Test concurrent access and promotion scenarios

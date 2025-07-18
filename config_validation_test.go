@@ -2,7 +2,9 @@ package daramjwee
 
 import (
 	"testing"
+	"time"
 
+	"github.com/go-kit/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -291,5 +293,220 @@ func TestLegacyConfigurationConflicts(t *testing.T) {
 		var configErr *ConfigError
 		require.ErrorAs(t, err, &configErr)
 		assert.Contains(t, configErr.Message, "cannot use WithStores with WithHotStore or WithColdStore")
+	})
+}
+
+// TestConfigValidationErrorMessages tests that error messages are clear and actionable
+func TestConfigValidationErrorMessages(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupConfig    func() *Config
+		expectedErrMsg string
+	}{
+		{
+			name: "clear error for missing stores",
+			setupConfig: func() *Config {
+				return &Config{} // Empty config
+			},
+			expectedErrMsg: "either WithStores or WithHotStore must be provided",
+		},
+		{
+			name: "clear error for mixed configuration in validate",
+			setupConfig: func() *Config {
+				return &Config{
+					HotStore: newMockStore(),
+					Stores:   []Store{newMockStore()},
+				}
+			},
+			expectedErrMsg: "cannot mix WithStores with WithHotStore or WithColdStore options",
+		},
+		{
+			name: "clear error for nil store with specific index",
+			setupConfig: func() *Config {
+				return &Config{
+					Stores: []Store{newMockStore(), nil, newMockStore()},
+				}
+			},
+			expectedErrMsg: "store at index 1 cannot be nil",
+		},
+		{
+			name: "clear error for empty stores slice",
+			setupConfig: func() *Config {
+				return &Config{
+					Stores: []Store{},
+				}
+			},
+			expectedErrMsg: "at least one store must be configured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.setupConfig()
+			err := cfg.validate()
+			require.Error(t, err)
+
+			var configErr *ConfigError
+			require.ErrorAs(t, err, &configErr)
+			assert.Equal(t, tt.expectedErrMsg, configErr.Message)
+
+			// Verify the full error message format
+			expectedFullMsg := "daramjwee: configuration error: " + tt.expectedErrMsg
+			assert.Equal(t, expectedFullMsg, configErr.Error())
+		})
+	}
+}
+
+// TestConfigValidationStoreSliceIntegrity tests store slice integrity validation
+func TestConfigValidationStoreSliceIntegrity(t *testing.T) {
+	t.Run("validates all stores are non-nil after conversion", func(t *testing.T) {
+		cfg := &Config{}
+		hotOpt := WithHotStore(newMockStore())
+		coldOpt := WithColdStore(newMockStore())
+
+		err := hotOpt(cfg)
+		require.NoError(t, err)
+		err = coldOpt(cfg)
+		require.NoError(t, err)
+
+		// Before validation, legacy fields should be set
+		assert.NotNil(t, cfg.HotStore)
+		assert.NotNil(t, cfg.ColdStore)
+		assert.Nil(t, cfg.Stores)
+
+		// After validation, Stores should be set and legacy fields cleared
+		err = cfg.validate()
+		require.NoError(t, err)
+
+		assert.Len(t, cfg.Stores, 2)
+		assert.NotNil(t, cfg.Stores[0])
+		assert.NotNil(t, cfg.Stores[1])
+		assert.Nil(t, cfg.HotStore)
+		assert.Nil(t, cfg.ColdStore)
+	})
+
+	t.Run("preserves store order during conversion", func(t *testing.T) {
+		hotStore := newMockStore()
+		coldStore := newMockStore()
+
+		cfg := &Config{}
+		hotOpt := WithHotStore(hotStore)
+		coldOpt := WithColdStore(coldStore)
+
+		err := hotOpt(cfg)
+		require.NoError(t, err)
+		err = coldOpt(cfg)
+		require.NoError(t, err)
+
+		err = cfg.validate()
+		require.NoError(t, err)
+
+		// Verify order: HotStore becomes stores[0], ColdStore becomes stores[1]
+		assert.Equal(t, hotStore, cfg.Stores[0])
+		assert.Equal(t, coldStore, cfg.Stores[1])
+	})
+
+	t.Run("handles single store conversion correctly", func(t *testing.T) {
+		hotStore := newMockStore()
+
+		cfg := &Config{}
+		hotOpt := WithHotStore(hotStore)
+
+		err := hotOpt(cfg)
+		require.NoError(t, err)
+
+		err = cfg.validate()
+		require.NoError(t, err)
+
+		// Should have single store in slice
+		assert.Len(t, cfg.Stores, 1)
+		assert.Equal(t, hotStore, cfg.Stores[0])
+		assert.Nil(t, cfg.HotStore)
+		assert.Nil(t, cfg.ColdStore)
+	})
+}
+
+// TestNewCacheWithValidation tests that the New function properly validates configuration
+func TestNewCacheWithValidation(t *testing.T) {
+	logger := log.NewNopLogger()
+
+	t.Run("successful cache creation with new configuration", func(t *testing.T) {
+		cache, err := New(logger,
+			WithStores(newMockStore(), newMockStore()),
+			WithDefaultTimeout(10*time.Second),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, cache)
+		defer cache.Close()
+	})
+
+	t.Run("successful cache creation with legacy configuration", func(t *testing.T) {
+		cache, err := New(logger,
+			WithHotStore(newMockStore()),
+			WithColdStore(newMockStore()),
+			WithDefaultTimeout(10*time.Second),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, cache)
+		defer cache.Close()
+	})
+
+	t.Run("successful cache creation with single store", func(t *testing.T) {
+		cache, err := New(logger,
+			WithHotStore(newMockStore()),
+			WithDefaultTimeout(10*time.Second),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, cache)
+		defer cache.Close()
+	})
+
+	t.Run("error: no stores configured", func(t *testing.T) {
+		cache, err := New(logger,
+			WithDefaultTimeout(10*time.Second),
+		)
+		require.Error(t, err)
+		require.Nil(t, cache)
+
+		var configErr *ConfigError
+		require.ErrorAs(t, err, &configErr)
+		assert.Contains(t, configErr.Message, "either WithStores or WithHotStore must be provided")
+	})
+
+	t.Run("error: mixed configuration options", func(t *testing.T) {
+		cache, err := New(logger,
+			WithHotStore(newMockStore()),
+			WithStores(newMockStore()),
+		)
+		require.Error(t, err)
+		require.Nil(t, cache)
+
+		var configErr *ConfigError
+		require.ErrorAs(t, err, &configErr)
+		assert.Contains(t, configErr.Message, "cannot use WithStores with WithHotStore or WithColdStore")
+	})
+
+	t.Run("error: nil store in WithStores", func(t *testing.T) {
+		cache, err := New(logger,
+			WithStores(newMockStore(), nil),
+		)
+		require.Error(t, err)
+		require.Nil(t, cache)
+
+		var configErr *ConfigError
+		require.ErrorAs(t, err, &configErr)
+		assert.Contains(t, configErr.Message, "store at index 1 cannot be nil")
+	})
+
+	t.Run("error: empty stores slice", func(t *testing.T) {
+		cache, err := New(logger,
+			WithStores(),
+		)
+		require.Error(t, err)
+		require.Nil(t, cache)
+
+		var configErr *ConfigError
+		require.ErrorAs(t, err, &configErr)
+		assert.Contains(t, configErr.Message, "at least one store must be provided")
 	})
 }
