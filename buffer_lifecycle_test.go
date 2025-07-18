@@ -90,41 +90,32 @@ func TestBufferLifecycleManager_UpdateBufferUsage(t *testing.T) {
 
 	// Create and register buffer
 	buf := make([]byte, 1024)
+	addr := uintptr(unsafe.Pointer(&buf[0]))
 
 	blm.RegisterBuffer(buf, 1024)
 
-	// Small delay to ensure registration is complete
-	time.Sleep(10 * time.Millisecond)
-
-	// Verify initial state by checking registry size
+	// Verify initial registration with proper synchronization
 	blm.registryMutex.RLock()
-	initialSize := len(blm.bufferRegistry)
+	initialMetadata, exists := blm.bufferRegistry[addr]
 	blm.registryMutex.RUnlock()
 
-	assert.Equal(t, 1, initialSize, "Should have one buffer registered")
+	require.True(t, exists, "Buffer should be registered")
+	require.NotNil(t, initialMetadata, "Buffer metadata should not be nil")
+	assert.Equal(t, int64(1), initialMetadata.UsageCount, "Initial usage count should be 1")
 
-	// Update usage multiple times to ensure it works
+	// Update usage multiple times
 	blm.UpdateBufferUsage(buf)
 	blm.UpdateBufferUsage(buf)
 
-	// Small delay to ensure updates are complete
-	time.Sleep(10 * time.Millisecond)
-
-	// Verify registry still has the buffer
+	// Verify final state with proper synchronization
 	blm.registryMutex.RLock()
-	finalSize := len(blm.bufferRegistry)
-	// Find any metadata to check usage count
-	var foundMetadata *BufferMetadata
-	for _, metadata := range blm.bufferRegistry {
-		foundMetadata = metadata
-		break
-	}
+	finalMetadata, exists := blm.bufferRegistry[addr]
 	blm.registryMutex.RUnlock()
 
-	assert.Equal(t, 1, finalSize, "Should still have one buffer registered")
-	require.NotNil(t, foundMetadata, "Should find buffer metadata")
-	assert.Equal(t, int64(3), foundMetadata.UsageCount, "Usage count should be 3 after updates") // Initial + 2 updates
-	assert.True(t, foundMetadata.IsActive)
+	require.True(t, exists, "Buffer should still be registered")
+	require.NotNil(t, finalMetadata, "Buffer metadata should not be nil")
+	assert.Equal(t, int64(3), finalMetadata.UsageCount, "Usage count should be 3 after updates") // Initial + 2 updates
+	assert.True(t, finalMetadata.IsActive, "Buffer should be active")
 }
 
 func TestBufferLifecycleManager_UnregisterBuffer(t *testing.T) {
