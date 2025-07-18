@@ -414,11 +414,15 @@ func TestLargeOperationManager_QueueOverflow(t *testing.T) {
 	require.NoError(t, err)
 	defer lom.ReleaseResource(immediateToken)
 
-	// Fill queue
-	var queueTokens []*ResourceToken
+	// Fill queue with synchronous requests that will timeout
+	var wg sync.WaitGroup
 	for i := 0; i < config.QueueSize; i++ {
+		wg.Add(1)
 		go func() {
-			// These will be queued but not processed immediately
+			defer wg.Done()
+			// These will be queued but timeout due to no available resources
+			ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+			defer cancel()
 			lom.RequestResource(ctx, 1024, PriorityNormal)
 		}()
 	}
@@ -432,12 +436,8 @@ func TestLargeOperationManager_QueueOverflow(t *testing.T) {
 	assert.Nil(t, token)
 	assert.Equal(t, ErrQueueFull, err)
 
-	// Clean up
-	for _, token := range queueTokens {
-		if token != nil {
-			lom.ReleaseResource(token)
-		}
-	}
+	// Wait for goroutines to complete
+	wg.Wait()
 }
 
 func TestLargeOperationManager_Close(t *testing.T) {

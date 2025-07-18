@@ -8203,12 +8203,18 @@ func (lom *LargeOperationManager) tryImmediateAllocation(request *LargeOpRequest
 func (lom *LargeOperationManager) handleQueuedRequest(request *LargeOpRequest) (*ResourceToken, error) {
 	queueStartTime := time.Now()
 
-	// Select appropriate queue
+	// Select appropriate queue with safety check
+	lom.mutex.RLock()
 	var targetQueue chan *LargeOpRequest
-	if lom.config.EnablePriorityQueues {
+	if lom.config.EnablePriorityQueues && lom.priorityQueues != nil {
 		targetQueue = lom.priorityQueues[request.Priority]
-	} else {
+	} else if lom.requestQueue != nil {
 		targetQueue = lom.requestQueue
+	}
+	lom.mutex.RUnlock()
+
+	if targetQueue == nil {
+		return nil, ErrResourceUnavailable
 	}
 
 	// Try to enqueue the request
@@ -8453,14 +8459,21 @@ func (lom *LargeOperationManager) Close() error {
 	lom.cancel()
 	lom.wg.Wait()
 
-	// Close all queues
+	// Close all queues safely
+	lom.mutex.Lock()
+	defer lom.mutex.Unlock()
+
 	if lom.requestQueue != nil {
 		close(lom.requestQueue)
+		lom.requestQueue = nil
 	}
 
 	if lom.priorityQueues != nil {
-		for _, queue := range lom.priorityQueues {
-			close(queue)
+		for i, queue := range lom.priorityQueues {
+			if queue != nil {
+				close(queue)
+				lom.priorityQueues[i] = nil
+			}
 		}
 	}
 

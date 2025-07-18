@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -409,6 +411,7 @@ func TestLongRunningStability(t *testing.T) {
 
 		var operations int64
 		var samples []MemorySnapshot
+		var samplesMutex sync.Mutex
 		sampleTicker := time.NewTicker(validator.config.SampleInterval)
 		defer sampleTicker.Stop()
 
@@ -419,7 +422,10 @@ func TestLongRunningStability(t *testing.T) {
 				case <-ctx.Done():
 					return
 				case <-sampleTicker.C:
-					samples = append(samples, validator.TakeMemorySnapshot())
+					snapshot := validator.TakeMemorySnapshot()
+					samplesMutex.Lock()
+					samples = append(samples, snapshot)
+					samplesMutex.Unlock()
 				}
 			}
 		}()
@@ -437,32 +443,41 @@ func TestLongRunningStability(t *testing.T) {
 
 				buf := pool.Get(size)
 				if len(buf) > 0 {
-					buf[0] = byte(operations)
+					currentOps := atomic.LoadInt64(&operations)
+					buf[0] = byte(currentOps)
 				}
 				pool.Put(buf)
-				operations++
+				atomic.AddInt64(&operations, 1)
 
 				// Small delay to prevent overwhelming
-				if operations%100 == 0 {
+				currentOps := atomic.LoadInt64(&operations)
+				if currentOps%100 == 0 {
 					time.Sleep(time.Millisecond)
 				}
 			}
 		}
 
 		finalSnapshot := validator.TakeMemorySnapshot()
+		finalOperations := atomic.LoadInt64(&operations)
+
+		// Get samples safely
+		samplesMutex.Lock()
+		samplesCopy := make([]MemorySnapshot, len(samples))
+		copy(samplesCopy, samples)
+		samplesMutex.Unlock()
 
 		// Analyze stability
 		pattern := MemoryUsagePattern{
 			StartSnapshot: initialSnapshot,
 			EndSnapshot:   finalSnapshot,
-			Samples:       samples,
+			Samples:       samplesCopy,
 			Duration:      validator.config.StabilityTestDuration,
-			Operations:    operations,
+			Operations:    finalOperations,
 		}
 
 		// Calculate peak memory
 		pattern.PeakMemory = initialSnapshot.HeapInuse
-		for _, sample := range samples {
+		for _, sample := range samplesCopy {
 			if sample.HeapInuse > pattern.PeakMemory {
 				pattern.PeakMemory = sample.HeapInuse
 			}
