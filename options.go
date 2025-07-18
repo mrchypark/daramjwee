@@ -112,7 +112,36 @@ func (e *ConfigError) Error() string {
 //   - Caching: TTL and freshness behavior settings
 //   - Performance: Buffer pool and optimization settings
 type Config struct {
+	// Stores defines the N-tier cache hierarchy from fastest to slowest.
+	//
+	// N-tier architecture benefits:
+	//   - Flexible cache hierarchy with any number of tiers
+	//   - stores[0] is the primary/fastest tier (equivalent to old HotStore)
+	//   - Subsequent stores represent progressively slower tiers
+	//   - Eliminates need for nullStore patterns
+	//   - Simplifies core cache logic
+	//
+	// Configuration patterns:
+	//   - Single tier: []Store{memStore} (replaces HotStore-only config)
+	//   - Two tier: []Store{memStore, fileStore} (replaces HotStore+ColdStore)
+	//   - Multi tier: []Store{memStore, fileStore, cloudStore} (new capability)
+	//
+	// Performance characteristics:
+	//   - Sequential lookup from stores[0] to stores[n-1]
+	//   - Cache hits in stores[i] promote data to stores[0] through stores[i-1]
+	//   - Write operations target stores[0] (primary tier)
+	//   - Delete operations affect all tiers
+	//
+	// This field replaces the legacy HotStore and ColdStore fields.
+	// Use WithStores() option to configure, or legacy WithHotStore/WithColdStore
+	// options which are automatically converted to Stores slice.
+	Stores []Store
+
 	// HotStore is the primary cache tier optimized for fast access.
+	//
+	// DEPRECATED: Use Stores field with WithStores() option instead.
+	// This field is maintained for backward compatibility and will be
+	// automatically converted to Stores[0] during configuration validation.
 	//
 	// Selection criteria and mandatory requirements:
 	//   - MANDATORY: This field must be set, cache cannot function without it
@@ -133,6 +162,10 @@ type Config struct {
 	HotStore Store
 
 	// ColdStore is the secondary cache tier providing larger capacity storage.
+	//
+	// DEPRECATED: Use Stores field with WithStores() option instead.
+	// This field is maintained for backward compatibility and will be
+	// automatically converted to Stores[1] during configuration validation.
 	//
 	// Optional usage patterns and benefits:
 	//   - OPTIONAL: Can be nil, enabling single-tier caching
@@ -375,6 +408,9 @@ func WithHotStore(store Store) Option {
 		if store == nil {
 			return &ConfigError{"hot store cannot be nil"}
 		}
+		if cfg.Stores != nil {
+			return &ConfigError{"cannot use WithHotStore with WithStores"}
+		}
 		cfg.HotStore = store
 		return nil
 	}
@@ -437,7 +473,86 @@ func WithHotStore(store Store) Option {
 //   - Cost optimization for infrequently accessed data
 func WithColdStore(store Store) Option {
 	return func(cfg *Config) error {
+		if cfg.Stores != nil {
+			return &ConfigError{"cannot use WithColdStore with WithStores"}
+		}
 		cfg.ColdStore = store
+		return nil
+	}
+}
+
+// WithStores configures multiple cache tiers in order from fastest to slowest.
+//
+// This option enables N-tier cache architecture by accepting a slice of Store
+// interfaces ordered from fastest (stores[0]) to slowest (stores[n-1]). This
+// replaces the legacy two-tier HotStore/ColdStore configuration pattern.
+//
+// N-tier architecture benefits:
+//   - Support for any number of cache tiers (not limited to 2)
+//   - Simplified core cache logic with sequential lookup
+//   - Eliminates nullStore patterns for single-tier configurations
+//   - Flexible cache hierarchies (memory → file → cloud)
+//   - Consistent promotion logic regardless of tier count
+//
+// Store ordering and behavior:
+//   - stores[0]: Primary tier, fastest access, target for writes
+//   - stores[1..n]: Secondary tiers, progressively slower
+//   - Sequential lookup: check stores[0], then stores[1], etc.
+//   - Promotion: hits in stores[i] promote to stores[0..i-1]
+//   - Deletion: affects all configured stores
+//
+// Configuration validation:
+//   - At least one store must be provided
+//   - No store in the slice can be nil
+//   - Cannot be used with legacy WithHotStore/WithColdStore options
+//
+// Example usage:
+//
+//	// Single-tier configuration (replaces WithHotStore only)
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithStores(memStore),
+//	    // ... other options
+//	)
+//
+//	// Two-tier configuration (replaces WithHotStore + WithColdStore)
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithStores(memStore, fileStore),
+//	    // ... other options
+//	)
+//
+//	// Multi-tier configuration (new capability)
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithStores(memStore, fileStore, cloudStore),
+//	    // ... other options
+//	)
+//
+// Performance considerations:
+//   - Order stores by access speed (fastest first)
+//   - Consider promotion overhead for deep hierarchies
+//   - Monitor tier hit rates and adjust capacity accordingly
+//   - Balance tier count vs. complexity
+//
+// Migration from legacy configuration:
+//   - WithHotStore(hot) → WithStores(hot)
+//   - WithHotStore(hot) + WithColdStore(cold) → WithStores(hot, cold)
+//   - Legacy options are automatically converted during validation
+func WithStores(stores ...Store) Option {
+	return func(cfg *Config) error {
+		if len(stores) == 0 {
+			return &ConfigError{"at least one store must be provided"}
+		}
+
+		for i, store := range stores {
+			if store == nil {
+				return &ConfigError{fmt.Sprintf("store at index %d cannot be nil", i)}
+			}
+		}
+
+		if cfg.HotStore != nil || cfg.ColdStore != nil {
+			return &ConfigError{"cannot use WithStores with WithHotStore or WithColdStore"}
+		}
+
+		cfg.Stores = stores
 		return nil
 	}
 }
@@ -1172,4 +1287,68 @@ func WithBufferPoolMetrics(enabled bool, loggingInterval time.Duration) Option {
 		cfg.BufferPool.LoggingInterval = loggingInterval
 		return nil
 	}
+}
+
+// validate performs configuration validation and converts legacy configuration
+// to the new N-tier Stores architecture.
+//
+// This method handles the transition from the legacy HotStore/ColdStore fields
+// to the new Stores slice, ensuring backward compatibility while enabling
+// the new N-tier cache architecture.
+//
+// Validation and conversion logic:
+//   - Converts legacy HotStore/ColdStore to Stores slice
+//   - Validates that at least one store is configured
+//   - Prevents mixing of legacy and new configuration options
+//   - Ensures no nil stores in the configuration
+//
+// Legacy configuration conversion:
+//   - HotStore only → Stores = []Store{HotStore}
+//   - HotStore + ColdStore → Stores = []Store{HotStore, ColdStore}
+//   - HotStore + nil ColdStore → Stores = []Store{HotStore}
+//
+// Error conditions:
+//   - No stores configured (neither legacy nor new)
+//   - Mixing WithStores with WithHotStore/WithColdStore
+//   - Nil stores in any configuration
+//
+// This method is called during cache initialization to ensure
+// configuration consistency before creating the cache instance.
+func (cfg *Config) validate() error {
+	// Check for mixed configuration usage
+	if cfg.Stores != nil && (cfg.HotStore != nil || cfg.ColdStore != nil) {
+		return &ConfigError{"cannot mix WithStores with WithHotStore or WithColdStore options"}
+	}
+
+	// Convert legacy configuration to new Stores slice
+	if cfg.Stores == nil {
+		if cfg.HotStore == nil {
+			return &ConfigError{"either WithStores or WithHotStore must be provided"}
+		}
+
+		// Convert legacy configuration to Stores slice
+		if cfg.ColdStore != nil {
+			cfg.Stores = []Store{cfg.HotStore, cfg.ColdStore}
+		} else {
+			cfg.Stores = []Store{cfg.HotStore}
+		}
+
+		// Clear legacy fields after conversion
+		cfg.HotStore = nil
+		cfg.ColdStore = nil
+	}
+
+	// Validate Stores slice
+	if len(cfg.Stores) == 0 {
+		return &ConfigError{"at least one store must be configured"}
+	}
+
+	// Validate that no store is nil
+	for i, store := range cfg.Stores {
+		if store == nil {
+			return &ConfigError{fmt.Sprintf("store at index %d cannot be nil", i)}
+		}
+	}
+
+	return nil
 }

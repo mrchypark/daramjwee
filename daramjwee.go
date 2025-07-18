@@ -290,6 +290,131 @@ var ErrCacheableNotFound = errors.New("daramjwee: resource not found, but this s
 // during cache shutdown scenarios.
 var ErrCacheClosed = errors.New("daramjwee: cache is closed")
 
+// TierError represents an error that occurred in a specific cache tier.
+//
+// TierError provides detailed context about which tier encountered an error,
+// enabling better debugging, monitoring, and error handling strategies in
+// N-tier cache architectures. This error type wraps the underlying error
+// while preserving tier-specific information.
+//
+// Error context and debugging benefits:
+//   - Identifies which specific tier encountered the error
+//   - Preserves the original error for detailed diagnosis
+//   - Enables tier-specific error handling and recovery strategies
+//   - Supports monitoring and alerting based on tier performance
+//   - Facilitates debugging of complex multi-tier cache scenarios
+//
+// Common usage patterns:
+//   - Store operation failures with tier identification
+//   - Promotion operation errors with source and target tier info
+//   - Sequential lookup failures with tier-by-tier error tracking
+//   - Performance monitoring and alerting based on tier health
+//
+// Example error handling:
+//
+//	stream, err := cache.Get(ctx, key, fetcher)
+//	if err != nil {
+//	    var tierErr *TierError
+//	    if errors.As(err, &tierErr) {
+//	        log.Error("Cache tier error",
+//	            "tier", tierErr.Tier,
+//	            "operation", tierErr.Operation,
+//	            "key", tierErr.Key,
+//	            "error", tierErr.Err)
+//
+//	        // Handle based on tier
+//	        switch tierErr.Tier {
+//	        case 0:
+//	            // Primary tier error - critical
+//	            alerting.SendAlert("Primary cache tier failure", tierErr)
+//	        default:
+//	            // Secondary tier error - less critical
+//	            monitoring.RecordTierError(tierErr.Tier, tierErr.Err)
+//	        }
+//	    }
+//	}
+//
+// Monitoring and alerting integration:
+//   - Track error rates per tier for performance analysis
+//   - Set up different alert thresholds for different tiers
+//   - Analyze error patterns to identify tier-specific issues
+//   - Support automated failover based on tier health
+type TierError struct {
+	// Tier indicates which cache tier encountered the error (0-based index)
+	Tier int
+
+	// Operation describes what operation was being performed when the error occurred
+	Operation string
+
+	// Key is the cache key that was being processed (if applicable)
+	Key string
+
+	// Err is the underlying error that occurred
+	Err error
+}
+
+// Error returns a formatted error message that includes tier information.
+//
+// The error message format provides clear context about which tier failed
+// and what operation was being performed, making debugging easier.
+//
+// Error message format: "daramjwee: tier {tier} {operation} failed for key '{key}': {underlying error}"
+//
+// Example error messages:
+//   - "daramjwee: tier 0 get failed for key 'user:123': connection refused"
+//   - "daramjwee: tier 1 set failed for key 'data:456': disk full"
+//   - "daramjwee: tier 2 delete failed for key 'cache:789': permission denied"
+func (e *TierError) Error() string {
+	if e.Key != "" {
+		return fmt.Sprintf("daramjwee: tier %d %s failed for key '%s': %v", e.Tier, e.Operation, e.Key, e.Err)
+	}
+	return fmt.Sprintf("daramjwee: tier %d %s failed: %v", e.Tier, e.Operation, e.Err)
+}
+
+// Unwrap returns the underlying error, supporting Go 1.13+ error unwrapping.
+//
+// This method enables the use of errors.Is() and errors.As() to check for
+// specific underlying error types while preserving the tier context.
+//
+// Example usage:
+//
+//	if errors.Is(err, context.DeadlineExceeded) {
+//	    // Handle timeout regardless of which tier it occurred in
+//	}
+//
+//	var netErr *net.OpError
+//	if errors.As(err, &netErr) {
+//	    // Handle network errors from any tier
+//	}
+func (e *TierError) Unwrap() error {
+	return e.Err
+}
+
+// NewTierError creates a new TierError with the specified context.
+//
+// This constructor ensures consistent error creation across the codebase
+// and provides a convenient way to wrap errors with tier information.
+//
+// Parameters:
+//   - tier: The cache tier index where the error occurred (0-based)
+//   - operation: Description of the operation that failed (e.g., "get", "set", "delete")
+//   - key: The cache key being processed (can be empty for non-key operations)
+//   - err: The underlying error that occurred
+//
+// Example usage:
+//
+//	if err := store.Get(ctx, key); err != nil {
+//	    return NewTierError(tierIndex, "get", key, err)
+//	}
+func NewTierError(tier int, operation, key string, err error) *TierError {
+	return &TierError{
+		Tier:      tier,
+		Operation: operation,
+		Key:       key,
+		Err:       err,
+	}
+}
+
 // Cache provides a high-performance, stream-based hybrid caching interface.
 //
 // Cache implements a multi-tier caching strategy with hot and cold storage tiers,
@@ -2038,13 +2163,9 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		}
 	}
 
-	if cfg.HotStore == nil {
-		return nil, &ConfigError{"hotStore is required"}
-	}
-
-	if cfg.ColdStore == nil {
-		level.Debug(logger).Log("msg", "cold store not configured, using null store")
-		cfg.ColdStore = newNullStore()
+	// Validate and convert configuration
+	if err := cfg.validate(); err != nil {
+		return nil, err
 	}
 
 	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.WorkerPoolSize, cfg.WorkerQueueSize, cfg.WorkerJobTimeout)
@@ -2092,8 +2213,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 
 	c := &DaramjweeCache{
 		Logger:           logger,
-		HotStore:         cfg.HotStore,
-		ColdStore:        cfg.ColdStore,
+		Stores:           cfg.Stores,
 		Worker:           workerManager,
 		BufferPool:       bufferPool,
 		DefaultTimeout:   cfg.DefaultTimeout,

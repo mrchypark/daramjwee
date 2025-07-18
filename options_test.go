@@ -348,7 +348,7 @@ func TestNew_OptionOverrides(t *testing.T) {
 }
 
 // TestNew_NilColdStoreIsValid verifies that passing nil as ColdStore is valid,
-// and in this case nullStore is used internally.
+// and the cache is properly configured with a single store.
 func TestNew_NilColdStoreIsValid(t *testing.T) {
 	validHotStore := &optionsTestMockStore{}
 
@@ -362,12 +362,11 @@ func TestNew_NilColdStoreIsValid(t *testing.T) {
 	require.NotNil(t, cache)
 	defer cache.Close()
 
-	// To check if nullStore is used internally, we need to access the actual ColdStore.
+	// Verify that the cache has only one store (the HotStore)
 	dCache, ok := cache.(*DaramjweeCache)
 	require.True(t, ok)
 
-	// Check if it's a nullStore type.
-	// In the New function of daramjwee.go, nil ColdStore is replaced with *nullStore.
-	_, ok = dCache.ColdStore.(*nullStore)
-	assert.True(t, ok, "ColdStore should be an instance of nullStore when configured with nil")
+	// With the new architecture, HotStore + nil ColdStore should result in single store
+	assert.Len(t, dCache.Stores, 1, "Cache should have only one store when ColdStore is nil")
+	assert.NotNil(t, dCache.Stores[0], "Primary store should not be nil")
 }
