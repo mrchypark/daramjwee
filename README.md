@@ -259,3 +259,138 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 ```
+
+## Testing
+
+`daramjwee` includes comprehensive test suites optimized for both local development and CI environments.
+
+### Test Categories
+
+The project includes several types of tests:
+
+- **Unit Tests**: Core functionality and component testing
+- **Integration Tests**: Multi-component interaction testing
+- **Performance Tests**: Throughput and latency benchmarks
+- **Memory Efficiency Tests**: Memory usage and leak detection
+- **Race Condition Tests**: Concurrent access safety verification
+
+### Running Tests
+
+#### Local Development
+
+For local development with full test coverage:
+
+```bash
+# Run all tests (full test suite)
+make test-local
+
+# Run tests with race detection
+make test-race
+
+# Run tests with coverage report
+make test-coverage
+
+# Run specific test categories
+make test-memory      # Memory efficiency tests
+make test-adaptive    # Adaptive buffer pool tests
+make test-performance # Performance tests
+```
+
+#### CI Environment
+
+For CI environments with optimized test parameters:
+
+```bash
+# Run CI-optimized tests
+make test-ci
+
+# Run CI tests with race detection
+make test-race-ci
+
+# Run CI tests with coverage
+make test-coverage-ci
+
+# Run specific CI test categories
+make test-memory-ci      # Memory efficiency tests (CI)
+make test-adaptive-ci    # Adaptive buffer pool tests (CI)
+make test-performance-ci # Performance tests (CI)
+```
+
+#### Quick Testing
+
+For rapid development cycles:
+
+```bash
+# Run short tests only
+make test-short
+
+# Run quick development tests
+make quick
+```
+
+#### Advanced Testing
+
+```bash
+# Run benchmarks
+make test-bench
+
+# Test specific package
+make test-pkg PKG=pkg/store/memstore
+
+# Test with specific pattern
+make test-pattern PATTERN=TestAdaptiveBufferPool
+
+# Test with profiling
+make test-profile     # CPU profiling
+make test-memprofile  # Memory profiling
+```
+
+### Test Configuration
+
+The test suite uses build tags to differentiate between local and CI environments:
+
+- **Local tests** (`!ci` tag): Full test suite with comprehensive scenarios
+- **CI tests** (`ci` tag): Optimized for CI with reduced iterations and more generous thresholds
+
+### Environment Variables
+
+You can control test behavior with environment variables:
+
+```bash
+# Run tests in short mode
+go test -short ./...
+
+# Set custom timeout
+go test -timeout 60s ./...
+
+# Enable verbose output
+go test -v ./...
+```
+
+### Continuous Integration
+
+The project includes a complete CI target that runs all necessary checks:
+
+```bash
+# Complete CI test suite
+make ci
+```
+
+This runs:
+- Race condition tests
+- Coverage analysis
+- All test categories with CI-optimized parameters
+
+### Test Structure
+
+Tests are organized by functionality:
+
+- `*_test.go`: Core functionality tests (local only)
+- `*_ci_test.go`: CI-optimized versions
+- `*_integration_test.go`: Integration tests
+- `*_benchmark_test.go`: Performance benchmarks
+
+The dual test structure ensures that:
+- Local development has comprehensive test coverage
+- CI environments run efficiently with appropriate resource constraints
+- Both environments maintain the same level of functional verification

@@ -1,0 +1,109 @@
+name: Local Development
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run comprehensive tests weekly on Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+
+jobs:
+  comprehensive-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [1.24.x]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run comprehensive local tests
+      run: make test-local
+
+    - name: Run comprehensive tests with race detection
+      run: make test-race
+
+    - name: Generate comprehensive coverage report
+      run: make test-coverage
+
+    - name: Run performance analysis
+      run: make test-performance
+
+    - name: Run memory efficiency tests
+      run: make test-memory
+
+    - name: Run adaptive buffer pool tests
+      run: make test-adaptive
+
+    - name: Upload comprehensive coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.out
+        flags: comprehensive
+        name: codecov-comprehensive
+        fail_ci_if_error: false
+
+  stress-test:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.24.x
+
+    - name: Run stress tests
+      run: |
+        # Run tests multiple times to catch flaky tests
+        for i in {1..5}; do
+          echo "=== Stress test iteration $i ==="
+          make test-race
+        done
+
+    - name: Run long-running stability tests
+      run: |
+        # Run with extended timeout for stability tests
+        go test -v -timeout 300s -run "TestLongRunning" ./...
+
+  memory-analysis:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.24.x
+
+    - name: Run memory profiling
+      run: make test-memprofile
+
+    - name: Run CPU profiling
+      run: make test-profile
+
+    - name: Archive profiling results
+      uses: actions/upload-artifact@v3
+      with:
+        name: profiling-results
+        path: |
+          *.prof
+          coverage.out
+        retention-days: 7
