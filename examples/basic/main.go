@@ -97,26 +97,37 @@ func ExampleOriginFetcher_Fetch() {
 	// [Origin] Fetching key: hello, (old ETag: 'v1')Data not modified as expected.
 }
 
-// main sets up and runs a daramjwee cache example with a file-based hot store
+// main sets up and runs a daramjwee cache example with N-tier configuration
 // and a simulated origin server, exposing cached content via an HTTP server.
 func main() {
 	logger := log.NewLogfmtLogger(os.Stderr)
 	logger = level.NewFilter(logger, level.AllowDebug())
 
-	hotStoreDir := "./daramjwee-hot-store"
-	if err := os.MkdirAll(hotStoreDir, 0755); err != nil {
+	// Create cache directory
+	cacheDir := "./daramjwee-cache"
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		panic(err)
 	}
 
-	hotStore, err := filestore.New(hotStoreDir, log.With(logger, "tier", "hot"), 1024*1024, nil)
+	// Create file store for persistent caching
+	fileStore, err := filestore.New(cacheDir, log.With(logger, "tier", "file"), 10*1024*1024, nil)
 	if err != nil {
 		panic(err)
 	}
 
+	// Create cache with single-tier configuration (file-based)
+	// This demonstrates the simplest N-tier setup with just one tier
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(hotStore),
+		// N-tier configuration with single file store
+		daramjwee.WithStores(fileStore),
+
+		// Alternative: Legacy configuration (commented out)
+		// daramjwee.WithHotStore(fileStore),
+
 		daramjwee.WithDefaultTimeout(5*time.Second),
+		daramjwee.WithCache(1*time.Minute),
+		daramjwee.WithNegativeCache(30*time.Second),
 	)
 	if err != nil {
 		panic(err)
@@ -158,10 +169,16 @@ func main() {
 	})
 
 	fmt.Println("daramjwee basic server is running on :8080")
+	fmt.Println("This example demonstrates single-tier N-tier cache configuration.")
 	fmt.Println("Try visiting:")
 	fmt.Println("  http://localhost:8080/objects/hello")
 	fmt.Println("  http://localhost:8080/objects/world")
 	fmt.Println("  http://localhost:8080/objects/not-exist")
+	fmt.Println("")
+	fmt.Println("Cache behavior:")
+	fmt.Println("  - First request: Fetch from origin + cache in file store")
+	fmt.Println("  - Subsequent requests: Serve from file store cache")
+	fmt.Println("  - Check the ./daramjwee-cache directory for cached files")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		fmt.Printf("Failed to start server: %v\n", err)
 		os.Exit(1)

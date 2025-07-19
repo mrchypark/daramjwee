@@ -101,11 +101,11 @@ Here's a comparison of the performance (ns/op, lower is better) of different loc
 
 ## Data Retrieval Flow
 
-The data retrieval process in `daramjwee` follows a clear, tiered approach to maximize performance and efficiency.
+The data retrieval process in `daramjwee` follows a flexible N-tier approach to maximize performance and efficiency across any number of cache tiers.
 
 ```mermaid
 flowchart TD
-    A[Client Request for a Key] --> B{Check Hot Tier};
+    A[Client Request for a Key] --> B{Check stores[0] - Primary Tier};
 
     B -- Hit --> C{Is item stale?};
     C -- No --> D[Stream data to Client];
@@ -114,38 +114,150 @@ flowchart TD
     F --> G(Schedule Background Refresh);
     G --> E;
 
-    B -- Miss --> H{Check Cold Tier};
+    B -- Miss --> H{Check stores[1] - Secondary Tier};
 
-    H -- Hit --> I[Stream data to Client & Promote to Hot Tier];
+    H -- Hit --> I[Stream data to Client & Promote to stores[0]];
     I --> E;
 
-    H -- Miss --> J[Fetch from Origin];
-    J -- Success --> K[Stream data to Client & Write to Hot Tier];
-    K --> L(Optionally: Schedule write to Cold Tier);
-    L --> E;
+    H -- Miss --> J{Check stores[2...n] - Lower Tiers};
     
-    J -- Not Found (Cacheable) --> M[Cache Negative Entry];
-    M --> N[Return 'Not Found' to Client];
-    N --> E;
+    J -- Hit --> K[Stream data to Client & Promote to Upper Tiers];
+    K --> E;
+
+    J -- Miss --> L[Fetch from Origin];
+    L -- Success --> M[Stream data to Client & Write to stores[0]];
+    M --> E;
     
-    J -- Not Modified (304) --> O{Re-fetch from Hot Tier};
-    O -- Success --> D;
-    O -- Failure (e.g., evicted) --> N;
+    L -- Not Found (Cacheable) --> N[Cache Negative Entry in stores[0]];
+    N --> O[Return 'Not Found' to Client];
+    O --> E;
+    
+    L -- Not Modified (304) --> P{Re-fetch from stores[0]};
+    P -- Success --> D;
+    P -- Failure (e.g., evicted) --> O;
 ```
 
-1.  **Check Hot Tier:** Looks for the object in the Hot Tier.
-      * **Hit (Fresh):** Immediately returns the object stream to the client.
-      * **Hit (Stale):** Immediately returns the **stale** object stream to the client and schedules a background task to refresh the cache from the origin.
-2.  **Check Cold Tier:** If not in the Hot Tier, it checks the Cold Tier.
-      * **Hit:** Streams the object to the client while simultaneously promoting it to the Hot Tier for faster access next time.
-3.  **Fetch from Origin:** If the object is in neither tier (Cache Miss), it invokes the user-provided `Fetcher`.
-      * **Success:** The fetched data stream is sent to the client and written to the Hot Tier at the same time.
-      * **Not Modified:** If the origin returns `ErrNotModified`, `daramjwee` attempts to re-serve the data from the Hot Tier.
-      * **Not Found:** If the origin returns `ErrCacheableNotFound`, a negative entry is stored to prevent repeated fetches.
+### N-Tier Cache Behavior
+
+1.  **Sequential Lookup:** Checks cache tiers in order from fastest (stores[0]) to slowest (stores[n-1]).
+      * **Primary Tier Hit (stores[0]):** Immediately returns the object stream to the client.
+      * **Stale Data:** Returns stale data immediately while scheduling background refresh.
+2.  **Lower Tier Hit (stores[i] where i > 0):** 
+      * Streams the object to the client while simultaneously promoting it to all upper tiers (stores[0] through stores[i-1]).
+      * Uses efficient streaming promotion to avoid memory overhead.
+3.  **Cache Miss (All Tiers):** Invokes the user-provided `Fetcher`.
+      * **Success:** The fetched data stream is sent to the client and written to the primary tier (stores[0]).
+      * **Not Modified:** If the origin returns `ErrNotModified`, attempts to re-serve from the primary tier.
+      * **Not Found:** If the origin returns `ErrCacheableNotFound`, a negative entry is stored in the primary tier.
+
+### Configuration Examples
+
+**Single Tier (Memory Only):**
+```go
+cache, err := daramjwee.New(logger,
+    daramjwee.WithStores(memStore),
+)
+```
+
+**Two Tier (Memory + File):**
+```go
+cache, err := daramjwee.New(logger,
+    daramjwee.WithStores(memStore, fileStore),
+)
+```
+
+**Multi Tier (Memory + File + Cloud):**
+```go
+cache, err := daramjwee.New(logger,
+    daramjwee.WithStores(memStore, fileStore, cloudStore),
+)
+```
+
+## N-Tier Cache Architecture
+
+`daramjwee` now supports flexible N-tier cache architecture, allowing you to configure any number of cache tiers from fastest to slowest. This replaces the previous fixed two-tier (hot/cold) limitation.
+
+### Key Benefits
+
+- **Flexible Hierarchy:** Configure any number of cache tiers (1, 2, 3, or more)
+- **Simplified Logic:** Sequential lookup and consistent promotion logic
+- **Better Performance:** Optimized for various storage characteristics
+- **Backward Compatible:** Existing hot/cold configurations continue to work
+
+### Configuration Options
+
+#### New N-Tier Configuration (Recommended)
+
+```go
+// Single tier (memory only)
+cache, err := daramjwee.New(logger,
+    daramjwee.WithStores(memStore),
+)
+
+// Two tier (memory + file)
+cache, err := daramjwee.New(logger,
+    daramjwee.WithStores(memStore, fileStore),
+)
+
+// Multi tier (memory + file + cloud)
+cache, err := daramjwee.New(logger,
+    daramjwee.WithStores(memStore, fileStore, cloudStore),
+)
+```
+
+#### Legacy Configuration (Still Supported)
+
+```go
+// Two tier using legacy options
+cache, err := daramjwee.New(logger,
+    daramjwee.WithHotStore(memStore),
+    daramjwee.WithColdStore(fileStore), // Optional
+)
+```
+
+### Migration Guide
+
+**From Legacy to N-Tier Configuration:**
+
+| Legacy Configuration | N-Tier Equivalent |
+|---------------------|-------------------|
+| `WithHotStore(hot)` | `WithStores(hot)` |
+| `WithHotStore(hot) + WithColdStore(cold)` | `WithStores(hot, cold)` |
+| Hot-only (no cold store) | `WithStores(hot)` |
+
+**Migration Steps:**
+
+1. **Identify Current Configuration:** Check if you're using `WithHotStore` and `WithColdStore`
+2. **Replace with WithStores:** Combine your stores into a single `WithStores()` call
+3. **Test Thoroughly:** Verify cache behavior remains identical
+4. **Optional Expansion:** Consider adding additional tiers for better performance
+
+**Example Migration:**
+
+```go
+// Before (Legacy)
+cache, err := daramjwee.New(logger,
+    daramjwee.WithHotStore(memStore),
+    daramjwee.WithColdStore(fileStore),
+    // ... other options
+)
+
+// After (N-Tier)
+cache, err := daramjwee.New(logger,
+    daramjwee.WithStores(memStore, fileStore),
+    // ... other options
+)
+
+// Extended (Add Cloud Tier)
+cache, err := daramjwee.New(logger,
+    daramjwee.WithStores(memStore, fileStore, cloudStore),
+    // ... other options
+)
+```
 
 ## Getting Started
 
-Here is a simple example of using `daramjwee` in a web server.
+Here is a simple example of using `daramjwee` in a web server with N-tier configuration.
 
 ```go
 package main
@@ -210,19 +322,27 @@ func main() {
 	logger := log.NewLogfmtLogger(os.Stderr)
 	logger = level.NewFilter(logger, level.AllowDebug())
 
-	// 2. Create a store for the Hot Tier (e.g., FileStore).
-	// The New function signature was updated.
-	hotStore, err := filestore.New("./daramjwee-cache", log.With(logger, "tier", "hot"))
+	// 2. Create stores for your cache tiers.
+	// Primary tier (fastest) - typically memory-based
+	memStore := memstore.New(100*1024*1024, policy.NewLRUPolicy()) // 100MB memory cache
+	
+	// Secondary tier (larger capacity) - file-based storage
+	fileStore, err := filestore.New("./daramjwee-cache", log.With(logger, "tier", "file"))
 	if err != nil {
 		panic(err)
 	}
 
-	// 3. Create a daramjwee cache instance with your configuration.
+	// 3. Create a daramjwee cache instance with N-tier configuration.
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(hotStore),
+		// New N-tier configuration (recommended)
+		daramjwee.WithStores(memStore, fileStore), // 2-tier: memory → file
+		
+		// Alternative: Legacy configuration (still supported)
+		// daramjwee.WithHotStore(memStore),
+		// daramjwee.WithColdStore(fileStore),
+		
 		daramjwee.WithDefaultTimeout(5*time.Second),
-		// New options like WithCache and WithShutdownTimeout are available.
 		daramjwee.WithCache(1*time.Minute),
 		daramjwee.WithNegativeCache(30*time.Second),
 		daramjwee.WithShutdownTimeout(10*time.Second),

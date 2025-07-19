@@ -13,7 +13,19 @@ import (
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
-// DaramjweeCache is a concrete implementation of the Cache interface.
+// DaramjweeCache is a concrete implementation of the Cache interface with N-tier architecture.
+//
+// N-tier Architecture Design:
+//   - Stores slice represents cache hierarchy from fastest (stores[0]) to slowest (stores[n-1])
+//   - stores[0] is the primary tier for writes and first lookup
+//   - Sequential lookup through all tiers on cache miss
+//   - Automatic promotion from lower tiers to upper tiers on cache hit
+//   - Simplified logic compared to legacy hot/cold tier implementation
+//
+// Backward Compatibility:
+//   - Legacy WithHotStore/WithColdStore options are automatically converted to Stores slice
+//   - Existing applications continue to work without code changes
+//   - New WithStores() option enables N-tier configurations
 type DaramjweeCache struct {
 	Stores           []Store // N-tier cache hierarchy from fastest to slowest
 	Logger           log.Logger
@@ -38,8 +50,12 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
 
+	level.Debug(c.Logger).Log("msg", "starting sequential lookup across tiers", "key", key, "total_tiers", len(c.Stores))
+
 	// Sequential lookup through all tiers
 	for i, store := range c.Stores {
+		level.Debug(c.Logger).Log("msg", "checking tier for cache hit", "key", key, "tier", i)
+
 		stream, metadata, err := c.getStreamFromStore(ctx, store, key)
 		if err == nil {
 			if i == 0 {
@@ -53,7 +69,9 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 		if !errors.Is(err, ErrNotFound) {
 			// Wrap error with tier information for better debugging
 			tierErr := NewTierError(i, "get", key, err)
-			level.Error(c.Logger).Log("msg", "store get failed", "key", key, "tier", i, "err", tierErr)
+			level.Error(c.Logger).Log("msg", "tier lookup failed with error", "key", key, "tier", i, "err", tierErr)
+		} else {
+			level.Debug(c.Logger).Log("msg", "cache miss in tier", "key", key, "tier", i)
 		}
 	}
 
@@ -65,11 +83,16 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 // The data is written to the primary tier (stores[0]).
 func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
 	if c.isClosed.Load() {
+		level.Debug(c.Logger).Log("msg", "set operation rejected, cache is closed", "key", key)
 		return nil, ErrCacheClosed
 	}
 	if len(c.Stores) == 0 {
+		level.Error(c.Logger).Log("msg", "set operation failed, no stores configured", "key", key)
 		return nil, &ConfigError{"no stores configured"}
 	}
+
+	level.Debug(c.Logger).Log("msg", "initiating set operation", "key", key, "tier", 0, "is_negative", metadata != nil && metadata.IsNegative)
+
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 
 	if metadata == nil {
@@ -79,9 +102,12 @@ func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata
 
 	wc, err := c.setStreamToStore(ctx, c.Stores[0], key, metadata)
 	if err != nil {
+		level.Error(c.Logger).Log("msg", "failed to get writer for set operation", "key", key, "tier", 0, "err", err)
 		cancel()
 		return nil, err
 	}
+
+	level.Debug(c.Logger).Log("msg", "set operation writer created successfully", "key", key, "tier", 0)
 	return newCancelWriteCloser(wc, cancel), nil
 }
 
@@ -89,22 +115,39 @@ func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata
 // It attempts to delete from all stores, continuing on failure to ensure cleanup.
 func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	if c.isClosed.Load() {
+		level.Debug(c.Logger).Log("msg", "delete operation rejected, cache is closed", "key", key)
 		return ErrCacheClosed
 	}
+
+	level.Debug(c.Logger).Log("msg", "initiating delete operation across all tiers", "key", key, "total_tiers", len(c.Stores))
+
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
 
 	var firstErr error
+	var successCount int
 
 	// Delete from all tiers, continuing on failure
 	for i, store := range c.Stores {
 		if err := c.deleteFromStore(ctx, store, key); err != nil && !errors.Is(err, ErrNotFound) {
 			tierErr := NewTierError(i, "delete", key, err)
-			level.Error(c.Logger).Log("msg", "failed to delete from store", "key", key, "tier", i, "err", tierErr)
+			level.Error(c.Logger).Log("msg", "failed to delete from tier", "key", key, "tier", i, "err", tierErr)
 			if firstErr == nil {
 				firstErr = tierErr
 			}
+		} else if err == nil {
+			level.Debug(c.Logger).Log("msg", "successfully deleted from tier", "key", key, "tier", i)
+			successCount++
+		} else {
+			// ErrNotFound case
+			level.Debug(c.Logger).Log("msg", "key not found in tier during delete", "key", key, "tier", i)
 		}
+	}
+
+	if firstErr == nil {
+		level.Debug(c.Logger).Log("msg", "delete operation completed successfully", "key", key, "successful_tiers", successCount, "total_tiers", len(c.Stores))
+	} else {
+		level.Warn(c.Logger).Log("msg", "delete operation completed with errors", "key", key, "successful_tiers", successCount, "total_tiers", len(c.Stores), "first_error", firstErr)
 	}
 
 	return firstErr
@@ -121,24 +164,27 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 	}
 
 	job := func(jobCtx context.Context) {
-		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key)
+		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key, "tier", 0)
 
 		var oldMetadata *Metadata
 		if len(c.Stores) > 0 {
 			if meta, err := c.statFromStore(jobCtx, c.Stores[0], key); err == nil && meta != nil {
 				oldMetadata = meta
+				level.Debug(c.Logger).Log("msg", "retrieved existing metadata for refresh", "key", key, "tier", 0, "cached_at", meta.CachedAt, "is_negative", meta.IsNegative)
+			} else {
+				level.Debug(c.Logger).Log("msg", "no existing metadata found for refresh", "key", key, "tier", 0)
 			}
 		}
 
 		result, err := fetcher.Fetch(jobCtx, oldMetadata)
 		if err != nil {
 			if errors.Is(err, ErrCacheableNotFound) {
-				level.Debug(c.Logger).Log("msg", "re-caching as negative entry during background refresh", "key", key)
+				level.Info(c.Logger).Log("msg", "background refresh resulted in not found, caching as negative entry", "key", key, "tier", 0)
 				c.handleNegativeCache(jobCtx, key)
 			} else if errors.Is(err, ErrNotModified) {
-				level.Debug(c.Logger).Log("msg", "background refresh: object not modified", "key", key)
+				level.Info(c.Logger).Log("msg", "background refresh: object not modified, keeping existing cache", "key", key, "tier", 0)
 			} else {
-				level.Error(c.Logger).Log("msg", "background fetch failed", "key", key, "err", err)
+				level.Error(c.Logger).Log("msg", "background fetch failed during refresh", "key", key, "tier", 0, "err", err)
 			}
 			return
 		}
@@ -150,13 +196,15 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		result.Metadata.CachedAt = time.Now()
 
 		if len(c.Stores) == 0 {
-			level.Error(c.Logger).Log("msg", "no stores configured for refresh", "key", key)
+			level.Error(c.Logger).Log("msg", "no stores configured for background refresh", "key", key)
 			return
 		}
 
+		level.Debug(c.Logger).Log("msg", "writing refreshed data to primary tier", "key", key, "tier", 0, "is_negative", result.Metadata.IsNegative)
+
 		writer, err := c.setStreamToStore(jobCtx, c.Stores[0], key, result.Metadata)
 		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to get cache writer for refresh", "key", key, "err", err)
+			level.Error(c.Logger).Log("msg", "failed to get cache writer for background refresh", "key", key, "tier", 0, "err", err)
 			return
 		}
 
@@ -170,9 +218,9 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		closeErr := writer.Close()
 
 		if copyErr != nil || closeErr != nil {
-			level.Error(c.Logger).Log("msg", "failed background set", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+			level.Error(c.Logger).Log("msg", "failed to write refreshed data", "key", key, "tier", 0, "copy_err", copyErr, "close_err", closeErr)
 		} else {
-			level.Info(c.Logger).Log("msg", "background set successful", "key", key)
+			level.Info(c.Logger).Log("msg", "background refresh completed successfully", "key", key, "tier", 0, "is_negative", result.Metadata.IsNegative)
 		}
 	}
 
@@ -184,23 +232,30 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 func (c *DaramjweeCache) Close() {
 	if c.isClosed.Swap(true) {
 		// Already closed, do nothing (prevent duplicate calls)
+		level.Debug(c.Logger).Log("msg", "close called on already closed cache")
 		return
 	}
 
+	level.Info(c.Logger).Log("msg", "initiating daramjwee cache shutdown", "total_tiers", len(c.Stores), "shutdown_timeout", c.ShutdownTimeout)
+
 	if c.Worker != nil {
-		level.Info(c.Logger).Log("msg", "shutting down daramjwee cache")
+		level.Info(c.Logger).Log("msg", "shutting down worker manager")
 		if err := c.Worker.Shutdown(c.ShutdownTimeout); err != nil {
-			level.Error(c.Logger).Log("msg", "graceful shutdown failed", "err", err)
+			level.Error(c.Logger).Log("msg", "worker shutdown failed", "err", err, "timeout", c.ShutdownTimeout)
 		} else {
-			level.Info(c.Logger).Log("msg", "daramjwee cache shutdown complete")
+			level.Info(c.Logger).Log("msg", "worker shutdown completed successfully")
 		}
+	} else {
+		level.Debug(c.Logger).Log("msg", "no worker configured, skipping worker shutdown")
 	}
+
+	level.Info(c.Logger).Log("msg", "daramjwee cache shutdown complete")
 }
 
 // handlePrimaryHit processes cache hits from the primary tier (stores[0]).
 // It handles staleness detection and background refresh scheduling.
 func (c *DaramjweeCache) handlePrimaryHit(ctx context.Context, key string, fetcher Fetcher, stream io.ReadCloser, meta *Metadata) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "primary tier cache hit", "key", key, "tier", 0)
+	level.Debug(c.Logger).Log("msg", "cache hit in primary tier", "key", key, "tier", 0, "is_negative", meta.IsNegative, "cached_at", meta.CachedAt)
 
 	var isStale bool
 	// Calculate expiration using metadata and FreshFor duration
@@ -219,8 +274,10 @@ func (c *DaramjweeCache) handlePrimaryHit(ctx context.Context, key string, fetch
 	streamCloser := newCloserWithCallback(stream, func() {})
 
 	if isStale {
-		level.Debug(c.Logger).Log("msg", "primary cache is stale, scheduling refresh", "key", key)
+		level.Debug(c.Logger).Log("msg", "primary cache is stale, scheduling background refresh", "key", key, "tier", 0, "cached_at", meta.CachedAt, "is_negative", meta.IsNegative)
 		streamCloser = newCloserWithCallback(stream, func() { c.ScheduleRefresh(context.Background(), key, fetcher) })
+	} else {
+		level.Debug(c.Logger).Log("msg", "primary cache is fresh", "key", key, "tier", 0, "cached_at", meta.CachedAt, "is_negative", meta.IsNegative)
 	}
 
 	if meta.IsNegative {
@@ -234,7 +291,7 @@ func (c *DaramjweeCache) handlePrimaryHit(ctx context.Context, key string, fetch
 // handleTierHit processes cache hits from lower tiers (stores[i] where i > 0).
 // It promotes the data to upper tiers while streaming to the client.
 func (c *DaramjweeCache) handleTierHit(ctx context.Context, key string, tierIndex int, stream io.ReadCloser, meta *Metadata) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "tier cache hit, promoting to upper tiers", "key", key, "tier", tierIndex)
+	level.Info(c.Logger).Log("msg", "cache hit in lower tier, initiating promotion", "key", key, "source_tier", tierIndex, "is_negative", meta.IsNegative, "cached_at", meta.CachedAt)
 
 	// Create a copy of the metadata for promotion
 	// This prevents data races if multiple goroutines handle tier hits concurrently
@@ -252,7 +309,7 @@ func (c *DaramjweeCache) handleTierHit(ctx context.Context, key string, tierInde
 
 // handleMiss processes the logic when an object is not found in any cache tier.
 func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "full cache miss, fetching from origin", "key", key)
+	level.Info(c.Logger).Log("msg", "cache miss in all tiers, fetching from origin", "key", key, "total_tiers", len(c.Stores))
 
 	var oldMetadata *Metadata
 	if len(c.Stores) > 0 {
@@ -300,7 +357,7 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 
 // handleNegativeCache processes the logic for storing a negative cache entry.
 func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "caching as negative entry", "key", key, "NegativeFreshFor", c.NegativeFreshFor)
+	level.Info(c.Logger).Log("msg", "storing negative cache entry", "key", key, "tier", 0, "negative_fresh_for", c.NegativeFreshFor)
 
 	meta := &Metadata{
 		IsNegative: true,
@@ -310,10 +367,12 @@ func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (i
 	if len(c.Stores) > 0 {
 		writer, err := c.setStreamToStore(ctx, c.Stores[0], key, meta)
 		if err != nil {
-			level.Warn(c.Logger).Log("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
+			level.Warn(c.Logger).Log("msg", "failed to get writer for negative cache entry", "key", key, "tier", 0, "err", err)
 		} else {
 			if closeErr := writer.Close(); closeErr != nil {
-				level.Warn(c.Logger).Log("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
+				level.Warn(c.Logger).Log("msg", "failed to close writer for negative cache entry", "key", key, "tier", 0, "err", closeErr)
+			} else {
+				level.Debug(c.Logger).Log("msg", "negative cache entry stored successfully", "key", key, "tier", 0)
 			}
 		}
 	}
@@ -421,11 +480,14 @@ func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key string, me
 // cacheAndTeeStream caches the origin stream in the primary cache while simultaneously returning it to the user.
 func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, result *FetchResult) (io.ReadCloser, error) {
 	if len(c.Stores) > 0 && result.Metadata != nil {
+		level.Debug(c.Logger).Log("msg", "caching origin data to primary tier", "key", key, "tier", 0, "is_negative", result.Metadata.IsNegative)
+
 		cacheWriter, err := c.setStreamToStore(ctx, c.Stores[0], key, result.Metadata)
 		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
+			level.Error(c.Logger).Log("msg", "failed to get cache writer for origin data", "key", key, "tier", 0, "err", err)
 			return result.Body, err
 		}
+
 		var teeReader io.Reader
 		if c.BufferPool != nil {
 			teeReader = c.BufferPool.TeeReader(result.Body, cacheWriter)
@@ -433,8 +495,12 @@ func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, resu
 			// Fallback to standard io.TeeReader if buffer pool is not available
 			teeReader = io.TeeReader(result.Body, cacheWriter)
 		}
-		return newMultiCloser(teeReader, []io.Closer{result.Body, cacheWriter}), nil
+
+		level.Debug(c.Logger).Log("msg", "origin data tee stream created, serving to client and caching simultaneously", "key", key, "tier", 0)
+		return newMultiCloserWithLogging(teeReader, []io.Closer{result.Body, cacheWriter}, c.Logger, key, "origin_caching"), nil
 	}
+
+	level.Debug(c.Logger).Log("msg", "no caching configured, serving origin data directly", "key", key)
 	return result.Body, nil
 }
 
@@ -442,13 +508,16 @@ func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, resu
 // It uses io.MultiWriter to write to multiple upper tiers concurrently while streaming to the client.
 func (c *DaramjweeCache) promoteToUpperTiers(ctx context.Context, key string, tierIndex int, metadata *Metadata, stream io.ReadCloser) (io.ReadCloser, error) {
 	if tierIndex <= 0 || tierIndex >= len(c.Stores) {
-		level.Error(c.Logger).Log("msg", "invalid tier index for promotion", "key", key, "tier", tierIndex, "total_stores", len(c.Stores))
+		level.Error(c.Logger).Log("msg", "invalid tier index for promotion", "key", key, "source_tier", tierIndex, "total_tiers", len(c.Stores))
 		return stream, nil
 	}
+
+	level.Info(c.Logger).Log("msg", "starting promotion to upper tiers", "key", key, "source_tier", tierIndex, "target_tier_count", tierIndex, "is_negative", metadata.IsNegative)
 
 	// Create writers for all upper tiers (stores[0] through stores[tierIndex-1])
 	var writers []io.WriteCloser
 	var closers []io.Closer
+	var successfulWriters []int
 
 	// Add the original stream to closers
 	closers = append(closers, stream)
@@ -457,19 +526,22 @@ func (c *DaramjweeCache) promoteToUpperTiers(ctx context.Context, key string, ti
 		writer, err := c.setStreamToStore(ctx, c.Stores[i], key, metadata)
 		if err != nil {
 			tierErr := NewTierError(i, "set", key, err)
-			level.Error(c.Logger).Log("msg", "failed to get writer for promotion", "key", key, "tier", i, "err", tierErr)
+			level.Error(c.Logger).Log("msg", "failed to create promotion writer", "key", key, "target_tier", i, "source_tier", tierIndex, "err", tierErr)
 			// Close any writers we've already created
 			for _, w := range writers {
 				w.Close()
 			}
+			level.Warn(c.Logger).Log("msg", "promotion failed, serving from source tier only", "key", key, "source_tier", tierIndex, "failed_target_tier", i)
 			return stream, nil
 		}
+		level.Debug(c.Logger).Log("msg", "promotion writer created successfully", "key", key, "target_tier", i, "source_tier", tierIndex)
 		writers = append(writers, writer)
 		closers = append(closers, writer)
+		successfulWriters = append(successfulWriters, i)
 	}
 
 	if len(writers) == 0 {
-		level.Debug(c.Logger).Log("msg", "no writers created for promotion", "key", key, "tier", tierIndex)
+		level.Warn(c.Logger).Log("msg", "no promotion writers created", "key", key, "source_tier", tierIndex)
 		return stream, nil
 	}
 
@@ -495,29 +567,56 @@ func (c *DaramjweeCache) promoteToUpperTiers(ctx context.Context, key string, ti
 		teeReader = io.TeeReader(stream, multiWriter)
 	}
 
-	level.Debug(c.Logger).Log("msg", "promoting to upper tiers", "key", key, "source_tier", tierIndex, "target_tiers", tierIndex)
+	level.Info(c.Logger).Log("msg", "promotion setup completed, streaming to client and upper tiers", "key", key, "source_tier", tierIndex, "target_tiers", successfulWriters)
 
 	// Return a multiCloser that will close all writers and the original stream
-	return newMultiCloser(teeReader, closers), nil
+	return newMultiCloserWithLogging(teeReader, closers, c.Logger, key, "promotion"), nil
 }
 
 // multiCloser combines multiple io.Closer instances into one.
 type multiCloser struct {
 	reader  io.Reader
 	closers []io.Closer
+	logger  log.Logger
+	key     string
+	context string
 }
 
 func newMultiCloser(r io.Reader, closers []io.Closer) io.ReadCloser {
 	return &multiCloser{reader: r, closers: closers}
 }
+
+func newMultiCloserWithLogging(r io.Reader, closers []io.Closer, logger log.Logger, key, context string) io.ReadCloser {
+	return &multiCloser{reader: r, closers: closers, logger: logger, key: key, context: context}
+}
+
 func (mc *multiCloser) Read(p []byte) (n int, err error) { return mc.reader.Read(p) }
+
 func (mc *multiCloser) Close() error {
 	var firstErr error
-	for _, c := range mc.closers {
-		if err := c.Close(); err != nil && firstErr == nil {
-			firstErr = err
+	var successCount int
+
+	for i, c := range mc.closers {
+		if err := c.Close(); err != nil {
+			if mc.logger != nil {
+				level.Error(mc.logger).Log("msg", "failed to close resource", "key", mc.key, "context", mc.context, "closer_index", i, "err", err)
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			successCount++
 		}
 	}
+
+	if mc.logger != nil && mc.context != "" {
+		if firstErr == nil {
+			level.Debug(mc.logger).Log("msg", "all resources closed successfully", "key", mc.key, "context", mc.context, "total_closers", len(mc.closers))
+		} else {
+			level.Warn(mc.logger).Log("msg", "some resources failed to close", "key", mc.key, "context", mc.context, "successful_closers", successCount, "total_closers", len(mc.closers), "first_error", firstErr)
+		}
+	}
+
 	return firstErr
 }
 

@@ -415,21 +415,28 @@ func NewTierError(tier int, operation, key string, err error) *TierError {
 	}
 }
 
-// Cache provides a high-performance, stream-based hybrid caching interface.
+// Cache provides a high-performance, stream-based N-tier caching interface.
 //
-// Cache implements a multi-tier caching strategy with hot and cold storage tiers,
-// supporting efficient data retrieval, background refresh, and stream-based operations
+// Cache implements a flexible N-tier caching strategy supporting any number of
+// storage tiers, from fast memory-based stores to slower persistent storage.
+// It supports efficient data retrieval, background refresh, and stream-based operations
 // to minimize memory overhead for large objects.
 //
 // All operations are thread-safe and support context-based cancellation and timeouts.
 // The cache automatically handles promotion between tiers, background refresh of stale
 // data, and negative caching to prevent repeated failed requests.
 //
-// Example usage:
+// N-tier architecture benefits:
+//   - Support for any number of cache tiers (not limited to 2)
+//   - Sequential lookup from fastest to slowest tier
+//   - Automatic promotion from lower tiers to upper tiers
+//   - Simplified configuration with WithStores() option
+//   - Backward compatibility with legacy WithHotStore/WithColdStore
+//
+// Example usage with N-tier configuration:
 //
 //	cache, err := daramjwee.New(logger,
-//	    daramjwee.WithHotStore(memStore),
-//	    daramjwee.WithColdStore(fileStore),
+//	    daramjwee.WithStores(memStore, fileStore, cloudStore), // 3-tier setup
 //	    daramjwee.WithCache(5*time.Minute),
 //	)
 //	if err != nil {
@@ -443,14 +450,30 @@ func NewTierError(tier int, operation, key string, err error) *TierError {
 //	}
 //	defer stream.Close()
 //
+// Legacy two-tier configuration (still supported):
+//
+//	cache, err := daramjwee.New(logger,
+//	    daramjwee.WithHotStore(memStore),
+//	    daramjwee.WithColdStore(fileStore),
+//	    daramjwee.WithCache(5*time.Minute),
+//	)
+//
 // Thread safety: All methods are safe for concurrent use.
 // Performance: Optimized for high-throughput scenarios with minimal memory allocation.
 type Cache interface {
-	// Get retrieves an object as a stream from the cache or origin.
+	// Get retrieves an object as a stream from the N-tier cache or origin.
 	//
-	// The method first checks the hot tier, then cold tier, and finally
-	// fetches from the origin using the provided fetcher. Stale data is
-	// served immediately while triggering background refresh.
+	// The method performs sequential lookup through all configured tiers from
+	// fastest (stores[0]) to slowest (stores[n-1]), then fetches from the origin
+	// using the provided fetcher if not found in any tier. Data found in lower
+	// tiers is automatically promoted to upper tiers. Stale data is served
+	// immediately while triggering background refresh.
+	//
+	// N-tier lookup behavior:
+	//   - Check stores[0] (primary/fastest tier) first
+	//   - If miss, check stores[1], stores[2], etc. sequentially
+	//   - If hit in stores[i] where i > 0, promote to stores[0] through stores[i-1]
+	//   - If miss in all tiers, fetch from origin and cache in stores[0]
 	//
 	// Parameters:
 	//   - ctx: Context for cancellation and timeout control
@@ -476,12 +499,18 @@ type Cache interface {
 	// Note: The returned stream must always be closed to prevent resource leaks.
 	Get(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error)
 
-	// Set provides a writer to stream an object into the cache.
+	// Set provides a writer to stream an object into the primary cache tier.
 	//
 	// The cache entry is finalized when the returned writer is closed.
 	// This pattern is ideal for use with io.MultiWriter for simultaneous
-	// response-to-client and writing-to-cache scenarios. The data is written
-	// to both hot and cold tiers according to the configured strategy.
+	// response-to-client and writing-to-cache scenarios. In N-tier architecture,
+	// data is written only to the primary tier (stores[0]) for optimal write
+	// performance and consistency.
+	//
+	// N-tier write behavior:
+	//   - Data is written to stores[0] (primary/fastest tier) only
+	//   - Background promotion may move data to other tiers during reads
+	//   - This ensures fast write operations and consistent cache state
 	//
 	// Parameters:
 	//   - ctx: Context for cancellation and timeout control
@@ -511,12 +540,18 @@ type Cache interface {
 	// Failure to close may result in incomplete cache entries and resource leaks.
 	Set(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error)
 
-	// Delete removes an object from both hot and cold cache tiers.
+	// Delete removes an object from all configured cache tiers.
 	//
-	// The operation is performed atomically across both tiers. If deletion
-	// fails in one tier, the operation continues with the other tier to
-	// maintain consistency. Partial failures are logged but do not cause
-	// the operation to fail.
+	// The operation is performed across all tiers in the N-tier hierarchy.
+	// If deletion fails in some tiers, the operation continues with remaining
+	// tiers to ensure maximum cleanup. Partial failures are logged but do not
+	// cause the operation to fail completely.
+	//
+	// N-tier deletion behavior:
+	//   - Attempts deletion from all configured stores (stores[0] through stores[n-1])
+	//   - Continues with remaining stores even if some deletions fail
+	//   - Returns the first error encountered, but logs all failures
+	//   - Ensures data doesn't resurface from lower tiers after deletion
 	//
 	// Parameters:
 	//   - ctx: Context for cancellation and timeout control
@@ -532,9 +567,9 @@ type Cache interface {
 	//	    log.Printf("Failed to delete cache entry: %v", err)
 	//	}
 	//
-	// Multi-tier behavior: Deletion is attempted on both hot and cold tiers.
+	// Multi-tier behavior: Deletion is attempted on all configured tiers.
 	// The operation succeeds if at least one tier deletion succeeds or if
-	// the object was not present in either tier.
+	// the object was not present in any tier.
 	Delete(ctx context.Context, key string) error
 
 	// ScheduleRefresh asynchronously refreshes a cache entry using the provided Fetcher.

@@ -19,6 +19,7 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/comp"
 	"github.com/mrchypark/daramjwee/pkg/lock"
 	"github.com/mrchypark/daramjwee/pkg/policy"
+	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
@@ -216,26 +217,27 @@ func performanceBenchmark(logger log.Logger) {
 		setup func() daramjwee.Cache
 	}{
 		{
-			name: "메모리-LRU",
+			name: "단일-tier-LRU",
 			setup: func() daramjwee.Cache {
 				store := memstore.New(10*1024*1024, policy.NewLRUPolicy())
-				cache, _ := daramjwee.New(logger, daramjwee.WithHotStore(store))
+				cache, _ := daramjwee.New(logger, daramjwee.WithStores(store))
 				return cache
 			},
 		},
 		{
-			name: "메모리-SIEVE",
+			name: "단일-tier-SIEVE",
 			setup: func() daramjwee.Cache {
 				store := memstore.New(10*1024*1024, policy.NewSievePolicy())
-				cache, _ := daramjwee.New(logger, daramjwee.WithHotStore(store))
+				cache, _ := daramjwee.New(logger, daramjwee.WithStores(store))
 				return cache
 			},
 		},
 		{
-			name: "메모리-S3FIFO",
+			name: "이중-tier-메모리+파일",
 			setup: func() daramjwee.Cache {
-				store := memstore.New(10*1024*1024, policy.NewS3FIFOPolicy(10*1024*1024, 0.1))
-				cache, _ := daramjwee.New(logger, daramjwee.WithHotStore(store))
+				memStore := memstore.New(5*1024*1024, policy.NewLRUPolicy())
+				fileStore, _ := filestore.New("./perf-cache", logger, 20*1024*1024, nil)
+				cache, _ := daramjwee.New(logger, daramjwee.WithStores(memStore, fileStore))
 				return cache
 			},
 		},
@@ -281,15 +283,23 @@ func performanceBenchmark(logger log.Logger) {
 func concurrencyTest(logger log.Logger) {
 	fmt.Println("\n3. 동시성 테스트")
 
-	// 높은 동시성을 위한 캐시 설정
-	store := memstore.New(
-		50*1024*1024,
+	// 높은 동시성을 위한 N-tier 캐시 설정
+	memStore := memstore.New(
+		30*1024*1024, // 30MB memory tier
 		policy.NewSievePolicy(),
 		memstore.WithLocker(lock.NewStripeLock(1024)),
 	)
 
+	// 추가 파일 기반 tier로 더 큰 용량 제공
+	fileStore, err := filestore.New("./concurrency-cache", logger, 100*1024*1024, nil)
+	if err != nil {
+		fmt.Printf("동시성 테스트 파일 스토어 생성 실패: %v\n", err)
+		return
+	}
+
 	cache, err := daramjwee.New(logger,
-		daramjwee.WithHotStore(store),
+		// N-tier 설정: 메모리 + 파일 tier
+		daramjwee.WithStores(memStore, fileStore),
 		daramjwee.WithWorker("pool", 20, 2000, 30*time.Second),
 	)
 	if err != nil {
@@ -347,13 +357,22 @@ func memoryUsageTest(logger log.Logger) {
 	runtime.GC()
 	runtime.ReadMemStats(&m1)
 
-	// 메모리 사용량 측정을 위한 캐시 생성
-	store := memstore.New(
-		100*1024*1024, // 100MB
+	// 메모리 사용량 측정을 위한 N-tier 캐시 생성
+	memStore := memstore.New(
+		80*1024*1024, // 80MB memory tier
 		policy.NewLRUPolicy(),
 	)
 
-	cache, err := daramjwee.New(logger, daramjwee.WithHotStore(store))
+	// 추가 파일 tier로 메모리 압박 시 백업 제공
+	fileStore, err := filestore.New("./memory-test-cache", logger, 200*1024*1024, nil)
+	if err != nil {
+		fmt.Printf("메모리 테스트 파일 스토어 생성 실패: %v\n", err)
+		return
+	}
+
+	cache, err := daramjwee.New(logger,
+		daramjwee.WithStores(memStore, fileStore), // N-tier 설정
+	)
 	if err != nil {
 		fmt.Printf("메모리 테스트 캐시 생성 실패: %v\n", err)
 		return
@@ -412,8 +431,9 @@ func cachePolicyComparison(logger log.Logger) {
 	for policyName, pol := range policies {
 		fmt.Printf("\n%s 정책 테스트:\n", policyName)
 
-		store := memstore.New(capacity, pol)
-		cache, _ := daramjwee.New(logger, daramjwee.WithHotStore(store))
+		memStore := memstore.New(capacity, pol)
+		// N-tier 설정으로 정책 테스트 (단일 tier)
+		cache, _ := daramjwee.New(logger, daramjwee.WithStores(memStore))
 
 		fetcher := NewPerformanceFetcher(testData, 0)
 
@@ -471,12 +491,13 @@ func lockStrategyComparison(logger log.Logger) {
 	for strategyName, locker := range lockStrategies {
 		fmt.Printf("\n%s 락 전략 테스트:\n", strategyName)
 
-		store := memstore.New(
+		memStore := memstore.New(
 			10*1024*1024,
 			policy.NewLRUPolicy(),
 			memstore.WithLocker(locker),
 		)
-		cache, _ := daramjwee.New(logger, daramjwee.WithHotStore(store))
+		// N-tier 설정으로 락 전략 테스트 (단일 tier)
+		cache, _ := daramjwee.New(logger, daramjwee.WithStores(memStore))
 
 		fetcher := NewPerformanceFetcher(testData, 0)
 
@@ -519,11 +540,11 @@ func lockStrategyComparison(logger log.Logger) {
 func ttlExpirationTest(logger log.Logger) {
 	fmt.Println("\n7. TTL 및 만료 테스트")
 
-	store := memstore.New(10*1024*1024, nil)
+	memStore := memstore.New(10*1024*1024, nil)
 
-	// 짧은 TTL로 캐시 설정
+	// 짧은 TTL로 N-tier 캐시 설정
 	cache, err := daramjwee.New(logger,
-		daramjwee.WithHotStore(store),
+		daramjwee.WithStores(memStore),             // N-tier 설정 (단일 tier)
 		daramjwee.WithCache(2*time.Second),         // 2초 양성 캐시
 		daramjwee.WithNegativeCache(1*time.Second), // 1초 음성 캐시
 		daramjwee.WithWorker("pool", 5, 100, 10*time.Second),
@@ -587,8 +608,8 @@ func ttlExpirationTest(logger log.Logger) {
 func errorHandlingTest(logger log.Logger) {
 	fmt.Println("\n8. 에러 처리 및 복구 테스트")
 
-	store := memstore.New(1024*1024, nil)
-	cache, err := daramjwee.New(logger, daramjwee.WithHotStore(store))
+	memStore := memstore.New(1024*1024, nil)
+	cache, err := daramjwee.New(logger, daramjwee.WithStores(memStore)) // N-tier 설정
 	if err != nil {
 		fmt.Printf("에러 테스트 캐시 생성 실패: %v\n", err)
 		return
