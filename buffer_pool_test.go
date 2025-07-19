@@ -776,9 +776,7 @@ func TestDefaultBufferPool_ConcurrentSafety(t *testing.T) {
 }
 
 func TestDefaultBufferPool_StressTest(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping stress test in short mode")
-	}
+	
 
 	config := BufferPoolConfig{
 		Enabled:           true,
@@ -1222,9 +1220,7 @@ func TestDefaultBufferPool_FallbackBehavior(t *testing.T) {
 	})
 
 	t.Run("performance_comparison", func(t *testing.T) {
-		if testing.Short() {
-			t.Skip("Skipping performance test in short mode")
-		}
+		
 
 		testData := make([]byte, 100*1024) // 100KB
 		for i := range testData {

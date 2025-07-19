@@ -345,7 +345,6 @@ func TestDefaultBufferPool_LoggingLifecycle(t *testing.T) {
 }
 
 func TestDefaultBufferPool_LoggingPerformance(t *testing.T) {
-	t.Skip("Skipping due to performance test failure - needs further investigation")
 	t.Run("logging_overhead_minimal", func(t *testing.T) {
 		// Test that logging doesn't significantly impact performance
 		config := BufferPoolConfig{

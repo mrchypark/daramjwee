@@ -38,7 +38,6 @@ func TestBufferLifecycleManager_Creation(t *testing.T) {
 }
 
 func TestBufferLifecycleManager_RegisterBuffer(t *testing.T) {
-	t.Skip("Skipping due to race condition - needs further investigation")
 	logger := log.NewNopLogger()
 	config := BufferLifecycleConfig{
 		MaxBufferAge:      5 * time.Minute,
@@ -73,7 +72,6 @@ func TestBufferLifecycleManager_RegisterBuffer(t *testing.T) {
 }
 
 func TestBufferLifecycleManager_UpdateBufferUsage(t *testing.T) {
-	t.Skip("Skipping due to test failure - needs further investigation")
 	logger := log.NewNopLogger()
 	config := BufferLifecycleConfig{
 		MaxBufferAge:      5 * time.Minute,
@@ -105,7 +103,6 @@ func TestBufferLifecycleManager_UpdateBufferUsage(t *testing.T) {
 }
 
 func TestBufferLifecycleManager_UnregisterBuffer(t *testing.T) {
-	t.Skip("Skipping due to race condition - needs further investigation")
 	logger := log.NewNopLogger()
 	config := BufferLifecycleConfig{
 		MaxBufferAge:      5 * time.Minute,
@@ -205,7 +202,6 @@ func TestBufferLifecycleManager_OptimizePoolSizes(t *testing.T) {
 }
 
 func TestBufferLifecycleManager_ConcurrentAccess(t *testing.T) {
-	t.Skip("Skipping due to test failure - needs further investigation")
 	logger := log.NewNopLogger()
 	config := BufferLifecycleConfig{
 		MaxBufferAge:      5 * time.Minute,

@@ -61,6 +61,7 @@ type mockStore struct {
 	err            error
 	writeCompleted chan string
 	forceSetError  bool // forceSetError, if true, makes SetWithWriter return an error.
+	wg             sync.WaitGroup
 }
 
 // newMockStore creates a new mockStore.
@@ -68,7 +69,8 @@ func newMockStore() *mockStore {
 	return &mockStore{
 		data:           make(map[string][]byte),
 		meta:           make(map[string]*Metadata),
-		writeCompleted: make(chan string, 100),
+		writeCompleted: make(chan string, 1000),
+		wg:             sync.WaitGroup{},
 	}
 }
 
@@ -103,9 +105,11 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Met
 		return nil, s.err
 	}
 
+	s.wg.Add(1)
 	var buf bytes.Buffer
 	return &mockWriteCloser{
 		onClose: func() error {
+			defer s.wg.Done()
 			s.mu.Lock()
 			defer s.mu.Unlock()
 
@@ -119,7 +123,6 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Met
 
 			select {
 			case s.writeCompleted <- key:
-			default:
 			}
 			return nil
 		},
@@ -153,6 +156,10 @@ func (s *mockStore) setData(key, content string, metadata *Metadata) {
 	defer s.mu.Unlock()
 	s.data[key] = []byte(content)
 	s.meta[key] = metadata
+}
+
+func (s *mockStore) Wait() {
+	s.wg.Wait()
 }
 
 // setNegativeEntry sets a negative cache entry for a given key.

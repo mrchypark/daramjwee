@@ -193,12 +193,8 @@ func testPromoteAndTeeStreamBehavior(t *testing.T, testData []byte, useBufferPoo
 	require.NoError(t, err)
 	require.NoError(t, stream.Close())
 
-	// Wait for promotion to complete with timeout
-	select {
-	case <-hot.writeCompleted:
-	case <-time.After(5 * time.Second):
-		t.Log("Hot store write timeout in promotion")
-	}
+	// Wait for promotion to complete
+	hot.Wait()
 
 	// Get data from hot store
 	hot.mu.RLock()
@@ -249,12 +245,8 @@ func testCacheAndTeeStreamBehavior(t *testing.T, testData []byte, useBufferPool 
 	require.NoError(t, err)
 	require.NoError(t, stream.Close())
 
-	// Wait for caching to complete with timeout
-	select {
-	case <-hot.writeCompleted:
-	case <-time.After(5 * time.Second):
-		t.Log("Hot store write timeout in caching")
-	}
+	// Wait for caching to complete
+	hot.Wait()
 
 	// Get data from hot store
 	hot.mu.RLock()
@@ -301,18 +293,9 @@ func testBackgroundCopyBehavior(t *testing.T, testData []byte, useBufferPool boo
 	io.ReadAll(stream)
 	stream.Close()
 
-	// Wait for background operations with timeout
-	select {
-	case <-hot.writeCompleted:
-	case <-time.After(1 * time.Second):
-		t.Log("Hot store write timeout, continuing test")
-	}
-
-	select {
-	case <-cold.writeCompleted:
-	case <-time.After(1 * time.Second):
-		t.Log("Cold store write timeout, continuing test")
-	}
+	// Wait for background operations
+	hot.Wait()
+	cold.Wait()
 
 	// Get data from cold store
 	cold.mu.RLock()
@@ -376,18 +359,9 @@ func testFullCacheWorkflow(t *testing.T, testData []byte, useBufferPool bool) fu
 	require.NoError(t, err)
 	stream.Close()
 
-	// Wait for caching operations with timeout
-	select {
-	case <-hot.writeCompleted:
-	case <-time.After(5 * time.Second):
-		t.Log("Hot store write timeout in initial fetch")
-	}
-
-	select {
-	case <-cold.writeCompleted:
-	case <-time.After(5 * time.Second):
-		t.Log("Cold store write timeout in initial fetch")
-	}
+	// Wait for caching operations
+	hot.Wait()
+	cold.Wait()
 
 	// Step 2: Clear hot cache to simulate cold hit
 	hot.Delete(ctx, key)
@@ -399,12 +373,8 @@ func testFullCacheWorkflow(t *testing.T, testData []byte, useBufferPool bool) fu
 	require.NoError(t, err)
 	stream.Close()
 
-	// Wait for promotion with timeout
-	select {
-	case <-hot.writeCompleted:
-	case <-time.After(5 * time.Second):
-		t.Log("Hot store write timeout in cold hit promotion")
-	}
+	// Wait for promotion
+	hot.Wait()
 
 	// Step 3: Hot hit
 	stream, err = cache.Get(ctx, key, &mockFetcher{})
