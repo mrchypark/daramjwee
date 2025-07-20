@@ -59,6 +59,7 @@ func (p *PoolStrategy) start() {
 				ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 				job(ctx)
 				cancel()
+				p.wg.Done() // Decrement WaitGroup after job is processed
 			}
 			level.Info(logger).Log("msg", "worker stopped")
 		}(i)
@@ -78,6 +79,7 @@ func (s *PoolStrategy) Submit(job Job) bool {
 
 	select {
 	case s.jobs <- job:
+		s.wg.Add(1) // Increment WaitGroup when job is successfully submitted
 		return true
 	default:
 		level.Warn(s.logger).Log("msg", "worker queue is full, dropping job")

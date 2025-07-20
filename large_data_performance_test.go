@@ -100,7 +100,35 @@ func measureLargeDataPerformance(t *testing.T, logger log.Logger, size int, useA
 
 // createLargeTestData creates test data of specified size efficiently
 func createLargeTestData(size int) string {
-	// Create a pattern and repeat it to avoid memory issues
+	// For very large sizes, use a more efficient approach
+	if size > 5*1024*1024 { // > 5MB
+		// Create a smaller base pattern and use it to build larger chunks
+		basePattern := strings.Repeat("0123456789abcdef", 1024) // 16KB pattern
+		baseSize := len(basePattern)
+
+		if size <= baseSize {
+			return basePattern[:size]
+		}
+
+		var builder strings.Builder
+		builder.Grow(size)
+
+		// Add full base patterns
+		fullPatterns := size / baseSize
+		for i := 0; i < fullPatterns; i++ {
+			builder.WriteString(basePattern)
+		}
+
+		// Add remainder
+		remainder := size % baseSize
+		if remainder > 0 {
+			builder.WriteString(basePattern[:remainder])
+		}
+
+		return builder.String()
+	}
+
+	// For smaller sizes, use the original approach
 	pattern := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	patternLen := len(pattern)
 

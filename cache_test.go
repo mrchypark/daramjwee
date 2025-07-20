@@ -121,9 +121,13 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *Met
 				s.data[key] = dataBytes
 			}
 
-			select {
-			case s.writeCompleted <- key:
-			}
+			// Drain the channel in a non-blocking way
+			go func() {
+				select {
+				case s.writeCompleted <- key:
+				default:
+				}
+			}()
 			return nil
 		},
 		buf: &buf,

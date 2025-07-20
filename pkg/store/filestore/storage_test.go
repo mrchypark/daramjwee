@@ -410,7 +410,7 @@ func (p *mockPolicy) Evict() []string {
 
 // TestFileStore_Eviction_Debug is for debugging eviction logic.
 func TestFileStore_Eviction_Debug(t *testing.T) {
-	t.Skip("Skipping debug test, enable for manual debugging of sizes")
+	// t.Skip("Skipping debug test, enable for manual debugging of sizes")
 	policy := newMockPolicy()
 	fs, err := New(t.TempDir(), log.NewNopLogger(), 1000, policy)
 	require.NoError(t, err)

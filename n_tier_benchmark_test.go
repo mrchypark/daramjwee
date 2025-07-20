@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	os "os"
 	"runtime"
 	"strings"
 	"sync"
@@ -49,10 +50,17 @@ func BenchmarkNTierVs2Tier(b *testing.B) {
 				defer cache.Close()
 
 				// Pre-populate hot store
-				hotStore.data["bench-key"] = testData
-				hotStore.meta["bench-key"] = &Metadata{
-					ETag:     "bench-etag",
-					CachedAt: time.Now(),
+				writer, err := cache.Set(context.Background(), "bench-key", &Metadata{ETag: "bench-etag", CachedAt: time.Now()})
+				if err != nil {
+					b.Fatalf("Failed to set data: %v", err)
+				}
+				_, err = writer.Write(testData)
+				if err != nil {
+					b.Fatalf("Failed to write data: %v", err)
+				}
+				err = writer.Close()
+				if err != nil {
+					b.Fatalf("Failed to close writer: %v", err)
 				}
 
 				fetcher := &benchmarkFetcher{data: "should not be called"}
@@ -91,6 +99,11 @@ func BenchmarkNTierVs2Tier(b *testing.B) {
 				memoryStore := newMockStore()
 				fileStore := newMockStore()
 				cloudStore := newMockStore()
+
+				// Clean up the test_file_store directory before each benchmark run
+				b.Cleanup(func() {
+					os.RemoveAll("test_file_store")
+				})
 
 				cache, err := New(logger, WithStores(memoryStore, fileStore, cloudStore))
 				if err != nil {
@@ -892,7 +905,7 @@ func BenchmarkSetOperations(b *testing.B) {
 				b.ReportMetric(float64(memAfter.Mallocs-memBefore.Mallocs), "mallocs")
 			})
 
-			b.Run("set-5-tier", func(b *testing.B) {
+							b.Run("set-5-tier", func(b *testing.B) {
 				stores := make([]Store, 5)
 				for i := range 5 {
 					stores[i] = newMockStore()

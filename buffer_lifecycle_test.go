@@ -1,7 +1,9 @@
 package daramjwee
 
 import (
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -40,9 +42,11 @@ func TestBufferLifecycleManager_Creation(t *testing.T) {
 func TestBufferLifecycleManager_RegisterBuffer(t *testing.T) {
 	logger := log.NewNopLogger()
 	config := BufferLifecycleConfig{
-		MaxBufferAge:      5 * time.Minute,
-		CleanupInterval:   10 * time.Minute, // Long interval to prevent automatic cleanup
-		EnableAgeTracking: true,
+		MaxBufferAge:        5 * time.Minute,
+		CleanupInterval:     10 * time.Minute, // Long interval to prevent automatic cleanup
+		EnableAgeTracking:   true,
+		EnableLeakDetection: false,
+		EnableHealthMonitor: false,
 	}
 
 	blm, err := NewBufferLifecycleManager(config, logger)
@@ -74,9 +78,11 @@ func TestBufferLifecycleManager_RegisterBuffer(t *testing.T) {
 func TestBufferLifecycleManager_UpdateBufferUsage(t *testing.T) {
 	logger := log.NewNopLogger()
 	config := BufferLifecycleConfig{
-		MaxBufferAge:      5 * time.Minute,
-		CleanupInterval:   10 * time.Minute,
-		EnableAgeTracking: true,
+		MaxBufferAge:        5 * time.Minute,
+		CleanupInterval:     10 * time.Minute,
+		EnableAgeTracking:   true,
+		EnableLeakDetection: false,
+		EnableHealthMonitor: false,
 	}
 
 	blm, err := NewBufferLifecycleManager(config, logger)
@@ -105,9 +111,11 @@ func TestBufferLifecycleManager_UpdateBufferUsage(t *testing.T) {
 func TestBufferLifecycleManager_UnregisterBuffer(t *testing.T) {
 	logger := log.NewNopLogger()
 	config := BufferLifecycleConfig{
-		MaxBufferAge:      5 * time.Minute,
-		CleanupInterval:   10 * time.Minute,
-		EnableAgeTracking: true,
+		MaxBufferAge:        5 * time.Minute,
+		CleanupInterval:     10 * time.Minute,
+		EnableAgeTracking:   true,
+		EnableLeakDetection: false,
+		EnableHealthMonitor: false,
 	}
 
 	blm, err := NewBufferLifecycleManager(config, logger)
@@ -116,23 +124,33 @@ func TestBufferLifecycleManager_UnregisterBuffer(t *testing.T) {
 
 	// Create and register buffer
 	buf := make([]byte, 1024)
+
+	// Keep a reference to prevent GC from moving the buffer
+	runtime.KeepAlive(buf)
+
 	blm.RegisterBuffer(buf, 1024)
 
-	// Verify registration
-	addr := uintptr(unsafe.Pointer(&buf[0]))
+	// Verify registration by checking total count
+	initialCount := atomic.LoadInt64(&blm.stats.TotalBuffersCreated)
+	assert.Equal(t, int64(1), initialCount)
+
+	// Verify buffer exists in registry
 	blm.registryMutex.RLock()
-	_, exists := blm.bufferRegistry[addr]
+	registrySize := len(blm.bufferRegistry)
 	blm.registryMutex.RUnlock()
-	assert.True(t, exists)
+	assert.Equal(t, 1, registrySize)
 
 	// Unregister buffer
 	blm.UnregisterBuffer(buf)
 
-	// Verify unregistration
+	// Verify unregistration by checking registry is empty
 	blm.registryMutex.RLock()
-	_, exists = blm.bufferRegistry[addr]
+	registrySize = len(blm.bufferRegistry)
 	blm.registryMutex.RUnlock()
-	assert.False(t, exists)
+	assert.Equal(t, 0, registrySize)
+
+	// Keep reference until end of test
+	runtime.KeepAlive(buf)
 }
 
 func TestBufferLifecycleManager_PerformCleanup(t *testing.T) {

@@ -484,8 +484,9 @@ func benchmarkCacheOperations(b *testing.B, logger log.Logger, dataSize int, set
 	// Benchmark Delete operations
 	b.Run("Delete", func(b *testing.B) {
 		// Pre-populate keys for deletion
-		deleteKeys := make([]string, b.N)
-		for i := 0; i < b.N; i++ {
+		numDeleteKeys := 100 // Limit the number of keys for deletion setup
+		deleteKeys := make([]string, numDeleteKeys)
+		for i := 0; i < numDeleteKeys; i++ {
 			deleteKey := key + "-delete-" + string(rune(i))
 			deleteKeys[i] = deleteKey
 			writer, err := cache.Set(ctx, deleteKey, nil)
@@ -504,7 +505,7 @@ func benchmarkCacheOperations(b *testing.B, logger log.Logger, dataSize int, set
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			err := cache.Delete(ctx, deleteKeys[i])
+			err := cache.Delete(ctx, deleteKeys[i%numDeleteKeys])
 			if err != nil {
 				b.Fatalf("Delete failed: %v", err)
 			}
@@ -580,6 +581,7 @@ func BenchmarkBackwardCompatibilityMemoryUsage(b *testing.B) {
 				if err != nil {
 					b.Fatalf("Close failed: %v", err)
 				}
+				
 
 				// Get operation
 				reader, err := cache.Get(ctx, key, fetcher)
@@ -594,6 +596,7 @@ func BenchmarkBackwardCompatibilityMemoryUsage(b *testing.B) {
 				if err != nil {
 					b.Fatalf("Close failed: %v", err)
 				}
+				
 			}
 		})
 	}

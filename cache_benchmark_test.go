@@ -175,6 +175,9 @@ func benchmarkColdHitPromotion(b *testing.B, dataSize int, useBufferPool bool) {
 	for len(hot.writeCompleted) > 0 {
 		<-hot.writeCompleted
 	}
+	for len(cold.writeCompleted) > 0 {
+		<-cold.writeCompleted
+	}
 }
 
 // benchmarkCacheMiss benchmarks the performance of cache miss operations.
@@ -288,7 +291,9 @@ func benchmarkBackgroundRefresh(b *testing.B, dataSize int, useBufferPool bool) 
 	b.StopTimer()
 
 	// Wait for all refresh operations to complete
-	time.Sleep(200 * time.Millisecond)
+	for len(hot.writeCompleted) > 0 {
+		<-hot.writeCompleted
+	}
 
 	// Measure memory after benchmark
 	var memAfter runtime.MemStats

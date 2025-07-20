@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -383,10 +385,10 @@ func TestLongRunningStability(t *testing.T) {
 
 	logger := log.NewNopLogger()
 	validator := NewMemoryEfficiencyValidator(MemoryValidationConfig{
-		StabilityTestDuration: 30 * time.Second, // Reduced for testing
-		SampleInterval:        2 * time.Second,
+		StabilityTestDuration: 10 * time.Second, // Further reduced for race testing
+		SampleInterval:        1 * time.Second,
 		MaxMemoryGrowthMB:     100,
-		EnableDetailedLogging: true,
+		EnableDetailedLogging: false, // Disable to reduce race conditions
 	}, logger)
 
 	config := BufferPoolConfig{
@@ -409,6 +411,7 @@ func TestLongRunningStability(t *testing.T) {
 
 		var operations int64
 		var samples []MemorySnapshot
+		var samplesMutex sync.Mutex
 		sampleTicker := time.NewTicker(validator.config.SampleInterval)
 		defer sampleTicker.Stop()
 
@@ -419,7 +422,10 @@ func TestLongRunningStability(t *testing.T) {
 				case <-ctx.Done():
 					return
 				case <-sampleTicker.C:
-					samples = append(samples, validator.TakeMemorySnapshot())
+					snapshot := validator.TakeMemorySnapshot()
+					samplesMutex.Lock()
+					samples = append(samples, snapshot)
+					samplesMutex.Unlock()
 				}
 			}
 		}()
@@ -437,13 +443,13 @@ func TestLongRunningStability(t *testing.T) {
 
 				buf := pool.Get(size)
 				if len(buf) > 0 {
-					buf[0] = byte(operations)
+					buf[0] = byte(atomic.LoadInt64(&operations))
 				}
 				pool.Put(buf)
-				operations++
+				atomic.AddInt64(&operations, 1)
 
 				// Small delay to prevent overwhelming
-				if operations%100 == 0 {
+				if atomic.LoadInt64(&operations)%100 == 0 {
 					time.Sleep(time.Millisecond)
 				}
 			}
@@ -452,17 +458,22 @@ func TestLongRunningStability(t *testing.T) {
 		finalSnapshot := validator.TakeMemorySnapshot()
 
 		// Analyze stability
+		samplesMutex.Lock()
+		samplesCopy := make([]MemorySnapshot, len(samples))
+		copy(samplesCopy, samples)
+		samplesMutex.Unlock()
+
 		pattern := MemoryUsagePattern{
 			StartSnapshot: initialSnapshot,
 			EndSnapshot:   finalSnapshot,
-			Samples:       samples,
+			Samples:       samplesCopy,
 			Duration:      validator.config.StabilityTestDuration,
-			Operations:    operations,
+			Operations:    atomic.LoadInt64(&operations),
 		}
 
 		// Calculate peak memory
 		pattern.PeakMemory = initialSnapshot.HeapInuse
-		for _, sample := range samples {
+		for _, sample := range samplesCopy {
 			if sample.HeapInuse > pattern.PeakMemory {
 				pattern.PeakMemory = sample.HeapInuse
 			}

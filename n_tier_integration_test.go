@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ func TestNTierIntegration(t *testing.T) {
 		reader.Close()
 
 		assert.Equal(t, originalData, string(data))
-		assert.True(t, fetcher.called, "Fetcher should be called for cache miss")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&fetcher.called), "Fetcher should be called for cache miss")
 
 		// Wait for async write to complete
 		<-memoryStore.writeCompleted
@@ -66,7 +67,7 @@ func TestNTierIntegration(t *testing.T) {
 		reader2.Close()
 
 		assert.Equal(t, originalData, string(data2))
-		assert.False(t, fetcher2.called, "Fetcher should not be called for primary tier hit")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&fetcher2.called), "Fetcher should not be called for primary tier hit")
 	})
 
 	t.Run("single-tier configuration", func(t *testing.T) {
@@ -92,7 +93,7 @@ func TestNTierIntegration(t *testing.T) {
 		reader.Close()
 
 		assert.Equal(t, testData, string(data))
-		assert.True(t, fetcher.called)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&fetcher.called))
 
 		// Wait for async write
 		<-singleStore.writeCompleted
@@ -133,7 +134,7 @@ func TestNTierIntegration(t *testing.T) {
 		reader.Close()
 
 		assert.Equal(t, "data from tier 2", string(data))
-		assert.False(t, fetcher.called, "Should not call fetcher for tier hit")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&fetcher.called), "Should not call fetcher for tier hit")
 
 		// Note: Promotion happens asynchronously via TeeReader
 		// In a real scenario, we would need to wait or use synchronous promotion
@@ -167,7 +168,7 @@ func TestNTierIntegration(t *testing.T) {
 		reader.Close()
 
 		assert.Equal(t, "origin data", string(data))
-		assert.True(t, fetcher.called)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&fetcher.called))
 
 		// Test 2: Delete with partial failures
 		// Pre-populate all stores
@@ -256,7 +257,7 @@ func TestNTierIntegration(t *testing.T) {
 		reader, err := cache.Get(ctx, key, fetcher)
 		require.ErrorIs(t, err, ErrNotFound)
 		assert.Nil(t, reader)
-		assert.True(t, fetcher.called)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&fetcher.called))
 
 		// Verify negative cache entry was stored
 		meta, exists := store.meta[key]
@@ -269,7 +270,7 @@ func TestNTierIntegration(t *testing.T) {
 		reader2, err := cache.Get(ctx, key, fetcher2)
 		require.ErrorIs(t, err, ErrNotFound)
 		assert.Nil(t, reader2)
-		assert.False(t, fetcher2.called, "Should serve from negative cache")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&fetcher2.called), "Should serve from negative cache")
 	})
 }
 
@@ -277,7 +278,7 @@ func TestNTierIntegration(t *testing.T) {
 type integrationFetcher struct {
 	data   string
 	err    error
-	called bool
+	called int32 // Use atomic operations
 	mu     sync.Mutex
 }
 
@@ -285,7 +286,7 @@ func (f *integrationFetcher) Fetch(ctx context.Context, metadata *Metadata) (*Fe
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.called = true
+	atomic.StoreInt32(&f.called, 1)
 
 	if f.err != nil {
 		return nil, f.err

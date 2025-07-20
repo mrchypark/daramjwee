@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 // captureLogger captures log messages for testing
 type captureLogger struct {
+	mu       sync.Mutex
 	messages []string
 }
 
@@ -27,7 +29,10 @@ func (cl *captureLogger) Log(keyvals ...interface{}) error {
 			parts = append(parts, key.(string)+"="+toString(val))
 		}
 	}
+
+	cl.mu.Lock()
 	cl.messages = append(cl.messages, strings.Join(parts, " "))
+	cl.mu.Unlock()
 	return nil
 }
 
@@ -63,7 +68,12 @@ func (cl *captureLogger) hasMessage(substring string) bool {
 }
 
 func (cl *captureLogger) getMessages() []string {
-	return cl.messages
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	// Return a copy to avoid race conditions
+	result := make([]string, len(cl.messages))
+	copy(result, cl.messages)
+	return result
 }
 
 func TestComprehensiveLogging(t *testing.T) {
