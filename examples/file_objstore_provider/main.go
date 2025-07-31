@@ -73,7 +73,7 @@ func main() {
 	}()
 
 	logger.Log("level", "info", "msg", "Hot cache (fileStore) initialized", "path", hotStoreDir)
-	hotStore, err := filestore.New(hotStoreDir, logger)
+	hotStore, err := filestore.New(hotStoreDir, logger, 1024*1024, nil)
 	if err != nil {
 		logger.Log("level", "error", "msg", "FATAL: failed to create file store", "err", err)
 		os.Exit(1)
@@ -110,7 +110,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	hotStore, err = filestore.New(hotStoreDir, logger)
+	hotStore, err = filestore.New(hotStoreDir, logger, 1024*1024, nil)
 	if err != nil {
 		logger.Log("level", "error", "msg", "FATAL: failed to re-create file store", "err", err)
 		os.Exit(1)

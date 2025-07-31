@@ -13,14 +13,13 @@ import (
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
-var ErrCacheClosed = errors.New("daramjwee: cache is closed")
-
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
 	HotStore         Store
 	ColdStore        Store // Optional
 	Logger           log.Logger
 	Worker           *worker.Manager
+	BufferPool       BufferPool
 	DefaultTimeout   time.Duration
 	ShutdownTimeout  time.Duration
 	PositiveFreshFor time.Duration
@@ -160,7 +159,13 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 			return
 		}
 
-		_, copyErr := io.Copy(writer, result.Body)
+		var copyErr error
+		if c.BufferPool != nil {
+			_, copyErr = c.BufferPool.CopyBuffer(writer, result.Body)
+		} else {
+			// Fallback to standard io.Copy if buffer pool is not available
+			_, copyErr = io.Copy(writer, result.Body)
+		}
 		closeErr := writer.Close()
 
 		if copyErr != nil || closeErr != nil {
@@ -415,7 +420,13 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 			return
 		}
 
-		_, copyErr := io.Copy(destWriter, srcStream)
+		var copyErr error
+		if c.BufferPool != nil {
+			_, copyErr = c.BufferPool.CopyBuffer(destWriter, srcStream)
+		} else {
+			// Fallback to standard io.Copy if buffer pool is not available
+			_, copyErr = io.Copy(destWriter, srcStream)
+		}
 		closeErr := destWriter.Close()
 
 		if copyErr != nil || closeErr != nil {

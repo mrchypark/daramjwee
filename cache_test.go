@@ -24,6 +24,7 @@ type mockFetcher struct {
 	err             error
 	fetchDelay      time.Duration
 	lastOldMetadata *Metadata
+	fetchCompleted  chan struct{} // Signal when fetch is completed
 }
 
 // Fetch simulates fetching data from an origin, incrementing a fetch counter.
@@ -32,6 +33,17 @@ func (f *mockFetcher) Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchR
 	f.fetchCount++
 	f.lastOldMetadata = oldMetadata
 	f.mu.Unlock()
+
+	defer func() {
+		// Signal completion if channel exists and has capacity
+		if f.fetchCompleted != nil {
+			select {
+			case f.fetchCompleted <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -174,7 +186,7 @@ type mockWriteCloser struct {
 func (mwc *mockWriteCloser) Write(p []byte) (n int, err error) { return mwc.buf.Write(p) }
 
 // Close executes the onClose callback.
-func (mwc *mockWriteCloser) Close() error                      { return mwc.onClose() }
+func (mwc *mockWriteCloser) Close() error { return mwc.onClose() }
 
 // deterministicFetcher is a mock fetcher that allows controlling fetch start and end signals.
 type deterministicFetcher struct {
@@ -421,7 +433,7 @@ func TestCache_Close(t *testing.T) {
 	require.ErrorIs(t, err, ErrCacheClosed, "Get() on a closed cache should now return ErrCacheClosed")
 	assert.Nil(t, stream, "Stream should be nil when an error is returned")
 
-	time.Sleep(50 * time.Millisecond)
+	// Fetcher should not be called after cache is closed (no need to wait)
 	assert.Equal(t, 0, fetcher.getFetchCount(), "Fetcher should not be called after cache is closed")
 }
 
@@ -585,7 +597,11 @@ func TestCache_FreshForZero_AlwaysTriggersRefresh(t *testing.T) {
 		key := "fresh-for-zero-key"
 		initialContent := "initial data"
 
-		fetcher := &mockFetcher{content: "new data", etag: "v2"}
+		fetcher := &mockFetcher{
+			content:        "new data",
+			etag:           "v2",
+			fetchCompleted: make(chan struct{}, 10), // Buffer for multiple fetch operations
+		}
 
 		hot.setData(key, initialContent, &Metadata{ETag: "v1", CachedAt: time.Now()})
 
@@ -595,14 +611,25 @@ func TestCache_FreshForZero_AlwaysTriggersRefresh(t *testing.T) {
 		stream.Close()
 
 		assert.Equal(t, initialContent, string(readBytes))
-		time.Sleep(50 * time.Millisecond)
+
+		// Wait for background fetch to complete
+		select {
+		case <-fetcher.fetchCompleted:
+		case <-time.After(1 * time.Second):
+			t.Fatal("Timeout waiting for first fetch to complete")
+		}
 		assert.Equal(t, 1, fetcher.getFetchCount(), "Fetcher should be called once after the first Get()")
 
 		stream, err = cache.Get(ctx, key, fetcher)
 		require.NoError(t, err)
 		stream.Close()
 
-		time.Sleep(50 * time.Millisecond)
+		// Wait for second background fetch to complete
+		select {
+		case <-fetcher.fetchCompleted:
+		case <-time.After(1 * time.Second):
+			t.Fatal("Timeout waiting for second fetch to complete")
+		}
 		assert.Equal(t, 2, fetcher.getFetchCount(), "Fetcher should be called twice after the second Get()")
 	})
 
@@ -611,20 +638,33 @@ func TestCache_FreshForZero_AlwaysTriggersRefresh(t *testing.T) {
 		ctx := context.Background()
 		key := "negative-fresh-for-zero-key"
 
-		fetcher := &mockFetcher{err: ErrCacheableNotFound}
+		fetcher := &mockFetcher{
+			err:            ErrCacheableNotFound,
+			fetchCompleted: make(chan struct{}, 10), // Buffer for multiple fetch operations
+		}
 
 		hot.setNegativeEntry(key, &Metadata{CachedAt: time.Now()})
 
 		_, err := cache.Get(ctx, key, fetcher)
 		require.ErrorIs(t, err, ErrNotFound)
 
-		time.Sleep(50 * time.Millisecond)
+		// Wait for background fetch to complete
+		select {
+		case <-fetcher.fetchCompleted:
+		case <-time.After(1 * time.Second):
+			t.Fatal("Timeout waiting for first fetch to complete")
+		}
 		assert.Equal(t, 1, fetcher.getFetchCount(), "Fetcher should be called once after the first Get() for negative cache")
 
 		_, err = cache.Get(ctx, key, fetcher)
 		require.ErrorIs(t, err, ErrNotFound)
 
-		time.Sleep(50 * time.Millisecond)
+		// Wait for second background fetch to complete
+		select {
+		case <-fetcher.fetchCompleted:
+		case <-time.After(1 * time.Second):
+			t.Fatal("Timeout waiting for second fetch to complete")
+		}
 		assert.Equal(t, 2, fetcher.getFetchCount(), "Fetcher should be called twice after the second Get() for negative cache")
 	})
 }
