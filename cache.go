@@ -280,7 +280,7 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 		coldStream, _, fallbackErr := c.getStreamFromStore(ctx, c.ColdStore, key)
 		if fallbackErr != nil {
 			level.Error(c.Logger).Log("msg", "fallback to cold cache failed", "key", key, "err", fallbackErr)
-			return nil, err // Return the original hot cache read error
+			return nil, fmt.Errorf("failed to read from hot cache after promotion: %w; fallback to cold cache also failed: %v", err, fallbackErr)
 		}
 		return coldStream, nil
 	}
