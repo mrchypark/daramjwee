@@ -251,7 +251,7 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 	closeErr := writer.Close()
 	coldStreamCloseErr := coldStream.Close()
 
-	if copyErr != nil || closeErr != nil || coldStreamCloseErr != nil {
+	if copyErr != nil || closeErr != nil {
 		level.Error(c.Logger).Log("msg", "failed to promote to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr, "coldStreamCloseErr", coldStreamCloseErr)
 		// Since we already closed coldStream, we need to read from cold again
 		coldStream, _, err := c.getStreamFromStore(ctx, c.ColdStore, key)
@@ -260,6 +260,10 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 			return nil, err
 		}
 		return coldStream, nil
+	}
+
+	if coldStreamCloseErr != nil {
+		level.Warn(c.Logger).Log("msg", "closing cold stream after promotion failed", "key", key, "err", coldStreamCloseErr)
 	}
 
 	// Now read from hot cache and return to user
@@ -326,10 +330,14 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 	closeErr := writer.Close()
 	bodyCloseErr := result.Body.Close()
 
-	if copyErr != nil || closeErr != nil || bodyCloseErr != nil {
+	if copyErr != nil || closeErr != nil {
 		level.Error(c.Logger).Log("msg", "failed to write to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr, "bodyCloseErr", bodyCloseErr)
 		// Since we already closed result.Body, we need to fetch again or return error
 		return nil, errors.New("cache write failed and original stream consumed, check logs for details")
+	}
+
+	if bodyCloseErr != nil {
+		level.Warn(c.Logger).Log("msg", "closing result body after caching failed", "key", key, "err", bodyCloseErr)
 	}
 
 	// Schedule background copy to cold store
