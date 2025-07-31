@@ -254,10 +254,10 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 	// Copy the entire stream from cold to hot cache
 	_, copyErr := io.Copy(writer, coldStream)
 	closeErr := writer.Close()
-	coldStream.Close()
+	coldStreamCloseErr := coldStream.Close()
 
-	if copyErr != nil || closeErr != nil {
-		level.Error(c.Logger).Log("msg", "failed to promote to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+	if copyErr != nil || closeErr != nil || coldStreamCloseErr != nil {
+		level.Error(c.Logger).Log("msg", "failed to promote to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr, "coldStreamCloseErr", coldStreamCloseErr)
 		// Since we already closed coldStream, we need to read from cold again
 		coldStream, _, err := c.getStreamFromStore(ctx, c.ColdStore, key)
 		if err != nil {
