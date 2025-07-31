@@ -36,6 +36,16 @@ type AdaptiveBufferPoolImpl struct {
 	largeSemaphore chan struct{}
 }
 
+// AcquireLargeOpSlot acquires a slot for a large operation.
+func (abp *AdaptiveBufferPoolImpl) AcquireLargeOpSlot() {
+	abp.largeSemaphore <- struct{}{}
+}
+
+// ReleaseLargeOpSlot releases a slot for a large operation.
+func (abp *AdaptiveBufferPoolImpl) ReleaseLargeOpSlot() {
+	<-abp.largeSemaphore
+}
+
 // AdaptiveBufferPoolMetrics tracks detailed metrics for adaptive buffer pool
 type AdaptiveBufferPoolMetrics struct {
 	// Basic metrics
@@ -242,7 +252,7 @@ func (abp *AdaptiveBufferPoolImpl) Get(size int) []byte {
 		return abp.getFromPool(size)
 	case StrategyChunked:
 		// For chunked strategy, return a chunk-sized buffer
-		return abp.getChunk()
+		return abp.GetChunk()
 	case StrategyDirect:
 		atomic.AddInt64(&abp.metrics.poolMisses, 1)
 		return make([]byte, size)
@@ -268,7 +278,7 @@ func (abp *AdaptiveBufferPoolImpl) getFromPool(size int) []byte {
 }
 
 // getChunk retrieves a chunk from the chunk pool
-func (abp *AdaptiveBufferPoolImpl) getChunk() []byte {
+func (abp *AdaptiveBufferPoolImpl) GetChunk() []byte {
 	chunk := abp.chunkPool.Get().([]byte)
 	atomic.AddInt64(&abp.metrics.poolHits, 1)
 	return chunk
@@ -288,7 +298,7 @@ func (abp *AdaptiveBufferPoolImpl) Put(buf []byte) {
 	// Determine which pool this buffer belongs to
 	if bufSize == abp.config.ChunkSize {
 		// This is a chunk buffer
-		abp.putChunk(buf)
+		abp.PutChunk(buf)
 	} else if bufSize < 32*1024 {
 		abp.smallPool.Put(buf)
 	} else if bufSize < abp.config.LargeObjectThreshold {
@@ -298,7 +308,7 @@ func (abp *AdaptiveBufferPoolImpl) Put(buf []byte) {
 }
 
 // putChunk returns a chunk to the chunk pool
-func (abp *AdaptiveBufferPoolImpl) putChunk(buf []byte) {
+func (abp *AdaptiveBufferPoolImpl) PutChunk(buf []byte) {
 	// Reset buffer to full capacity
 	buf = buf[:cap(buf)]
 	abp.chunkPool.Put(buf)
@@ -381,8 +391,8 @@ func (abp *AdaptiveBufferPoolImpl) CopyBuffer(dst io.Writer, src io.Reader) (int
 
 // chunkedCopyBuffer implements optimized copying for large objects
 func (abp *AdaptiveBufferPoolImpl) chunkedCopyBuffer(dst io.Writer, src io.Reader) (int64, error) {
-	chunk := abp.getChunk()
-	defer abp.putChunk(chunk)
+	chunk := abp.GetChunk()
+	defer abp.PutChunk(chunk)
 
 	return io.CopyBuffer(dst, src, chunk)
 }
@@ -491,8 +501,8 @@ func (abp *AdaptiveBufferPoolImpl) ChunkedCopyBuffer(dst io.Writer, src io.Reade
 	// Get chunk from pool or create new one
 	var chunk []byte
 	if chunkSize == abp.config.ChunkSize {
-		chunk = abp.getChunk()
-		defer abp.putChunk(chunk)
+		chunk = abp.GetChunk()
+		defer abp.PutChunk(chunk)
 	} else {
 		chunk = make([]byte, chunkSize)
 	}
