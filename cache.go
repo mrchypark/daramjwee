@@ -324,12 +324,12 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 	// Copy the entire stream to hot cache
 	_, copyErr := io.Copy(writer, result.Body)
 	closeErr := writer.Close()
-	result.Body.Close()
+	bodyCloseErr := result.Body.Close()
 
-	if copyErr != nil || closeErr != nil {
-		level.Error(c.Logger).Log("msg", "failed to write to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+	if copyErr != nil || closeErr != nil || bodyCloseErr != nil {
+		level.Error(c.Logger).Log("msg", "failed to write to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr, "bodyCloseErr", bodyCloseErr)
 		// Since we already closed result.Body, we need to fetch again or return error
-		return nil, errors.New("cache write failed and original stream consumed")
+		return nil, errors.New("cache write failed and original stream consumed, check logs for details")
 	}
 
 	// Schedule background copy to cold store
