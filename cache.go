@@ -239,8 +239,43 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 	// Only update the CachedAt field of the copy to the current time.
 	metaToPromote.CachedAt = time.Now()
 
-	// Pass the modified copy to the promotion logic.
-	return c.promoteAndTeeStream(ctx, key, metaToPromote, coldStream)
+	// Write-then-read approach: First save to hot cache completely
+	writer, err := c.setStreamToStore(ctx, c.HotStore, key, metaToPromote)
+	if err != nil {
+		level.Error(c.Logger).Log("msg", "failed to get hot store writer for promotion", "key", key, "err", err)
+		return coldStream, nil // Return original cold stream if promotion fails
+	}
+
+	// Copy the entire stream from cold to hot cache
+	_, copyErr := io.Copy(writer, coldStream)
+	closeErr := writer.Close()
+	coldStream.Close()
+
+	if copyErr != nil || closeErr != nil {
+		level.Error(c.Logger).Log("msg", "failed to promote to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+		// Since we already closed coldStream, we need to read from cold again
+		coldStream, _, err := c.getStreamFromStore(ctx, c.ColdStore, key)
+		if err != nil {
+			level.Error(c.Logger).Log("msg", "failed to re-read from cold cache after promotion failure", "key", key, "err", err)
+			return nil, err
+		}
+		return coldStream, nil
+	}
+
+	// Now read from hot cache and return to user
+	hotStream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
+	if err != nil {
+		level.Error(c.Logger).Log("msg", "failed to read from hot cache after promotion", "key", key, "err", err)
+		// Fallback to reading from cold cache again
+		coldStream, _, fallbackErr := c.getStreamFromStore(ctx, c.ColdStore, key)
+		if fallbackErr != nil {
+			level.Error(c.Logger).Log("msg", "failed to fallback to cold cache", "key", key, "err", fallbackErr)
+			return nil, err
+		}
+		return coldStream, nil
+	}
+
+	return hotStream, nil
 }
 
 // handleMiss processes the logic when an object is not found in either hot or cold cache.
@@ -278,13 +313,35 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 	}
 	result.Metadata.CachedAt = time.Now()
 
-	hotTeeStream, err := c.cacheAndTeeStream(ctx, key, result)
+	// Write-then-read approach: First save to hot cache completely
+	writer, err := c.setStreamToStore(ctx, c.HotStore, key, result.Metadata)
 	if err != nil {
-		return result.Body, nil
+		level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
+		return result.Body, nil // Return original stream if cache write fails
 	}
 
+	// Copy the entire stream to hot cache
+	_, copyErr := io.Copy(writer, result.Body)
+	closeErr := writer.Close()
+	result.Body.Close()
+
+	if copyErr != nil || closeErr != nil {
+		level.Error(c.Logger).Log("msg", "failed to write to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+		// Since we already closed result.Body, we need to fetch again or return error
+		return nil, errors.New("cache write failed and original stream consumed")
+	}
+
+	// Schedule background copy to cold store
 	c.scheduleSetToStore(context.Background(), c.ColdStore, key)
-	return hotTeeStream, nil
+
+	// Now read from hot cache and return to user
+	hotStream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
+	if err != nil {
+		level.Error(c.Logger).Log("msg", "failed to read from hot cache after write", "key", key, "err", err)
+		return nil, err
+	}
+
+	return hotStream, nil
 }
 
 // handleNegativeCache processes the logic for storing a negative cache entry.
@@ -371,33 +428,8 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 	c.Worker.Submit(job)
 }
 
-// promoteAndTeeStream promotes a cold stream to hot while simultaneously returning it to the user.
-func (c *DaramjweeCache) promoteAndTeeStream(ctx context.Context, key string, metadata *Metadata, coldStream io.ReadCloser) (io.ReadCloser, error) {
-	hotWriter, err := c.setStreamToStore(ctx, c.HotStore, key, metadata)
-	if err != nil {
-		level.Error(c.Logger).Log("msg", "failed to get hot store writer for promotion", "key", key, "err", err)
-		return coldStream, nil
-	}
-
-	teeReader := io.TeeReader(coldStream, hotWriter)
-	return newMultiCloser(teeReader, coldStream, hotWriter), nil
-}
-
-// cacheAndTeeStream caches the origin stream in the hot cache while simultaneously returning it to the user.
-func (c *DaramjweeCache) cacheAndTeeStream(ctx context.Context, key string, result *FetchResult) (io.ReadCloser, error) {
-	if c.HotStore != nil && result.Metadata != nil {
-		cacheWriter, err := c.setStreamToStore(ctx, c.HotStore, key, result.Metadata)
-		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
-			return result.Body, err
-		}
-		teeReader := io.TeeReader(result.Body, cacheWriter)
-		return newMultiCloser(teeReader, result.Body, cacheWriter), nil
-	}
-	return result.Body, nil
-}
-
 // multiCloser combines multiple io.Closer instances into one.
+// NOTE: This is kept for backward compatibility and testing purposes.
 type multiCloser struct {
 	reader  io.Reader
 	closers []io.Closer
