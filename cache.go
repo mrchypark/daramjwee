@@ -341,8 +341,18 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 
 	if copyErr != nil || closeErr != nil {
 		level.Error(c.Logger).Log("msg", "failed to write to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr, "bodyCloseErr", bodyCloseErr)
-		// Since we already closed result.Body, we need to fetch again or return error
-		return nil, errors.New("cache write failed and original stream consumed, check logs for details")
+		// It's safer to delete the key from the hot store to avoid leaving a partial/corrupt object.
+		if delErr := c.deleteFromStore(context.Background(), c.HotStore, key); delErr != nil && !errors.Is(delErr, ErrNotFound) {
+			level.Warn(c.Logger).Log("msg", "failed to clean up partially written key from hot cache", "key", key, "err", delErr)
+		}
+		// Since we already closed result.Body, we need to return an error that preserves context.
+		var writeErr error
+		if copyErr != nil {
+			writeErr = copyErr
+		} else {
+			writeErr = closeErr
+		}
+		return nil, fmt.Errorf("cache write failed and original stream consumed: %w", writeErr)
 	}
 
 	if bodyCloseErr != nil {
