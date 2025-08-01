@@ -371,8 +371,8 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 		level.Info(c.Logger).Log("msg", "refetching from origin after read-after-write failure", "key", key)
 		result, fetchErr := fetcher.Fetch(ctx, nil) // Pass nil for oldMetadata as cache state is uncertain.
 		if fetchErr != nil {
-			level.Error(c.Logger).Log("msg", "fallback fetch failed", "key", key, "err", fetchErr)
-			return nil, fetchErr // Return the error from the second fetch.
+level.Error(c.Logger).Log("msg", "fallback fetch failed", "key", key, "originalErr", err, "fallbackErr", fetchErr)
+			return nil, fmt.Errorf("failed to read from hot cache after write: %w; fallback fetch also failed: %v", err, fetchErr)
 		}
 		// Do not attempt to cache this second result to avoid potential loops.
 		return result.Body, nil
