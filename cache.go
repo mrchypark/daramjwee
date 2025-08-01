@@ -258,6 +258,10 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 
 	if copyErr != nil || closeErr != nil {
 		level.Error(c.Logger).Log("msg", "failed to promote to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr, "coldStreamCloseErr", coldStreamCloseErr)
+		// It's safer to delete the key from the hot store to avoid leaving a partial/corrupt object.
+		if delErr := c.deleteFromStore(context.Background(), c.HotStore, key); delErr != nil && !errors.Is(delErr, ErrNotFound) {
+			level.Warn(c.Logger).Log("msg", "failed to clean up partially promoted key from hot cache", "key", key, "err", delErr)
+		}
 		// Since we already closed coldStream, we need to read from cold again
 		coldStream, _, err := c.getStreamFromStore(ctx, c.ColdStore, key)
 		if err != nil {
