@@ -234,7 +234,7 @@ func TestS3FIFO_Churn(t *testing.T) {
 			// Select a random key
 			randomKey := keys[rng.Intn(len(keys))]
 
-			// 500% chance for Touch, 500% chance for Remove
+			// 50% chance for Touch, 50% chance for Remove
 			if rng.Intn(2) == 0 {
 				p.Touch(randomKey)
 			} else {
