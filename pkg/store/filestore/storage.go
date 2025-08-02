@@ -440,8 +440,10 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 				}
 			}
 
-			if len(filteredCandidates) == 0 {
-				// If only the current key was a candidate, we can't evict it now
+            if len(filteredCandidates) == 0 {
+				// If only the current key was a candidate, we can't evict it now.
+				// This means the cache might temporarily exceed capacity.
+				level.Warn(fs.logger).Log("msg", "eviction failed, policy only suggested evicting the key being written", "key", key)
 				break
 			}
 
