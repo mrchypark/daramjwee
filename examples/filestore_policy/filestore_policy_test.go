@@ -26,7 +26,7 @@ func TestFileStoreWithLRUPolicy(t *testing.T) {
 	store, err := filestore.New(
 		tempDir,
 		logger,
-		filestore.WithCapacity(1200), // Capacity to hold 3 small files but not 4
+		filestore.WithCapacity(1000), // Capacity to hold file1+file2, but not all three.
 		filestore.WithEvictionPolicy(policy.NewLRU()),
 	)
 	if err != nil {
