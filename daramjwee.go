@@ -156,6 +156,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		ColdStore:        cfg.ColdStore,
 		Worker:           workerManager,
 		DefaultTimeout:   cfg.DefaultTimeout,
+		ShutdownTimeout:  cfg.ShutdownTimeout,
 		PositiveFreshFor: cfg.PositiveFreshFor,
 		NegativeFreshFor: cfg.NegativeFreshFor,
 	}

@@ -134,6 +134,12 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 
+	// Ensure the directory exists for the target path
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		fs.lockManager.Unlock(path)
+		return nil, fmt.Errorf("failed to create directory for key %s: %w", key, err)
+	}
+
 	tmpFile, err := os.CreateTemp(fs.baseDir, "daramjwee-tmp-*.data")
 	if err != nil {
 		fs.lockManager.Unlock(path)
@@ -243,11 +249,77 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 }
 
 // toDataPath converts a key into a safe file path within the base directory.
-// It prevents path traversal by stripping ".." and leading path separators.
+// It prevents path traversal by cleaning the path and ensuring it stays within baseDir.
 func (fs *FileStore) toDataPath(key string) string {
-	safeKey := strings.ReplaceAll(key, "..", "")
-	safeKey = strings.TrimPrefix(safeKey, string(os.PathSeparator))
-	return filepath.Join(fs.baseDir, safeKey)
+	// Handle empty key
+	if key == "" {
+		return filepath.Join(fs.baseDir, "empty_key")
+	}
+
+	// Clean the path to resolve any ".." or "." components
+	cleanKey := filepath.Clean(key)
+
+	// Remove leading path separators to prevent absolute paths
+	cleanKey = strings.TrimPrefix(cleanKey, string(os.PathSeparator))
+	cleanKey = strings.TrimPrefix(cleanKey, "/") // Also handle forward slashes on Windows
+
+	// Handle the case where cleaning results in ".." (trying to escape)
+	for strings.HasPrefix(cleanKey, "..") {
+		cleanKey = strings.TrimPrefix(cleanKey, "..")
+		cleanKey = strings.TrimPrefix(cleanKey, string(os.PathSeparator))
+		cleanKey = strings.TrimPrefix(cleanKey, "/")
+		if cleanKey == "" {
+			cleanKey = "escaped_path"
+			break
+		}
+	}
+
+	// If we ended up with an empty key after cleaning, use a safe default
+	if cleanKey == "" || cleanKey == "." {
+		cleanKey = "root_file"
+	}
+
+	// Join with base directory
+	fullPath := filepath.Join(fs.baseDir, cleanKey)
+
+	// Final safety check: ensure the resolved path is still within baseDir
+	absBase, err := filepath.Abs(fs.baseDir)
+	if err != nil {
+		// If we can't get absolute path, fall back to safe key
+		safeKey := strings.ReplaceAll(key, "..", "")
+		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
+		safeKey = strings.ReplaceAll(safeKey, "/", "_")
+		if safeKey == "" {
+			safeKey = "safe_fallback"
+		}
+		return filepath.Join(fs.baseDir, safeKey)
+	}
+
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		// If we can't get absolute path, fall back to safe key
+		safeKey := strings.ReplaceAll(key, "..", "")
+		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
+		safeKey = strings.ReplaceAll(safeKey, "/", "_")
+		if safeKey == "" {
+			safeKey = "safe_fallback"
+		}
+		return filepath.Join(fs.baseDir, safeKey)
+	}
+
+	// Check if path is within base directory
+	if !strings.HasPrefix(absPath+string(os.PathSeparator), absBase+string(os.PathSeparator)) && absPath != absBase {
+		// If path escapes baseDir, use a safe fallback
+		safeKey := strings.ReplaceAll(key, "..", "")
+		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
+		safeKey = strings.ReplaceAll(safeKey, "/", "_")
+		if safeKey == "" {
+			safeKey = "safe_fallback"
+		}
+		return filepath.Join(fs.baseDir, safeKey)
+	}
+
+	return fullPath
 }
 
 // writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
@@ -440,7 +512,7 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 				}
 			}
 
-            if len(filteredCandidates) == 0 {
+			if len(filteredCandidates) == 0 {
 				// If only the current key was a candidate, we can't evict it now.
 				// This means the cache might temporarily exceed capacity.
 				level.Warn(fs.logger).Log("msg", "eviction failed, policy only suggested evicting the key being written", "key", key)

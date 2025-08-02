@@ -160,6 +160,121 @@ func TestFileStore_PathTraversal(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "file should not be created outside the base directory")
 }
 
+// TestFileStore_NestedPaths tests that nested directory paths work correctly.
+func TestFileStore_NestedPaths(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name string
+		key  string
+	}{
+		{"simple nested", "dir1/file1"},
+		{"deep nested", "dir1/dir2/dir3/file2"},
+		{"with dots", "dir1/file.with.dots"},
+		{"mixed separators", "dir1\\dir2/file3"}, // Should be normalized
+	}
+
+	for i, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Use unique key to avoid lock conflicts
+			uniqueKey := fmt.Sprintf("%s_%d", tc.key, i)
+			content := fmt.Sprintf("content for %s", uniqueKey)
+
+			// Write the file
+			writer, err := fs.SetWithWriter(ctx, uniqueKey, &daramjwee.Metadata{ETag: "v1"})
+			require.NoError(t, err, "SetWithWriter should succeed for key: %s", uniqueKey)
+
+			_, err = writer.Write([]byte(content))
+			require.NoError(t, err, "Write should succeed")
+
+			err = writer.Close()
+			require.NoError(t, err, "Close should succeed")
+
+			// Read the file back
+			reader, meta, err := fs.GetStream(ctx, uniqueKey)
+			require.NoError(t, err, "GetStream should succeed for key: %s", uniqueKey)
+
+			assert.Equal(t, "v1", meta.ETag)
+
+			readContent, err := io.ReadAll(reader)
+			require.NoError(t, err, "ReadAll should succeed")
+			assert.Equal(t, content, string(readContent))
+			reader.Close()
+
+			// Test Stat
+			statMeta, err := fs.Stat(ctx, uniqueKey)
+			require.NoError(t, err, "Stat should succeed")
+			assert.Equal(t, "v1", statMeta.ETag)
+
+			// Test Delete
+			err = fs.Delete(ctx, uniqueKey)
+			require.NoError(t, err, "Delete should succeed")
+
+			// Verify deletion
+			_, _, err = fs.GetStream(ctx, uniqueKey)
+			assert.ErrorIs(t, err, daramjwee.ErrNotFound, "File should be deleted")
+		})
+	}
+}
+
+// TestFileStore_PathSafety tests various potentially problematic paths.
+func TestFileStore_PathSafety(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name        string
+		key         string
+		shouldWork  bool
+		description string
+	}{
+		{"absolute path", "/etc/passwd", true, "should be made relative"},
+		{"parent traversal", "../../../etc/passwd", true, "should be sanitized"},
+		{"current dir", "./file", true, "should work normally"},
+		{"multiple dots", "dir/../file", true, "should be cleaned"},
+		{"empty key", "", false, "empty key should be handled"},
+		{"only dots", "..", true, "should be sanitized"},
+		{"mixed traversal", "good/../../bad", true, "should be sanitized"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := fmt.Sprintf("content for %s", tc.key)
+
+			writer, err := fs.SetWithWriter(ctx, tc.key, &daramjwee.Metadata{ETag: "v1"})
+			if !tc.shouldWork {
+				// For cases that shouldn't work, we might still get a writer
+				// but operations should fail gracefully
+				if err != nil {
+					return // Expected failure
+				}
+			} else {
+				require.NoError(t, err, "SetWithWriter should succeed for: %s", tc.description)
+			}
+
+			if writer != nil {
+				_, err = writer.Write([]byte(content))
+				if tc.shouldWork {
+					require.NoError(t, err, "Write should succeed")
+				}
+
+				err = writer.Close()
+				if tc.shouldWork {
+					require.NoError(t, err, "Close should succeed")
+
+					// Verify the file was created within the base directory
+					dataPath := fs.toDataPath(tc.key)
+					absBase, _ := filepath.Abs(fs.baseDir)
+					absPath, _ := filepath.Abs(dataPath)
+					assert.True(t, strings.HasPrefix(absPath, absBase),
+						"File should be within base directory. Base: %s, Path: %s", absBase, absPath)
+				}
+			}
+		})
+	}
+}
+
 // TestFileStore_SetWithCopyAndTruncate tests the copy-and-truncate strategy.
 func TestFileStore_SetWithCopyAndTruncate(t *testing.T) {
 	fs := setupTestStore(t, WithCopyAndTruncate())
