@@ -72,7 +72,7 @@ func main() {
 		daramjwee.WithShutdownTimeout(5*time.Second),
 	)
 	if err != nil {
-		fmt.Printf("Failed to create cache: %v\n", err)
+logger.Log("msg", "Failed to create cache", "err", err)
 		os.Exit(1)
 	}
 	defer baseCache.Close()
