@@ -266,33 +266,22 @@ func (fs *FileStore) toDataPath(key string) string {
 		return filepath.Join(fs.baseDir, "empty_key")
 	}
 
-	// Clean the path to resolve any ".." or "." components
-	cleanKey := filepath.Clean(key)
+	// Sanitize the key to prevent path traversal while preserving directory structure.
+	// By cleaning the key relative to a root, we resolve all ".." segments safely.
+	// We use "/" as it's the canonical separator for this operation.
+	slashedKey := filepath.ToSlash(key)
+	cleanKey := filepath.Clean("/" + slashedKey)
+	cleanKey = strings.TrimPrefix(cleanKey, "/")
 
-	// Remove leading path separators to prevent absolute paths
-	cleanKey = strings.TrimPrefix(cleanKey, string(os.PathSeparator))
-	cleanKey = strings.TrimPrefix(cleanKey, "/") // Also handle forward slashes on Windows
-
-	// Handle the case where cleaning results in ".." (trying to escape)
-	for strings.HasPrefix(cleanKey, "..") {
-		cleanKey = strings.TrimPrefix(cleanKey, "..")
-		cleanKey = strings.TrimPrefix(cleanKey, string(os.PathSeparator))
-		cleanKey = strings.TrimPrefix(cleanKey, "/")
-		if cleanKey == "" {
-			cleanKey = "escaped_path"
-			break
-		}
-	}
-
-	// If we ended up with an empty key after cleaning, use a safe default
+	// If cleaning results in an empty or dot path, use a safe default.
 	if cleanKey == "" || cleanKey == "." {
 		cleanKey = "root_file"
 	}
 
-	// Join with base directory
+	// Join with base directory. Join will handle OS-specific separators.
 	fullPath := filepath.Join(fs.baseDir, cleanKey)
 
-	// Final safety check: ensure the resolved path is still within baseDir
+	// Final safety check: ensure the resolved path is still within baseDir.
 	absBase, err := filepath.Abs(fs.baseDir)
 	if err != nil {
 		return safeFallback(key)
