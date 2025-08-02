@@ -68,7 +68,7 @@ func benchmarkFileStorePolicy(b *testing.B, policyName string, pol daramjwee.Evi
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		key := fmt.Sprintf("file-%d", i)
 
 		// Write operation
@@ -141,7 +141,7 @@ func benchmarkMixedWorkload(b *testing.B, policyName string, pol daramjwee.Evict
 	data := strings.Repeat("X", 512) // 512B data per file
 
 	// Pre-populate some files
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		key := fmt.Sprintf("init-file-%d", i)
 		metadata := &daramjwee.Metadata{
 			ETag:     fmt.Sprintf("etag-%d", i),
@@ -164,7 +164,7 @@ func benchmarkMixedWorkload(b *testing.B, policyName string, pol daramjwee.Evict
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		if i%3 == 0 {
 			// Write operation (33% of operations)
 			key := fmt.Sprintf("file-%d", i)
