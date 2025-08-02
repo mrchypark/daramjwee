@@ -66,19 +66,26 @@ func (gc *GenericCache[T]) Get(ctx context.Context, key string, fetcher GenericF
 
 // Set stores a value in the cache with type safety.
 func (gc *GenericCache[T]) Set(ctx context.Context, key string, value T, metadata *daramjwee.Metadata) error {
+	// Marshal to a buffer first to avoid writing partial data if encoding fails.
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("failed to marshal value: %w", err)
+	}
+
 	writer, err := gc.cache.Set(ctx, key, metadata)
 	if err != nil {
 		return err
 	}
 
-	// Use JSON encoder to stream directly to the writer
-	encErr := json.NewEncoder(writer).Encode(value)
-	closeErr := writer.Close()
-
-	if encErr != nil {
-		return fmt.Errorf("failed to marshal value: %w", encErr)
+	_, writeErr := writer.Write(data)
+	if writeErr != nil {
+		// Attempt to close to release resources, but the primary error is the write error.
+		_ = writer.Close()
+		return fmt.Errorf("failed to write to cache: %w", writeErr)
 	}
-	return closeErr
+
+	// If write is successful, the close error is the one that matters for commit.
+	return writer.Close()
 }
 
 // Delete removes a key from the cache.
