@@ -32,6 +32,7 @@ func createTestCache() (daramjwee.Cache, error) {
 		logger,
 		daramjwee.WithHotStore(memStore),
 		daramjwee.WithDefaultTimeout(10*time.Second),
+		daramjwee.WithCache(1*time.Minute),
 	)
 }
 

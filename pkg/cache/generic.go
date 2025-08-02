@@ -1,11 +1,11 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/mrchypark/daramjwee"
 )
@@ -40,7 +40,7 @@ func (gf GenericFetcher[T]) Fetch(ctx context.Context, oldMetadata *daramjwee.Me
 	}
 
 	return &daramjwee.FetchResult{
-Body:     io.NopCloser(bytes.NewReader(data)),
+		Body:     io.NopCloser(bytes.NewReader(data)),
 		Metadata: metadata,
 	}, nil
 }
@@ -56,7 +56,7 @@ func (gc *GenericCache[T]) Get(ctx context.Context, key string, fetcher GenericF
 	}
 	defer reader.Close()
 
-var value T
+	var value T
 	if err := json.NewDecoder(reader).Decode(&value); err != nil {
 		return zero, fmt.Errorf("failed to unmarshal cached data: %w", err)
 	}
@@ -70,15 +70,15 @@ func (gc *GenericCache[T]) Set(ctx context.Context, key string, value T, metadat
 	if err != nil {
 		return err
 	}
-	defer writer.Close()
 
-	data, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("failed to marshal value: %w", err)
+	// Use JSON encoder to stream directly to the writer
+	encErr := json.NewEncoder(writer).Encode(value)
+	closeErr := writer.Close()
+
+	if encErr != nil {
+		return fmt.Errorf("failed to marshal value: %w", encErr)
 	}
-
-	_, err = writer.Write(data)
-	return err
+	return closeErr
 }
 
 // Delete removes a key from the cache.

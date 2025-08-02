@@ -14,17 +14,23 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
-// TestConcurrentAccess tests the actual production code for race conditions
-// This test verifies that multiple goroutines can safely access the cache simultaneously
-func TestConcurrentAccess(t *testing.T) {
+// createTestCacheForRace creates a cache with proper freshness settings for race tests
+func createTestCacheForRace() (daramjwee.Cache, error) {
 	logger := log.NewNopLogger()
 	memStore := memstore.New(1*1024*1024, policy.NewLRU())
 
-	baseCache, err := daramjwee.New(
+	return daramjwee.New(
 		logger,
 		daramjwee.WithHotStore(memStore),
 		daramjwee.WithDefaultTimeout(10*time.Second),
+		daramjwee.WithCache(1*time.Minute),
 	)
+}
+
+// TestConcurrentAccess tests the actual production code for race conditions
+// This test verifies that multiple goroutines can safely access the cache simultaneously
+func TestConcurrentAccess(t *testing.T) {
+	baseCache, err := createTestCacheForRace()
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}
@@ -82,14 +88,7 @@ func TestConcurrentAccess(t *testing.T) {
 
 // TestConcurrentRefresh tests concurrent background refresh operations
 func TestConcurrentRefresh(t *testing.T) {
-	logger := log.NewNopLogger()
-	memStore := memstore.New(1*1024*1024, policy.NewLRU())
-
-	baseCache, err := daramjwee.New(
-		logger,
-		daramjwee.WithHotStore(memStore),
-		daramjwee.WithDefaultTimeout(10*time.Second),
-	)
+	baseCache, err := createTestCacheForRace()
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}
@@ -140,14 +139,7 @@ func TestConcurrentRefresh(t *testing.T) {
 
 // TestConcurrentMixedOperations tests various cache operations running concurrently
 func TestConcurrentMixedOperations(t *testing.T) {
-	logger := log.NewNopLogger()
-	memStore := memstore.New(1*1024*1024, policy.NewLRU())
-
-	baseCache, err := daramjwee.New(
-		logger,
-		daramjwee.WithHotStore(memStore),
-		daramjwee.WithDefaultTimeout(10*time.Second),
-	)
+	baseCache, err := createTestCacheForRace()
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}
@@ -216,14 +208,7 @@ func TestConcurrentMixedOperations(t *testing.T) {
 
 // BenchmarkConcurrentAccess benchmarks concurrent cache operations
 func BenchmarkConcurrentAccess(b *testing.B) {
-	logger := log.NewNopLogger()
-	memStore := memstore.New(1*1024*1024, policy.NewLRU())
-
-	baseCache, err := daramjwee.New(
-		logger,
-		daramjwee.WithHotStore(memStore),
-		daramjwee.WithDefaultTimeout(10*time.Second),
-	)
+	baseCache, err := createTestCacheForRace()
 	if err != nil {
 		b.Fatalf("Failed to create cache: %v", err)
 	}
