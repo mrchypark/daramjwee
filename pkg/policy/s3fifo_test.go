@@ -183,7 +183,7 @@ func TestS3FIFO_EdgeCases(t *testing.T) {
 
 	// 2. Update an existing item's size
 	p.Add("key1", 10)
-	p.Add("key1", 500) // Update size
+p.Add("key1", 50) // Update size
 	if p.smallSize != 500 {
 		t.Errorf("Expected smallSize to be 500 after update, got %d", p.smallSize)
 	}
