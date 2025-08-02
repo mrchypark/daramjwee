@@ -12,24 +12,24 @@ type lruEntry struct {
 	size int64
 }
 
-// LRUPolicy implements a classic Least Recently Used eviction policy.
+// LRU implements a classic Least Recently Used eviction policy.
 // This implementation is NOT thread-safe. Synchronization must be handled
 // by the caller (e.g., the Store implementation).
-type LRUPolicy struct {
+type LRU struct {
 	ll    *list.List
 	cache map[string]*list.Element
 }
 
-// NewLRUPolicy creates a new LRU policy.
-func NewLRUPolicy() daramjwee.EvictionPolicy {
-	return &LRUPolicy{
+// NewLRU creates a new LRU policy.
+func NewLRU() daramjwee.EvictionPolicy {
+	return &LRU{
 		ll:    list.New(),
 		cache: make(map[string]*list.Element),
 	}
 }
 
 // Touch moves an item to the front of the list, marking it as recently used.
-func (p *LRUPolicy) Touch(key string) {
+func (p *LRU) Touch(key string) {
 	if elem, ok := p.cache[key]; ok {
 		p.ll.MoveToFront(elem)
 	}
@@ -37,7 +37,7 @@ func (p *LRUPolicy) Touch(key string) {
 
 // Add adds a new item to the front of the list. If the item already
 // exists, it's moved to the front and its size is updated.
-func (p *LRUPolicy) Add(key string, size int64) {
+func (p *LRU) Add(key string, size int64) {
 	if elem, ok := p.cache[key]; ok {
 		// Item already exists, update its size and move to front.
 		p.ll.MoveToFront(elem)
@@ -51,7 +51,7 @@ func (p *LRUPolicy) Add(key string, size int64) {
 }
 
 // Remove removes an item from the cache.
-func (p *LRUPolicy) Remove(key string) {
+func (p *LRU) Remove(key string) {
 	if elem, ok := p.cache[key]; ok {
 		p.removeElement(elem)
 	}
@@ -59,7 +59,7 @@ func (p *LRUPolicy) Remove(key string) {
 
 // Evict removes and returns the least recently used item (from the back of the list).
 // It returns nil if the cache is empty.
-func (p *LRUPolicy) Evict() []string {
+func (p *LRU) Evict() []string {
 	elem := p.ll.Back()
 	if elem == nil {
 		return nil
@@ -71,7 +71,7 @@ func (p *LRUPolicy) Evict() []string {
 
 // removeElement is an internal helper to remove a list element and its
 // corresponding map entry.
-func (p *LRUPolicy) removeElement(e *list.Element) *lruEntry {
+func (p *LRU) removeElement(e *list.Element) *lruEntry {
 	p.ll.Remove(e)
 	entry := e.Value.(*lruEntry)
 	delete(p.cache, entry.key)

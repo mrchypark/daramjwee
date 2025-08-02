@@ -1,5 +1,70 @@
 # filestore
 
+FileStore는 디스크 기반의 daramjwee.Store 구현체입니다. 파일 시스템을 사용하여 캐시 데이터를 저장하며, 다양한 eviction policy를 지원합니다.
+
+## Features
+
+- **Disk-based storage**: 파일 시스템을 사용한 영구 저장
+- **Eviction policies**: LRU, S3-FIFO, SIEVE 등 다양한 eviction 정책 지원
+- **Capacity management**: 최대 용량 설정 및 자동 eviction
+- **Thread-safe**: 동시 접근을 위한 파일 락 메커니즘
+- **NFS compatibility**: copy-and-truncate 전략 지원
+
+## Usage
+
+### Basic Usage
+
+```go
+import (
+    "github.com/mrchypark/daramjwee/pkg/store/filestore"
+    "github.com/mrchypark/daramjwee/pkg/policy"
+)
+
+// Create a basic FileStore
+store, err := filestore.New("/path/to/cache", logger)
+
+// Create FileStore with capacity and LRU policy
+store, err := filestore.New(
+    "/path/to/cache",
+    logger,
+    filestore.WithCapacity(1024*1024), // 1MB capacity
+    filestore.WithEvictionPolicy(policy.NewLRU()),
+)
+```
+
+### Available Options
+
+- `WithCapacity(capacity int64)`: 최대 용량 설정 (바이트 단위)
+- `WithEvictionPolicy(policy daramjwee.EvictionPolicy)`: eviction 정책 설정
+- `WithCopyAndTruncate()`: NFS 호환성을 위한 copy-and-truncate 전략 사용
+
+### Supported Eviction Policies
+
+- **LRU**: Least Recently Used - 가장 오래 사용되지 않은 항목을 먼저 제거
+- **S3-FIFO**: Second-Chance FIFO - 빈도 기반 eviction과 FIFO를 결합
+- **SIEVE**: 낮은 오버헤드의 eviction 알고리즘
+
+```go
+// LRU Policy
+lruPolicy := policy.NewLRU()
+
+// S3-FIFO Policy (total capacity, small queue ratio as percentage)
+s3fifoPolicy := policy.NewS3FIFO(1024*1024, 10) // 1MB total, 10% for small queue
+
+// SIEVE Policy
+sievePolicy := policy.NewSievePolicy()
+```
+
+## Examples
+
+자세한 사용 예제는 `examples/filestore_policy/` 디렉토리를 참조하세요:
+
+- `main.go`: 기본적인 policy 사용법
+- `policy_comparison.go`: 다양한 policy 비교
+- `config.yaml`: 설정 예제
+
+## Benchmarks
+
 ```
 $ go test -bench=. -benchmem ./pkg/store/filestore/
 goos: linux

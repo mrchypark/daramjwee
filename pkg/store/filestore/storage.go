@@ -8,10 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
-	"github.com/goccy/go-json"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/goccy/go-json"
 	"github.com/mrchypark/daramjwee"
 )
 
@@ -21,6 +22,13 @@ type FileStore struct {
 	logger             log.Logger
 	lockManager        *FileLockManager
 	useCopyAndTruncate bool // useCopyAndTruncate, if true, uses a copy-and-truncate strategy for writing files.
+
+	// Policy-related fields
+	mu          sync.RWMutex
+	capacity    int64 // Capacity in bytes (0 means unlimited)
+	currentSize int64 // Current total size of stored files in bytes
+	policy      daramjwee.EvictionPolicy
+	fileSizes   map[string]int64 // Track file sizes for eviction
 }
 
 // Option configures the FileStore.
@@ -35,6 +43,23 @@ func WithCopyAndTruncate() Option {
 	}
 }
 
+// WithCapacity sets the maximum capacity of the store in bytes.
+// When capacity is exceeded, the eviction policy will be used to remove files.
+// If capacity is 0 or less, the store has no limit.
+func WithCapacity(capacity int64) Option {
+	return func(fs *FileStore) {
+		fs.capacity = capacity
+	}
+}
+
+// WithEvictionPolicy sets the eviction policy for the store.
+// If policy is nil, a no-op policy is used (no eviction).
+func WithEvictionPolicy(policy daramjwee.EvictionPolicy) Option {
+	return func(fs *FileStore) {
+		fs.policy = policy
+	}
+}
+
 // New creates a new FileStore.
 // It ensures the base directory exists and initializes the file locking mechanism.
 func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
@@ -45,10 +70,24 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 		baseDir:     dir,
 		logger:      logger,
 		lockManager: NewFileLockManager(2048),
+		fileSizes:   make(map[string]int64),
 	}
+
+	// Apply options
 	for _, opt := range opts {
 		opt(fs)
 	}
+
+	// Set default policy if none provided
+	if fs.policy == nil {
+		fs.policy = daramjwee.NewNullEvictionPolicy()
+	}
+
+	// Initialize current size by scanning existing files
+	if err := fs.initializeCurrentSize(); err != nil {
+		level.Warn(logger).Log("msg", "failed to initialize current size", "err", err)
+	}
+
 	return fs, nil
 }
 
@@ -79,6 +118,11 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 		fs.lockManager.RUnlock(path)
 		return nil, nil, fmt.Errorf("failed to seek to data section: %w", err)
 	}
+
+	// Notify the policy that this key was accessed
+	fs.mu.Lock()
+	fs.policy.Touch(key)
+	fs.mu.Unlock()
 
 	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
 }
@@ -127,6 +171,12 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 				return fmt.Errorf("failed to rename temporary file: %w", err)
 			}
 		}
+
+		// Update policy and size tracking after successful write
+		if err := fs.updateAfterSet(key, path); err != nil {
+			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
+		}
+
 		return nil
 	}
 
@@ -139,8 +189,26 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	fs.lockManager.Lock(path)
 	defer fs.lockManager.Unlock(path)
 
+	// Get file size before deletion for policy update
+	fs.mu.Lock()
+	fileSize, exists := fs.fileSizes[key]
+	if exists {
+		fs.currentSize -= fileSize
+		delete(fs.fileSizes, key)
+		fs.policy.Remove(key)
+	}
+	fs.mu.Unlock()
+
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
+		// If deletion failed but we already updated the policy, revert the changes
+		if exists {
+			fs.mu.Lock()
+			fs.fileSizes[key] = fileSize
+			fs.currentSize += fileSize
+			fs.policy.Add(key, fileSize)
+			fs.mu.Unlock()
+		}
 		return err
 	}
 	return nil
@@ -162,7 +230,16 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 	defer file.Close()
 
 	meta, _, err := readMetadata(file)
-	return meta, err
+	if err != nil {
+		return nil, err
+	}
+
+	// Access via Stat should also be considered a "touch"
+	fs.mu.Lock()
+	fs.policy.Touch(key)
+	fs.mu.Unlock()
+
+	return meta, nil
 }
 
 // toDataPath converts a key into a safe file path within the base directory.
@@ -289,4 +366,132 @@ func (lwc *lockedWriteCloser) Close() error {
 		return onCloseErr
 	}
 	return closeErr
+}
+
+// initializeCurrentSize scans the base directory to calculate the current total size
+// and populate the fileSizes map for existing files.
+func (fs *FileStore) initializeCurrentSize() error {
+	return filepath.Walk(fs.baseDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		// Skip temporary files
+		if strings.Contains(info.Name(), "daramjwee-tmp-") {
+			return nil
+		}
+
+		// Convert file path back to key
+		relPath, err := filepath.Rel(fs.baseDir, path)
+		if err != nil {
+			return err
+		}
+
+		key := filepath.ToSlash(relPath)
+		size := info.Size()
+
+		fs.fileSizes[key] = size
+		fs.currentSize += size
+		fs.policy.Add(key, size)
+
+		return nil
+	})
+}
+
+// updateAfterSet updates the policy and size tracking after a successful file write.
+func (fs *FileStore) updateAfterSet(key, path string) error {
+	// Get the file size
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("failed to stat file after write: %w", err)
+	}
+
+	newFileSize := fileInfo.Size()
+
+	fs.mu.Lock()
+
+	// If the file already existed, subtract its old size
+	if oldSize, exists := fs.fileSizes[key]; exists {
+		fs.currentSize -= oldSize
+	}
+
+	// Add the new file size
+	fs.fileSizes[key] = newFileSize
+	fs.currentSize += newFileSize
+	fs.policy.Add(key, newFileSize)
+
+	// Collect keys to evict while holding the lock
+	var keysToEvict []string
+	if fs.capacity > 0 {
+		for fs.currentSize > fs.capacity {
+			candidates := fs.policy.Evict()
+			if len(candidates) == 0 {
+				break
+			}
+			// Filter out the current key to avoid deadlock
+			var filteredCandidates []string
+			for _, candidate := range candidates {
+				if candidate != key {
+					filteredCandidates = append(filteredCandidates, candidate)
+				}
+			}
+
+			if len(filteredCandidates) == 0 {
+				// If only the current key was a candidate, we can't evict it now
+				break
+			}
+
+			keysToEvict = append(keysToEvict, filteredCandidates...)
+
+			// Optimistically update size tracking
+			for _, keyToEvict := range filteredCandidates {
+				if size, exists := fs.fileSizes[keyToEvict]; exists {
+					fs.currentSize -= size
+					delete(fs.fileSizes, keyToEvict)
+				}
+			}
+		}
+	}
+
+	fs.mu.Unlock()
+
+	// Perform actual file deletions without holding the mutex
+	for _, keyToEvict := range keysToEvict {
+		if err := fs.deleteFileOnly(keyToEvict); err != nil {
+			level.Warn(fs.logger).Log("msg", "failed to evict file", "key", keyToEvict, "err", err)
+			// Revert the optimistic update for this key
+			fs.mu.Lock()
+			if fileInfo, statErr := os.Stat(fs.toDataPath(keyToEvict)); statErr == nil {
+				fs.fileSizes[keyToEvict] = fileInfo.Size()
+				fs.currentSize += fileInfo.Size()
+				fs.policy.Add(keyToEvict, fileInfo.Size())
+			}
+			fs.mu.Unlock()
+		} else {
+			level.Debug(fs.logger).Log("msg", "file evicted", "key", keyToEvict)
+		}
+	}
+
+	return nil
+}
+
+// deleteFileOnly removes a file from disk without updating internal tracking.
+// This is used during eviction when tracking has already been updated optimistically.
+func (fs *FileStore) deleteFileOnly(key string) error {
+	path := fs.toDataPath(key)
+
+	// Lock the file for deletion
+	fs.lockManager.Lock(path)
+	defer fs.lockManager.Unlock(path)
+
+	// Remove the file
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove file during eviction: %w", err)
+	}
+
+	return nil
 }

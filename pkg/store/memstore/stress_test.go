@@ -23,7 +23,7 @@ func TestMemStore_EvictionStress(t *testing.T) {
 	ctx := context.Background()
 	// Set a small capacity (1MB) to ensure frequent evictions.
 	capacity := int64(1 * 1024 * 1024)
-	p := policy.NewLRUPolicy()
+	p := policy.NewLRU()
 	store := New(capacity, p)
 
 	// Measure memory stats before the test.

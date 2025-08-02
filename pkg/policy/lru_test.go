@@ -9,7 +9,7 @@ import (
 
 // TestLRU_AddAndEvict tests the basic Add and Evict functionality.
 func TestLRU_AddAndEvict(t *testing.T) {
-	p := NewLRUPolicy().(*LRUPolicy)
+	p := NewLRU().(*LRU)
 
 	p.Add("key1", 10)
 	p.Add("key2", 20)
@@ -45,7 +45,7 @@ func TestLRU_AddAndEvict(t *testing.T) {
 
 // TestLRU_Touch tests if Touch correctly moves an item to the front.
 func TestLRU_Touch(t *testing.T) {
-	p := NewLRUPolicy().(*LRUPolicy)
+	p := NewLRU().(*LRU)
 
 	p.Add("key1", 10)
 	p.Add("key2", 20)
@@ -64,7 +64,7 @@ func TestLRU_Touch(t *testing.T) {
 
 // TestLRU_Remove tests explicit removal of an item.
 func TestLRU_Remove(t *testing.T) {
-	p := NewLRUPolicy().(*LRUPolicy)
+	p := NewLRU().(*LRU)
 
 	p.Add("key1", 10)
 	p.Add("key2", 20)
@@ -88,7 +88,7 @@ func TestLRU_Remove(t *testing.T) {
 
 // TestLRU_AddExisting updates an existing item.
 func TestLRU_AddExisting(t *testing.T) {
-	p := NewLRUPolicy().(*LRUPolicy)
+	p := NewLRU().(*LRU)
 
 	p.Add("key1", 10)
 	p.Add("key2", 20)
@@ -113,7 +113,7 @@ func TestLRU_AddExisting(t *testing.T) {
 
 // TestLRU_EdgeCases tests edge cases like operating on an empty cache.
 func TestLRU_EdgeCases(t *testing.T) {
-	p := NewLRUPolicy().(*LRUPolicy)
+	p := NewLRU().(*LRU)
 
 	// 1. Call Evict on an empty cache (should not panic).
 	evictedKeys := p.Evict()
@@ -137,7 +137,7 @@ func TestLRU_EdgeCases(t *testing.T) {
 // TestLRU_Churn is a randomized load test that verifies the internal state consistency
 // of the LRU policy during frequent Add/Remove/Touch operations.
 func TestLRU_Churn(t *testing.T) {
-	p := NewLRUPolicy().(*LRUPolicy)
+	p := NewLRU().(*LRU)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	const cacheSize = 100    // Max number of items in cache
@@ -197,7 +197,7 @@ func TestLRU_Churn(t *testing.T) {
 // BenchmarkLRU_Churn measures the overall performance of the LRU policy
 // under frequent Add/Remove/Touch operations.
 func BenchmarkLRU_Churn(b *testing.B) {
-	p := NewLRUPolicy().(*LRUPolicy)
+	p := NewLRU().(*LRU)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	const cacheSize = 1000

@@ -52,7 +52,7 @@ func ExampleSimpleFetcher_Fetch() {
 // main showcases the usage of daramjwee cache with a memory store and S3FIFO eviction policy.
 func main() {
 	ctx := context.Background()
-	memStore := memstore.New(1*1024*1024, policy.NewS3FIFOPolicy(1*1024*1024, 0.1))
+	memStore := memstore.New(1*1024*1024, policy.NewS3FIFO(1*1024*1024, 10))
 
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	cache, err := daramjwee.New(

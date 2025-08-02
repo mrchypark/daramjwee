@@ -14,17 +14,17 @@ type s3fifoEntry struct {
 	wasHit bool // Indicates if the item has been accessed while in the main queue (given a second chance).
 }
 
-// S3FIFOPolicy implements the S3-FIFO (Second-Chance FIFO) eviction policy.
+// S3FIFO implements the S3-FIFO (Second-Chance FIFO) eviction policy.
 // This implementation is not thread-safe; external synchronization (e.g., by the Store) is required.
 //
 // Key ideas:
-// - Items are initially added to a 'small' queue.
-// - Items accessed in the small queue are promoted to a 'main' queue.
-// - Items in the main queue get a 'second chance': if accessed, their `wasHit` flag is set.
-// - Eviction prioritizes the small queue if it exceeds its capacity.
-// - Otherwise, eviction scans the main queue, evicting items with `wasHit` false,
-//   and resetting `wasHit` to false for items with `wasHit` true.
-type S3FIFOPolicy struct {
+//   - Items are initially added to a 'small' queue.
+//   - Items accessed in the small queue are promoted to a 'main' queue.
+//   - Items in the main queue get a 'second chance': if accessed, their `wasHit` flag is set.
+//   - Eviction prioritizes the small queue if it exceeds its capacity.
+//   - Otherwise, eviction scans the main queue, evicting items with `wasHit` false,
+//     and resetting `wasHit` to false for items with `wasHit` true.
+type S3FIFO struct {
 	smallQueue *list.List               // Small queue for newly added items.
 	mainQueue  *list.List               // Main queue for frequently accessed items.
 	cache      map[string]*list.Element // Map for fast lookup of list elements by key.
@@ -35,15 +35,15 @@ type S3FIFOPolicy struct {
 	smallCapacity int64 // Maximum capacity of the small queue in bytes.
 }
 
-// NewS3FIFOPolicy creates a new S3-FIFO policy.
+// NewS3FIFO creates a new S3-FIFO policy.
 // totalCapacity is the total capacity of the cache in bytes.
-// smallRatio is the proportion of the total capacity allocated to the small queue (e.g., 0.1 for 10%).
-func NewS3FIFOPolicy(totalCapacity int64, smallRatio float64) daramjwee.EvictionPolicy {
-	if smallRatio <= 0 || smallRatio >= 1.0 {
-		smallRatio = 0.1 // Default to 10% if invalid ratio is provided.
+// smallRatio is the proportion of the total capacity allocated to the small queue (e.g., 10 for 10%).
+func NewS3FIFO(totalCapacity int64, smallRatio int) daramjwee.EvictionPolicy {
+	if smallRatio <= 0 || smallRatio >= 100 {
+		smallRatio = 10 // Default to 10% if invalid ratio is provided.
 	}
-	smallCap := int64(float64(totalCapacity) * smallRatio)
-	return &S3FIFOPolicy{
+	smallCap := totalCapacity * int64(smallRatio) / 100
+	return &S3FIFO{
 		smallQueue:    list.New(),
 		mainQueue:     list.New(),
 		cache:         make(map[string]*list.Element),
@@ -53,7 +53,7 @@ func NewS3FIFOPolicy(totalCapacity int64, smallRatio float64) daramjwee.Eviction
 
 // Add adds a new item to the cache. Items are always initially added to the smallQueue.
 // If the item already exists, its size is updated.
-func (p *S3FIFOPolicy) Add(key string, size int64) {
+func (p *S3FIFO) Add(key string, size int64) {
 	if elem, ok := p.cache[key]; ok {
 		// Item already exists, update its size.
 		entry := elem.Value.(*s3fifoEntry)
@@ -78,7 +78,7 @@ func (p *S3FIFOPolicy) Add(key string, size int64) {
 // Touch is called when an item is accessed.
 // If the item is in the smallQueue, it is promoted to the mainQueue.
 // If the item is already in the mainQueue, its 'wasHit' flag is set to true.
-func (p *S3FIFOPolicy) Touch(key string) {
+func (p *S3FIFO) Touch(key string) {
 	elem, ok := p.cache[key]
 	if !ok {
 		return
@@ -102,7 +102,7 @@ func (p *S3FIFOPolicy) Touch(key string) {
 }
 
 // Remove removes an item from the cache.
-func (p *S3FIFOPolicy) Remove(key string) {
+func (p *S3FIFO) Remove(key string) {
 	if elem, ok := p.cache[key]; ok {
 		p.removeElement(elem)
 	}
@@ -111,7 +111,7 @@ func (p *S3FIFOPolicy) Remove(key string) {
 // Evict determines which item(s) should be evicted and returns their keys.
 // It prioritizes eviction from the small queue if it exceeds its capacity.
 // Otherwise, it scans the main queue, applying the second-chance mechanism.
-func (p *S3FIFOPolicy) Evict() []string {
+func (p *S3FIFO) Evict() []string {
 	// 1. If the small queue exceeds its capacity, evict the oldest item from it.
 	if p.smallSize > p.smallCapacity {
 		elem := p.smallQueue.Back()
@@ -160,7 +160,7 @@ func (p *S3FIFOPolicy) Evict() []string {
 
 // removeElement is an internal helper function that removes a given list.Element
 // from its respective queue and the cache map, and updates queue sizes.
-func (p *S3FIFOPolicy) removeElement(e *list.Element) *s3fifoEntry {
+func (p *S3FIFO) removeElement(e *list.Element) *s3fifoEntry {
 	entry := e.Value.(*s3fifoEntry)
 	if entry.isMain {
 		p.mainQueue.Remove(e)

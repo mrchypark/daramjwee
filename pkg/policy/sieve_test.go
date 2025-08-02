@@ -11,16 +11,16 @@ import (
 )
 
 // getEntry safely extracts a sieveEntry from a list.Element for testing purposes.
-func getEntry(p *SievePolicy, key string) *sieveEntry {
+func getEntry(p *Sieve, key string) *sieveEntry {
 	if elem, ok := p.cache[key]; ok {
 		return elem.Value.(*sieveEntry)
 	}
 	return nil
 }
 
-// TestSievePolicy_BasicAddAndTouch tests the basic Add and Touch operations.
-func TestSievePolicy_BasicAddAndTouch(t *testing.T) {
-	p := NewSievePolicy().(*SievePolicy)
+// TestSieve_BasicAddAndTouch tests the basic Add and Touch operations.
+func TestSieve_BasicAddAndTouch(t *testing.T) {
+	p := NewSieve().(*Sieve)
 
 	// Add a new item
 	p.Add("A", 10)
@@ -39,9 +39,9 @@ func TestSievePolicy_BasicAddAndTouch(t *testing.T) {
 	assert.NotPanics(t, func() { p.Touch("B") })
 }
 
-// TestSievePolicy_AddExisting tests adding an already existing item.
-func TestSievePolicy_AddExisting(t *testing.T) {
-	p := NewSievePolicy().(*SievePolicy)
+// TestSieve_AddExisting tests adding an already existing item.
+func TestSieve_AddExisting(t *testing.T) {
+	p := NewSieve().(*Sieve)
 	p.Add("A", 10)
 	p.Add("B", 20)
 
@@ -58,9 +58,9 @@ func TestSievePolicy_AddExisting(t *testing.T) {
 	assert.True(t, entryA.visited, "Visited flag should be true when re-adding an existing item.")
 }
 
-// TestSievePolicy_Remove tests item removal.
-func TestSievePolicy_Remove(t *testing.T) {
-	p := NewSievePolicy().(*SievePolicy)
+// TestSieve_Remove tests item removal.
+func TestSieve_Remove(t *testing.T) {
+	p := NewSieve().(*Sieve)
 	p.Add("A", 10)
 	p.Add("B", 20)
 	p.Add("C", 30)
@@ -77,10 +77,10 @@ func TestSievePolicy_Remove(t *testing.T) {
 	assert.Equal(t, 2, p.ll.Len(), "Removing a non-existent item should have no effect.")
 }
 
-// TestSievePolicy_Evict_MainScenario tests the core scenario of the SIEVE algorithm.
+// TestSieve_Evict_MainScenario tests the core scenario of the SIEVE algorithm.
 // Popular objects should survive, while one-hit wonders should be evicted.
-func TestSievePolicy_Evict_MainScenario(t *testing.T) {
-	p := NewSievePolicy().(*SievePolicy)
+func TestSieve_Evict_MainScenario(t *testing.T) {
+	p := NewSieve().(*Sieve)
 	oneHitWonders := []string{"1", "2", "3", "4", "5"}
 	popularObjects := []string{"6", "7", "8", "9", "10"}
 
@@ -110,10 +110,10 @@ func TestSievePolicy_Evict_MainScenario(t *testing.T) {
 	}
 }
 
-// TestSievePolicy_Evict_FullRotation verifies that when all items are visited,
+// TestSieve_Evict_FullRotation verifies that when all items are visited,
 // the hand scans the entire list and evicts the first scanned item.
-func TestSievePolicy_Evict_FullRotation(t *testing.T) {
-	p := NewSievePolicy().(*SievePolicy)
+func TestSieve_Evict_FullRotation(t *testing.T) {
+	p := NewSieve().(*Sieve)
 	p.Add("A", 1)
 	p.Add("B", 1)
 	p.Add("C", 1)
@@ -132,26 +132,26 @@ func TestSievePolicy_Evict_FullRotation(t *testing.T) {
 	assert.Equal(t, []string{"A"}, evicted, "When all are visited, the oldest item ('A') should be evicted.")
 }
 
-// TestSievePolicy_EvictEmpty verifies that Evict returns nil for an empty policy.
-func TestSievePolicy_EvictEmpty(t *testing.T) {
-	p := NewSievePolicy()
+// TestSieve_EvictEmpty verifies that Evict returns nil for an empty policy.
+func TestSieve_EvictEmpty(t *testing.T) {
+	p := NewSieve()
 	assert.Nil(t, p.Evict(), "Evict() on an empty cache should return nil.")
 }
 
-// TestSievePolicy_EvictSingleItem verifies that Evict works correctly with a single item.
-func TestSievePolicy_EvictSingleItem(t *testing.T) {
-	p := NewSievePolicy()
+// TestSieve_EvictSingleItem verifies that Evict works correctly with a single item.
+func TestSieve_EvictSingleItem(t *testing.T) {
+	p := NewSieve()
 	p.Add("A", 10)
 
 	evicted := p.Evict()
 	assert.Equal(t, []string{"A"}, evicted, "When there is only one item, that item should be evicted.")
-	assert.Equal(t, 0, p.(*SievePolicy).ll.Len(), "Cache should be empty after eviction.")
+	assert.Equal(t, 0, p.(*Sieve).ll.Len(), "Cache should be empty after eviction.")
 }
 
-// TestSievePolicy_RemoveHandledElement verifies that the hand pointer is safely adjusted
+// TestSieve_RemoveHandledElement verifies that the hand pointer is safely adjusted
 // when the item it points to is removed.
-func TestSievePolicy_RemoveHandledElement(t *testing.T) {
-	p := NewSievePolicy().(*SievePolicy)
+func TestSieve_RemoveHandledElement(t *testing.T) {
+	p := NewSieve().(*Sieve)
 	p.Add("A", 1)
 	p.Add("B", 1)
 	p.Add("C", 1)
@@ -167,10 +167,10 @@ func TestSievePolicy_RemoveHandledElement(t *testing.T) {
 	assert.Equal(t, "C", p.hand.Value.(*sieveEntry).key, "If the element pointed to by hand is deleted, hand should point to the previous element.")
 }
 
-// TestSievePolicy_Churn verifies that the internal state remains consistent
+// TestSieve_Churn verifies that the internal state remains consistent
 // during frequent Add/Remove operations.
-func TestSievePolicy_Churn(t *testing.T) {
-	p := NewSievePolicy()
+func TestSieve_Churn(t *testing.T) {
+	p := NewSieve()
 
 	// Fill the cache
 	for i := 0; i < 10; i++ {
@@ -187,14 +187,14 @@ func TestSievePolicy_Churn(t *testing.T) {
 		p.Add(strconv.Itoa(i), 1)
 
 		// Verify internal state (no panics, list length remains constant)
-		assert.Equal(t, 10, p.(*SievePolicy).ll.Len(), "List length should remain constant during churn test.")
+		assert.Equal(t, 10, p.(*Sieve).ll.Len(), "List length should remain constant during churn test.")
 	}
 }
 
-// TestSievePolicy_Churn_Randomized is a randomized load test that verifies
+// TestSieve_Churn_Randomized is a randomized load test that verifies
 // the internal state consistency of the SIEVE policy during frequent Add/Remove/Touch operations.
-func TestSievePolicy_Churn_Randomized(t *testing.T) {
-	p := NewSievePolicy().(*SievePolicy)
+func TestSieve_Churn_Randomized(t *testing.T) {
+	p := NewSieve().(*Sieve)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	const cacheSize = 100    // Max number of items in cache
@@ -257,7 +257,7 @@ func TestSievePolicy_Churn_Randomized(t *testing.T) {
 // BenchmarkSieve_Churn measures the overall performance of the SIEVE policy
 // under frequent Add/Remove/Touch operations.
 func BenchmarkSieve_Churn(b *testing.B) {
-	p := NewSievePolicy().(*SievePolicy)
+	p := NewSieve().(*Sieve)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	const cacheSize = 1000

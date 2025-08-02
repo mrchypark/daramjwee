@@ -13,7 +13,7 @@ type sieveEntry struct {
 	visited bool // Indicates if the item has been recently accessed.
 }
 
-// SievePolicy implements the SIEVE cache eviction algorithm.
+// Sieve implements the SIEVE cache eviction algorithm.
 // This implementation is not thread-safe; external synchronization (e.g., by the Store) is required.
 //
 // Key ideas:
@@ -23,15 +23,15 @@ type sieveEntry struct {
 // - If an item with `visited` flag true is encountered, its `visited` flag is set to false, and it gets another chance.
 // - If an item with `visited` flag false is encountered, it is evicted.
 // - Accessing an item (`Touch`) sets its `visited` flag to true.
-type SievePolicy struct {
+type Sieve struct {
 	ll    *list.List               // Doubly linked list storing items in order.
 	cache map[string]*list.Element // Map for fast lookup of list elements by key.
 	hand  *list.Element            // Pointer to the current position in the list for scanning.
 }
 
-// NewSievePolicy creates a new SIEVE eviction policy.
-func NewSievePolicy() daramjwee.EvictionPolicy {
-	return &SievePolicy{
+// NewSieve creates a new SIEVE eviction policy.
+func NewSieve() daramjwee.EvictionPolicy {
+	return &Sieve{
 		ll:    list.New(),
 		cache: make(map[string]*list.Element),
 		hand:  nil,
@@ -41,7 +41,7 @@ func NewSievePolicy() daramjwee.EvictionPolicy {
 // Add adds a new item to the cache. If the item already exists, its size is updated,
 // it's moved to the front of the list, and its visited flag is set to true.
 // If it's a new item, it's added to the front with visited set to false.
-func (p *SievePolicy) Add(key string, size int64) {
+func (p *Sieve) Add(key string, size int64) {
 	if elem, ok := p.cache[key]; ok {
 		// Item already exists, update and move to front.
 		p.ll.MoveToFront(elem)
@@ -58,14 +58,14 @@ func (p *SievePolicy) Add(key string, size int64) {
 }
 
 // Touch is called when an item is accessed. It sets the item's visited flag to true.
-func (p *SievePolicy) Touch(key string) {
+func (p *Sieve) Touch(key string) {
 	if elem, ok := p.cache[key]; ok {
 		elem.Value.(*sieveEntry).visited = true
 	}
 }
 
 // Remove removes an item from the cache.
-func (p *SievePolicy) Remove(key string) {
+func (p *Sieve) Remove(key string) {
 	if elem, ok := p.cache[key]; ok {
 		p.removeElement(elem)
 	}
@@ -74,7 +74,7 @@ func (p *SievePolicy) Remove(key string) {
 // Evict determines which item(s) should be evicted and returns their keys.
 // It scans the list starting from the 'hand' pointer, evicting items with
 // `visited` flag false, and resetting `visited` to false for items with `visited` true.
-func (p *SievePolicy) Evict() []string {
+func (p *Sieve) Evict() []string {
 	if p.ll.Len() == 0 {
 		return nil
 	}
@@ -120,7 +120,7 @@ func (p *SievePolicy) Evict() []string {
 
 // removeElement is an internal helper function that removes a given list.Element
 // from the list and cache map, and adjusts the hand pointer if necessary.
-func (p *SievePolicy) removeElement(e *list.Element) *sieveEntry {
+func (p *Sieve) removeElement(e *list.Element) *sieveEntry {
 	// If the element to be removed is the one pointed to by hand, move hand to the previous element.
 	if e == p.hand {
 		prev := e.Prev()

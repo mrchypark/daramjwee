@@ -8,14 +8,14 @@ import (
 )
 
 // helper function to check if a key exists in the policy's internal cache
-func isInCache(p *S3FIFOPolicy, key string) bool {
+func isInCache(p *S3FIFO, key string) bool {
 	_, ok := p.cache[key]
 	return ok
 }
 
 // TestS3FIFO_AddAndPromotion tests basic adding and promotion from small to main queue.
 func TestS3FIFO_AddAndPromotion(t *testing.T) {
-	p := NewS3FIFOPolicy(100, 0.5).(*S3FIFOPolicy) // 100 bytes total, 50 for small queue
+	p := NewS3FIFO(100, 50).(*S3FIFO) // 100 bytes total, 500 for small queue
 
 	// 1. Add a new key. It should be in the small queue.
 	p.Add("key1", 10)
@@ -41,7 +41,7 @@ func TestS3FIFO_AddAndPromotion(t *testing.T) {
 
 // TestS3FIFO_SecondChance tests the "second chance" mechanism in the main queue.
 func TestS3FIFO_SecondChance(t *testing.T) {
-	p := NewS3FIFOPolicy(100, 0.5).(*S3FIFOPolicy)
+	p := NewS3FIFO(100, 50).(*S3FIFO)
 
 	// Add and promote key1 to main queue
 	p.Add("key1", 10)
@@ -62,7 +62,7 @@ func TestS3FIFO_SecondChance(t *testing.T) {
 // TestS3FIFO_EvictFromSmallQueue tests eviction from the small queue when it exceeds its capacity.
 func TestS3FIFO_EvictFromSmallQueue(t *testing.T) {
 	// Small queue capacity is 20 bytes.
-	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
+	p := NewS3FIFO(100, 20).(*S3FIFO)
 
 	p.Add("key1", 10) // Oldest
 	p.Add("key2", 10)
@@ -85,7 +85,7 @@ func TestS3FIFO_EvictFromSmallQueue(t *testing.T) {
 // TestS3FIFO_EvictFromMainQueue tests eviction logic from the main queue.
 func TestS3FIFO_EvictFromMainQueue(t *testing.T) {
 	// Total capacity 100, small capacity 20.
-	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
+	p := NewS3FIFO(100, 20).(*S3FIFO)
 
 	// 1. Add items and promote them to main queue
 	p.Add("main1", 30) // Oldest in main
@@ -112,7 +112,7 @@ func TestS3FIFO_EvictFromMainQueue(t *testing.T) {
 
 // TestS3FIFO_EvictFromMainWithSecondChance tests that wasHit items are spared from eviction.
 func TestS3FIFO_EvictFromMainWithSecondChance(t *testing.T) {
-	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
+	p := NewS3FIFO(100, 20).(*S3FIFO)
 
 	// 1. Add items and promote them.
 	p.Add("main1", 30) // Oldest
@@ -134,7 +134,7 @@ func TestS3FIFO_EvictFromMainWithSecondChance(t *testing.T) {
 		t.Fatalf("Expected to evict main2, but got %v", evictedKeys)
 	}
 
-	// 5. Verify state after eviction.
+	// 50. Verify state after eviction.
 	if !isInCache(p, "main1") {
 		t.Error("main1 should still be in cache")
 	}
@@ -145,7 +145,7 @@ func TestS3FIFO_EvictFromMainWithSecondChance(t *testing.T) {
 
 // TestS3FIFO_Remove tests explicit removal of items.
 func TestS3FIFO_Remove(t *testing.T) {
-	p := NewS3FIFOPolicy(100, 0.5).(*S3FIFOPolicy)
+	p := NewS3FIFO(100, 50).(*S3FIFO)
 	p.Add("key1", 10) // In small
 	p.Add("key2", 10) // In small, will be promoted
 	p.Touch("key2")   // Now in main
@@ -175,7 +175,7 @@ func TestS3FIFO_Remove(t *testing.T) {
 // TestS3FIFO_EdgeCases tests various edge cases.
 func TestS3FIFO_EdgeCases(t *testing.T) {
 	// 1. Evict from an empty policy
-	p := NewS3FIFOPolicy(100, 0.5).(*S3FIFOPolicy)
+	p := NewS3FIFO(100, 50).(*S3FIFO)
 	evicted := p.Evict()
 	if evicted != nil {
 		t.Errorf("Evict on empty policy should return nil, got %v", evicted)
@@ -183,9 +183,9 @@ func TestS3FIFO_EdgeCases(t *testing.T) {
 
 	// 2. Update an existing item's size
 	p.Add("key1", 10)
-	p.Add("key1", 50) // Update size
-	if p.smallSize != 50 {
-		t.Errorf("Expected smallSize to be 50 after update, got %d", p.smallSize)
+	p.Add("key1", 500) // Update size
+	if p.smallSize != 500 {
+		t.Errorf("Expected smallSize to be 500 after update, got %d", p.smallSize)
 	}
 	p.Touch("key1")
 	p.Add("key1", 20) // Update size while in main
@@ -198,7 +198,7 @@ func TestS3FIFO_EdgeCases(t *testing.T) {
 // of the S3-FIFO policy during frequent Add/Remove/Touch operations.
 func TestS3FIFO_Churn(t *testing.T) {
 	// Create S3-FIFO policy (total capacity 100, small queue ratio 20%)
-	p := NewS3FIFOPolicy(100, 0.2).(*S3FIFOPolicy)
+	p := NewS3FIFO(100, 20).(*S3FIFO)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	const cacheSize = 100    // Max number of items in cache (regardless of capacity)
@@ -234,7 +234,7 @@ func TestS3FIFO_Churn(t *testing.T) {
 			// Select a random key
 			randomKey := keys[rng.Intn(len(keys))]
 
-			// 50% chance for Touch, 50% chance for Remove
+			// 500% chance for Touch, 500% chance for Remove
 			if rng.Intn(2) == 0 {
 				p.Touch(randomKey)
 			} else {
@@ -265,7 +265,7 @@ func TestS3FIFO_Churn(t *testing.T) {
 func BenchmarkS3FIFO_Churn(b *testing.B) {
 	// Create a policy with sufficient capacity for the benchmark.
 	// Focus is on operation speed rather than capacity limits.
-	p := NewS3FIFOPolicy(100000, 0.1).(*S3FIFOPolicy)
+	p := NewS3FIFO(100000, 10).(*S3FIFO)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	const cacheSize = 1000
