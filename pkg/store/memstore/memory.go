@@ -11,14 +11,14 @@ import (
 
 var (
 	writerPool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &memStoreWriter{
 				buf: bytes.NewBuffer(make([]byte, 0, 1024)), // Pre-allocate buffer
 			}
 		},
 	}
 	bufferPool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return new(bytes.Buffer)
 		},
 	}
