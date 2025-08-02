@@ -4,6 +4,7 @@ package daramjwee
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync/atomic"
 	"time"
@@ -278,7 +279,7 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 		level.Info(c.Logger).Log("msg", "falling back to cold cache after read-after-write failure", "key", key)
 		coldStream, _, fallbackErr := c.getStreamFromStore(ctx, c.ColdStore, key)
 		if fallbackErr != nil {
-level.Error(c.Logger).Log("msg", "fallback to cold cache failed", "key", key, "originalErr", err, "fallbackErr", fallbackErr)
+			level.Error(c.Logger).Log("msg", "fallback to cold cache failed", "key", key, "originalErr", err, "fallbackErr", fallbackErr)
 			return nil, fmt.Errorf("failed to read from hot cache after promotion: %w; fallback to cold cache also failed: %v", err, fallbackErr)
 		}
 		return coldStream, nil
@@ -366,7 +367,7 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 		level.Info(c.Logger).Log("msg", "refetching from origin after read-after-write failure", "key", key)
 		result, fetchErr := fetcher.Fetch(ctx, nil) // Pass nil for oldMetadata as cache state is uncertain.
 		if fetchErr != nil {
-level.Error(c.Logger).Log("msg", "fallback fetch failed", "key", key, "originalErr", err, "fallbackErr", fetchErr)
+			level.Error(c.Logger).Log("msg", "fallback fetch failed", "key", key, "originalErr", err, "fallbackErr", fetchErr)
 			return nil, fmt.Errorf("failed to read from hot cache after write: %w; fallback fetch also failed: %v", err, fetchErr)
 		}
 		// Do not attempt to cache this second result to avoid potential loops.
