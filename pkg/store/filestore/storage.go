@@ -251,6 +251,16 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 // toDataPath converts a key into a safe file path within the base directory.
 // It prevents path traversal by cleaning the path and ensuring it stays within baseDir.
 func (fs *FileStore) toDataPath(key string) string {
+	safeFallback := func(key string) string {
+		safeKey := strings.ReplaceAll(key, "..", "")
+		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
+		safeKey = strings.ReplaceAll(safeKey, "/", "_")
+		if safeKey == "" {
+			safeKey = "safe_fallback"
+		}
+		return filepath.Join(fs.baseDir, safeKey)
+	}
+
 	// Handle empty key
 	if key == "" {
 		return filepath.Join(fs.baseDir, "empty_key")
@@ -285,38 +295,17 @@ func (fs *FileStore) toDataPath(key string) string {
 	// Final safety check: ensure the resolved path is still within baseDir
 	absBase, err := filepath.Abs(fs.baseDir)
 	if err != nil {
-		// If we can't get absolute path, fall back to safe key
-		safeKey := strings.ReplaceAll(key, "..", "")
-		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
-		safeKey = strings.ReplaceAll(safeKey, "/", "_")
-		if safeKey == "" {
-			safeKey = "safe_fallback"
-		}
-		return filepath.Join(fs.baseDir, safeKey)
+		return safeFallback(key)
 	}
 
 	absPath, err := filepath.Abs(fullPath)
 	if err != nil {
-		// If we can't get absolute path, fall back to safe key
-		safeKey := strings.ReplaceAll(key, "..", "")
-		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
-		safeKey = strings.ReplaceAll(safeKey, "/", "_")
-		if safeKey == "" {
-			safeKey = "safe_fallback"
-		}
-		return filepath.Join(fs.baseDir, safeKey)
+		return safeFallback(key)
 	}
 
 	// Check if path is within base directory
 	if !strings.HasPrefix(absPath+string(os.PathSeparator), absBase+string(os.PathSeparator)) && absPath != absBase {
-		// If path escapes baseDir, use a safe fallback
-		safeKey := strings.ReplaceAll(key, "..", "")
-		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
-		safeKey = strings.ReplaceAll(safeKey, "/", "_")
-		if safeKey == "" {
-			safeKey = "safe_fallback"
-		}
-		return filepath.Join(fs.baseDir, safeKey)
+		return safeFallback(key)
 	}
 
 	return fullPath
