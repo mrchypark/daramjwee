@@ -3,6 +3,7 @@ package daramjwee_test
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 
 // UnmarshalableType is a type that will fail JSON marshaling
 type UnmarshalableType struct {
-	Channel chan int `json:"-"` // channels cannot be marshaled to JSON
+	Channel chan int // channels cannot be marshaled to JSON (no json:"-" tag)
 }
 
 // TestGenericCache_Set_MarshalError tests that marshal errors are handled properly
@@ -34,10 +35,12 @@ func TestGenericCache_Set_MarshalError(t *testing.T) {
 	}
 	defer baseCache.Close()
 
-	stringCache := cache.NewGeneric[string](baseCache)
+	// Use a cache for the unmarshalable type
+	unmarshalableCache := cache.NewGeneric[UnmarshalableType](baseCache)
 	ctx := context.Background()
 
-	// First, set a valid value
+	// First, set a valid value in a different cache to ensure the store is not corrupted
+	stringCache := cache.NewGeneric[string](baseCache)
 	key := "test-key"
 	validValue := "valid-data"
 	err = stringCache.Set(ctx, key, validValue, &daramjwee.Metadata{ETag: "v1"})
@@ -45,7 +48,14 @@ func TestGenericCache_Set_MarshalError(t *testing.T) {
 		t.Fatalf("Failed to set valid value: %v", err)
 	}
 
-	// Verify the valid value is stored
+	// Attempt to set a value that will cause a marshal error
+	unmarshalableValue := UnmarshalableType{Channel: make(chan int)}
+	err = unmarshalableCache.Set(ctx, "bad-key", unmarshalableValue, &daramjwee.Metadata{ETag: "v1"})
+	if err == nil {
+		t.Fatal("Expected a marshal error, but got nil")
+	}
+
+	// Verify the valid value is still stored and retrievable, ensuring the cache is not corrupted
 	fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
 		t.Error("Fetcher should not be called for cache hit")
 		return "", nil, nil
@@ -53,10 +63,21 @@ func TestGenericCache_Set_MarshalError(t *testing.T) {
 
 	retrieved, err := stringCache.Get(ctx, key, fetcher)
 	if err != nil {
-		t.Fatalf("Failed to get valid value: %v", err)
+		t.Fatalf("Failed to get valid value after marshal error: %v", err)
 	}
 	if retrieved != validValue {
 		t.Errorf("Expected %q, got %q", validValue, retrieved)
+	}
+
+	// Also verify that the bad key was not written to the cache.
+	// A fetcher that always returns ErrNotFound confirms that the Get call is a cache miss.
+	failingFetcher := cache.GenericFetcher[UnmarshalableType](func(ctx context.Context, oldMetadata *daramjwee.Metadata) (UnmarshalableType, *daramjwee.Metadata, error) {
+		return UnmarshalableType{}, nil, daramjwee.ErrNotFound
+	})
+
+	_, err = unmarshalableCache.Get(ctx, "bad-key", failingFetcher)
+	if err != daramjwee.ErrNotFound {
+		t.Errorf("Expected ErrNotFound for the bad key, but got: %v", err)
 	}
 }
 
@@ -171,13 +192,8 @@ func TestGenericCache_Set_DataIntegrity(t *testing.T) {
 	if retrieved.Name != originalData.Name {
 		t.Errorf("Name mismatch: expected %q, got %q", originalData.Name, retrieved.Name)
 	}
-	if len(retrieved.Tags) != len(originalData.Tags) {
-		t.Errorf("Tags length mismatch: expected %d, got %d", len(originalData.Tags), len(retrieved.Tags))
-	}
-	for i, tag := range originalData.Tags {
-		if i < len(retrieved.Tags) && retrieved.Tags[i] != tag {
-			t.Errorf("Tag[%d] mismatch: expected %q, got %q", i, tag, retrieved.Tags[i])
-		}
+	if !reflect.DeepEqual(retrieved.Tags, originalData.Tags) {
+		t.Errorf("Tags mismatch: expected %v, got %v", originalData.Tags, retrieved.Tags)
 	}
 
 	// Verify metadata map
