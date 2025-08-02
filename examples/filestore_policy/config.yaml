@@ -1,0 +1,17 @@
+# FileStore Policy Configuration Example
+filestore:
+  base_dir: "/tmp/daramjwee-filestore"
+  capacity: 1048576  # 1MB in bytes
+  policy: "lru"      # Options: lru, s3fifo, sieve
+  copy_and_truncate: false  # Set to true for NFS compatibility
+
+# Policy-specific configurations
+policies:
+  lru:
+    description: "Least Recently Used - evicts the least recently accessed items first"
+  
+  s3fifo:
+    description: "S3-FIFO - combines FIFO with frequency-based eviction for better hit rates"
+  
+  sieve:
+    description: "SIEVE - low-overhead eviction algorithm with good performance characteristics"

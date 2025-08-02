@@ -54,7 +54,7 @@ func ExampleSimpleFetcher_Fetch() {
 // main showcases the usage of daramjwee cache with a memory store and LRU eviction policy.
 func main() {
 	ctx := context.Background()
-	memStore := memstore.New(1*1024*1024, policy.NewLRUPolicy())
+	memStore := memstore.New(1*1024*1024, policy.NewLRU())
 
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	cache, err := daramjwee.New(

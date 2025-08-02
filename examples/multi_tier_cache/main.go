@@ -63,7 +63,7 @@ func main() {
 
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 
-	memStore := memstore.New(1*1024*1024, policy.NewLRUPolicy())
+	memStore := memstore.New(1*1024*1024, policy.NewLRU())
 
 	fileStore, err := filestore.New(baseDir, logger)
 	if err != nil {

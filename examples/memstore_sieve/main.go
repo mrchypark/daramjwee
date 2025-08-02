@@ -52,7 +52,7 @@ func ExampleSimpleFetcher_Fetch() {
 // main showcases the usage of daramjwee cache with a memory store and Sieve eviction policy.
 func main() {
 	ctx := context.Background()
-	memStore := memstore.New(1*1024*1024, policy.NewSievePolicy())
+	memStore := memstore.New(1*1024*1024, policy.NewSieve())
 
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	cache, err := daramjwee.New(
