@@ -77,7 +77,7 @@ func TestGenericCache_SetAndGet(t *testing.T) {
 
 	// The fetcher should not have been called for a cache hit
 	if atomic.LoadInt32(&fetcherCalled) == 1 {
-		t.Logf("Note: Fetcher was called - this might indicate cache miss or implementation behavior")
+		t.Fatal("Fetcher was called on an expected cache hit")
 	}
 }
 
