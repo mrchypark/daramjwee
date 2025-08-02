@@ -56,14 +56,8 @@ func (gc *GenericCache[T]) Get(ctx context.Context, key string, fetcher GenericF
 	}
 	defer reader.Close()
 
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return zero, fmt.Errorf("failed to read cached data: %w", err)
-	}
-
-	var value T
-	err = json.Unmarshal(data, &value)
-	if err != nil {
+var value T
+	if err := json.NewDecoder(reader).Decode(&value); err != nil {
 		return zero, fmt.Errorf("failed to unmarshal cached data: %w", err)
 	}
 
