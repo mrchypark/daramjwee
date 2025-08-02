@@ -51,7 +51,7 @@ func TestConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 
 			for j := 0; j < numOperations; j++ {
-				key := fmt.Sprintf("key-%d", j%5) // 5개의 키를 반복 사용
+				key := fmt.Sprintf("key-%d", j%5) // Use 5 keys repeatedly to induce contention
 
 				// Get 또는 Set 랜덤하게 실행
 				if (id+j)%2 == 0 {
