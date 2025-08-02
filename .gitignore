@@ -29,3 +29,5 @@ go.work.sum <mcreference link="https://github.com/github/gitignore/blob/main/Go.
 .vscode/ <mcreference link="https://github.com/github/gitignore/blob/main/Go.gitignore" index="1">1</mcreference>
 
 examples/**/config_prod.yaml
+bench_results.txt
+coverage.out
