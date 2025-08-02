@@ -40,7 +40,7 @@ func (gf GenericFetcher[T]) Fetch(ctx context.Context, oldMetadata *daramjwee.Me
 	}
 
 	return &daramjwee.FetchResult{
-		Body:     io.NopCloser(strings.NewReader(string(data))),
+Body:     io.NopCloser(bytes.NewReader(data)),
 		Metadata: metadata,
 	}, nil
 }
