@@ -134,7 +134,7 @@ func TestS3FIFO_EvictFromMainWithSecondChance(t *testing.T) {
 		t.Fatalf("Expected to evict main2, but got %v", evictedKeys)
 	}
 
-	// 50. Verify state after eviction.
+	// 5. Verify state after eviction.
 	if !isInCache(p, "main1") {
 		t.Error("main1 should still be in cache")
 	}
