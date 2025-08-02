@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,9 +59,9 @@ func TestGenericCache_SetAndGet(t *testing.T) {
 	}
 
 	// Create a fetcher - it should not be called if cache hit occurs
-	fetcherCalled := false
-	fetcher := GenericFetcher[User](func(ctx context.Context, oldMetadata *daramjwee.Metadata) (User, *daramjwee.Metadata, error) {
-		fetcherCalled = true
+	var fetcherCalled int32
+	fetcher := GenericFetcher[User](func(_ context.Context, _ *daramjwee.Metadata) (User, *daramjwee.Metadata, error) {
+		atomic.StoreInt32(&fetcherCalled, 1)
 		return user, metadata, nil
 	})
 
@@ -74,7 +75,7 @@ func TestGenericCache_SetAndGet(t *testing.T) {
 	}
 
 	// The fetcher should not have been called for a cache hit
-	if fetcherCalled {
+	if atomic.LoadInt32(&fetcherCalled) == 1 {
 		t.Logf("Note: Fetcher was called - this might indicate cache miss or implementation behavior")
 	}
 }
@@ -95,9 +96,9 @@ func TestGenericCache_FetcherOnMiss(t *testing.T) {
 		Email: "jane@example.com",
 	}
 
-	fetcherCalled := false
-	fetcher := GenericFetcher[User](func(ctx context.Context, oldMetadata *daramjwee.Metadata) (User, *daramjwee.Metadata, error) {
-		fetcherCalled = true
+	var fetcherCalled int32
+	fetcher := GenericFetcher[User](func(_ context.Context, _ *daramjwee.Metadata) (User, *daramjwee.Metadata, error) {
+		atomic.StoreInt32(&fetcherCalled, 1)
 		return expectedUser, &daramjwee.Metadata{ETag: "v2"}, nil
 	})
 
@@ -107,7 +108,7 @@ func TestGenericCache_FetcherOnMiss(t *testing.T) {
 		t.Fatalf("Get failed: %v", err)
 	}
 
-	if !fetcherCalled {
+	if atomic.LoadInt32(&fetcherCalled) != 1 {
 		t.Error("Fetcher should have been called on cache miss")
 	}
 
@@ -116,13 +117,13 @@ func TestGenericCache_FetcherOnMiss(t *testing.T) {
 	}
 
 	// Second call should use cache (fetcher should not be called again)
-	fetcherCalled = false
+	atomic.StoreInt32(&fetcherCalled, 0)
 	retrieved2, err := userCache.Get(ctx, "user:2", fetcher)
 	if err != nil {
 		t.Fatalf("Second Get failed: %v", err)
 	}
 
-	if fetcherCalled {
+	if atomic.LoadInt32(&fetcherCalled) == 1 {
 		t.Error("Fetcher should not have been called on cache hit")
 	}
 
@@ -173,9 +174,9 @@ func TestGenericCache_GetOrSet(t *testing.T) {
 	stringCache := NewGeneric[string](cache)
 	ctx := context.Background()
 
-	factoryCalled := false
+	var factoryCalled int32
 	factory := func() (string, *daramjwee.Metadata, error) {
-		factoryCalled = true
+		atomic.StoreInt32(&factoryCalled, 1)
 		return "factory value", &daramjwee.Metadata{ETag: "v1"}, nil
 	}
 
@@ -185,7 +186,7 @@ func TestGenericCache_GetOrSet(t *testing.T) {
 		t.Fatalf("GetOrSet failed: %v", err)
 	}
 
-	if !factoryCalled {
+	if atomic.LoadInt32(&factoryCalled) != 1 {
 		t.Error("Factory should have been called")
 	}
 
@@ -194,13 +195,13 @@ func TestGenericCache_GetOrSet(t *testing.T) {
 	}
 
 	// Second call should use cache
-	factoryCalled = false
+	atomic.StoreInt32(&factoryCalled, 0)
 	value2, err := stringCache.GetOrSet(ctx, "test-key", factory)
 	if err != nil {
 		t.Fatalf("Second GetOrSet failed: %v", err)
 	}
 
-	if factoryCalled {
+	if atomic.LoadInt32(&factoryCalled) == 1 {
 		t.Error("Factory should not have been called on second GetOrSet")
 	}
 
@@ -282,9 +283,9 @@ func TestGenericCache_Delete(t *testing.T) {
 	}
 
 	// Try to get it - should call fetcher
-	fetcherCalled := false
-	fetcher := GenericFetcher[string](func(ctx context.Context, oldMetadata *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
-		fetcherCalled = true
+	var fetcherCalled int32
+	fetcher := GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
+		atomic.StoreInt32(&fetcherCalled, 1)
 		return "from fetcher", &daramjwee.Metadata{ETag: "v2"}, nil
 	})
 
@@ -293,7 +294,7 @@ func TestGenericCache_Delete(t *testing.T) {
 		t.Fatalf("Get after delete failed: %v", err)
 	}
 
-	if !fetcherCalled {
+	if atomic.LoadInt32(&fetcherCalled) != 1 {
 		t.Error("Fetcher should have been called after delete")
 	}
 

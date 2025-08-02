@@ -1,79 +1,256 @@
-//go:build race
-
-package daramjwee
+package daramjwee_test
 
 import (
 	"context"
 	"fmt"
-	"io"
-	"math/rand"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-kit/log"
+	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/cache"
+	"github.com/mrchypark/daramjwee/pkg/policy"
+	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
-// TestCache_Chaos_RaceCondition is a chaotic test designed to be run with the -race flag.
-// It concurrently performs random Get, Set, and Delete operations to uncover
-// potential data races under high contention.
-func TestCache_Chaos_RaceCondition(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping chaos test in short mode")
+// TestConcurrentAccess tests the actual production code for race conditions
+// This test verifies that multiple goroutines can safely access the cache simultaneously
+func TestConcurrentAccess(t *testing.T) {
+	logger := log.NewNopLogger()
+	memStore := memstore.New(1*1024*1024, policy.NewLRU())
+
+	baseCache, err := daramjwee.New(
+		logger,
+		daramjwee.WithHotStore(memStore),
+		daramjwee.WithDefaultTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
 	}
+	defer baseCache.Close()
 
-	// 1. 테스트를 위한 캐시 생성
-	// defer cache.Close()를 여기서 제거합니다.
-	cache, hot, _ := setupCache(t)
-
+	stringCache := cache.NewGeneric[string](baseCache)
 	ctx := context.Background()
-	const numKeys = 50
-	var keys []string
-	for i := 0; i < numKeys; i++ {
-		key := fmt.Sprintf("chaos-key-%d", i)
-		keys = append(keys, key)
-		hot.setData(key, "initial-data", &Metadata{})
-	}
 
-	const numGoroutines = 20
+	// 동시에 여러 고루틴에서 같은 키에 접근
+	const numGoroutines = 100
+	const numOperations = 10
+
 	var wg sync.WaitGroup
-	wg.Add(numGoroutines)
+	errors := make(chan error, numGoroutines*numOperations)
 
 	for i := 0; i < numGoroutines; i++ {
-		go func(goroutineID int) {
+		wg.Add(1)
+		go func(id int) {
 			defer wg.Done()
-			// 각 고루틴마다 별도의 시드를 가진 난수 생성기를 사용합니다.
-			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(goroutineID)))
 
-			for j := 0; j < 100; j++ {
-				key := keys[r.Intn(len(keys))]
-				op := r.Intn(3)
+			for j := 0; j < numOperations; j++ {
+				key := fmt.Sprintf("key-%d", j%5) // 5개의 키를 반복 사용
 
-				switch op {
-				case 0: // Get
-					fetcher := &mockFetcher{content: "fetched-data", etag: "v-fetch"}
-					stream, err := cache.Get(ctx, key, fetcher)
-					if err == nil && stream != nil {
-						_, _ = io.Copy(io.Discard, stream)
-						stream.Close()
+				// Get 또는 Set 랜덤하게 실행
+				if (id+j)%2 == 0 {
+					// Get with fetcher
+					fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
+						return fmt.Sprintf("value-%d-%d", id, j), &daramjwee.Metadata{ETag: "test"}, nil
+					})
+
+					_, err := stringCache.Get(ctx, key, fetcher)
+					if err != nil {
+						errors <- fmt.Errorf("goroutine %d: Get failed: %v", id, err)
 					}
-				case 1: // Set
-					writer, err := cache.Set(ctx, key, &Metadata{ETag: "v-set"})
-					if err == nil && writer != nil {
-						writer.Write([]byte("set-data"))
-						writer.Close()
+				} else {
+					// Set
+					value := fmt.Sprintf("set-value-%d-%d", id, j)
+					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{ETag: "test"})
+					if err != nil {
+						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
 					}
-				case 2: // Delete
-					cache.Delete(ctx, key)
 				}
 			}
 		}(i)
 	}
 
-	// 2. 모든 'chaos' 고루틴이 작업을 마칠 때까지 명시적으로 기다립니다.
 	wg.Wait()
+	close(errors)
 
-	// 3. 'chaos'가 완전히 끝난 후에, 캐시를 닫습니다.
-	// 이렇게 하면 순환 대기 문제가 발생하지 않습니다.
-	cache.Close()
+	// 에러 체크
+	for err := range errors {
+		t.Error(err)
+	}
+}
 
-	// 테스트의 주 목적은 레이스 컨디션 탐지이므로, 최종 상태 검증은 생략합니다.
+// TestConcurrentRefresh tests concurrent background refresh operations
+func TestConcurrentRefresh(t *testing.T) {
+	logger := log.NewNopLogger()
+	memStore := memstore.New(1*1024*1024, policy.NewLRU())
+
+	baseCache, err := daramjwee.New(
+		logger,
+		daramjwee.WithHotStore(memStore),
+		daramjwee.WithDefaultTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+	defer baseCache.Close()
+
+	stringCache := cache.NewGeneric[string](baseCache)
+	ctx := context.Background()
+
+	// 먼저 값을 설정
+	key := "refresh-test"
+	err = stringCache.Set(ctx, key, "initial-value", &daramjwee.Metadata{ETag: "v1"})
+	if err != nil {
+		t.Fatalf("Initial set failed: %v", err)
+	}
+
+	const numGoroutines = 50
+	var wg sync.WaitGroup
+	errors := make(chan error, numGoroutines)
+
+	// 동시에 여러 고루틴에서 ScheduleRefresh 호출
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
+				return fmt.Sprintf("refreshed-value-%d", id), &daramjwee.Metadata{ETag: fmt.Sprintf("v%d", id)}, nil
+			})
+
+			err := stringCache.ScheduleRefresh(ctx, key, fetcher)
+			if err != nil {
+				errors <- fmt.Errorf("goroutine %d: ScheduleRefresh failed: %v", id, err)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	// 에러 체크
+	for err := range errors {
+		t.Error(err)
+	}
+
+	// 잠시 대기하여 백그라운드 작업 완료
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestConcurrentMixedOperations tests various cache operations running concurrently
+func TestConcurrentMixedOperations(t *testing.T) {
+	logger := log.NewNopLogger()
+	memStore := memstore.New(1*1024*1024, policy.NewLRU())
+
+	baseCache, err := daramjwee.New(
+		logger,
+		daramjwee.WithHotStore(memStore),
+		daramjwee.WithDefaultTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+	defer baseCache.Close()
+
+	stringCache := cache.NewGeneric[string](baseCache)
+	ctx := context.Background()
+
+	const numGoroutines = 20
+	const numOperations = 5
+	var wg sync.WaitGroup
+	errors := make(chan error, numGoroutines*numOperations)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			for j := 0; j < numOperations; j++ {
+				key := fmt.Sprintf("mixed-key-%d", j%3)
+
+				switch (id + j) % 4 {
+				case 0: // Get
+					fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
+						return fmt.Sprintf("fetched-%d-%d", id, j), &daramjwee.Metadata{ETag: "test"}, nil
+					})
+					_, err := stringCache.Get(ctx, key, fetcher)
+					if err != nil {
+						errors <- fmt.Errorf("goroutine %d: Get failed: %v", id, err)
+					}
+
+				case 1: // Set
+					value := fmt.Sprintf("set-%d-%d", id, j)
+					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{ETag: "test"})
+					if err != nil {
+						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
+					}
+
+				case 2: // GetOrSet
+					factory := func() (string, *daramjwee.Metadata, error) {
+						return fmt.Sprintf("factory-%d-%d", id, j), &daramjwee.Metadata{ETag: "test"}, nil
+					}
+					_, err := stringCache.GetOrSet(ctx, key, factory)
+					if err != nil {
+						errors <- fmt.Errorf("goroutine %d: GetOrSet failed: %v", id, err)
+					}
+
+				case 3: // Delete
+					err := stringCache.Delete(ctx, key)
+					if err != nil {
+						errors <- fmt.Errorf("goroutine %d: Delete failed: %v", id, err)
+					}
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	// 에러 체크
+	for err := range errors {
+		t.Error(err)
+	}
+}
+
+// BenchmarkConcurrentAccess benchmarks concurrent cache operations
+func BenchmarkConcurrentAccess(b *testing.B) {
+	logger := log.NewNopLogger()
+	memStore := memstore.New(1*1024*1024, policy.NewLRU())
+
+	baseCache, err := daramjwee.New(
+		logger,
+		daramjwee.WithHotStore(memStore),
+		daramjwee.WithDefaultTimeout(10*time.Second),
+	)
+	if err != nil {
+		b.Fatalf("Failed to create cache: %v", err)
+	}
+	defer baseCache.Close()
+
+	stringCache := cache.NewGeneric[string](baseCache)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		var i int64
+		for pb.Next() {
+			key := fmt.Sprintf("bench-key-%d", i%10)
+
+			if i%2 == 0 {
+				// Get operation
+				currentI := i // 클로저에서 사용할 값을 복사
+				fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
+					return fmt.Sprintf("bench-value-%d", currentI), &daramjwee.Metadata{ETag: "bench"}, nil
+				})
+				_, _ = stringCache.Get(ctx, key, fetcher)
+			} else {
+				// Set operation
+				value := fmt.Sprintf("bench-set-%d", i)
+				_ = stringCache.Set(ctx, key, value, &daramjwee.Metadata{ETag: "bench"})
+			}
+			i++
+		}
+	})
 }

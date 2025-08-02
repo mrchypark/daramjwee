@@ -83,7 +83,7 @@ func main() {
 	productCache := cache.NewGeneric[Product](baseCache)
 	stringCache := cache.NewGeneric[string](baseCache)
 
-	fmt.Println("=== Generic Cache Demo ===\n")
+	fmt.Println("=== Generic Cache Demo ===")
 
 	// 1. User Cache Example
 	fmt.Println("1. User Cache Example:")
