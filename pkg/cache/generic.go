@@ -125,7 +125,7 @@ panic(fmt.Errorf("MustGet failed: %w", err))
 // MustSet is like Set but panics on error. Use when you're confident the operation will succeed.
 func (gc *GenericCache[T]) MustSet(ctx context.Context, key string, value T, metadata *daramjwee.Metadata) {
 	if err := gc.Set(ctx, key, value, metadata); err != nil {
-		panic(fmt.Sprintf("MustSet failed: %v", err))
+panic(fmt.Errorf("MustSet failed: %w", err))
 	}
 }
 
