@@ -267,7 +267,7 @@ func TestFileStore_PathSafety(t *testing.T) {
 					dataPath := fs.toDataPath(tc.key)
 					absBase, _ := filepath.Abs(fs.baseDir)
 					absPath, _ := filepath.Abs(dataPath)
-					assert.True(t, strings.HasPrefix(absPath, absBase),
+					assert.True(t, absPath == absBase || strings.HasPrefix(absPath, absBase+string(os.PathSeparator)),
 						"File should be within base directory. Base: %s, Path: %s", absBase, absPath)
 				}
 			}
