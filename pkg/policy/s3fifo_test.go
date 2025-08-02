@@ -15,7 +15,7 @@ func isInCache(p *S3FIFO, key string) bool {
 
 // TestS3FIFO_AddAndPromotion tests basic adding and promotion from small to main queue.
 func TestS3FIFO_AddAndPromotion(t *testing.T) {
-	p := NewS3FIFO(100, 50).(*S3FIFO) // 100 bytes total, 500 for small queue
+p := NewS3FIFO(100, 50).(*S3FIFO) // 100 bytes total, 50 for small queue
 
 	// 1. Add a new key. It should be in the small queue.
 	p.Add("key1", 10)
