@@ -162,13 +162,19 @@ The generic cache automatically works with daramjwee's multi-tier architecture:
 ```go
 // Setup with both memory (hot) and file (cold) stores
 memStore := memstore.New(1*1024*1024, policy.NewLRU())
-fileStore, _ := filestore.New("/tmp/cache", logger)
+fileStore, err := filestore.New("/tmp/cache", logger)
+if err != nil {
+    // handle error
+}
 
-baseCache, _ := daramjwee.New(
+baseCache, err := daramjwee.New(
     logger,
     daramjwee.WithHotStore(memStore),   // Fast memory cache
     daramjwee.WithColdStore(fileStore), // Persistent file cache
 )
+if err != nil {
+    // handle error
+}
 
 // Generic cache automatically uses both tiers
 userCache := cache.NewGeneric[User](baseCache)
