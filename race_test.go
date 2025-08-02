@@ -39,7 +39,6 @@ func TestConcurrentAccess(t *testing.T) {
 	stringCache := cache.NewGeneric[string](baseCache)
 	ctx := context.Background()
 
-	// 동시에 여러 고루틴에서 같은 키에 접근
 	const numGoroutines = 100
 	const numOperations = 10
 
