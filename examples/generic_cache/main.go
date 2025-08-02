@@ -58,7 +58,7 @@ func main() {
 	// Create stores
 	memStore := memstore.New(1*1024*1024, policy.NewLRU()) // 1MB memory cache
 	fileStore, err := filestore.New(baseDir, logger)
-if err != nil {
+	if err != nil {
 		logger.Log("msg", "Failed to create filestore", "err", err)
 		os.Exit(1)
 	}
