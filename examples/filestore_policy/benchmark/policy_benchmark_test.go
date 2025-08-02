@@ -148,9 +148,17 @@ func benchmarkMixedWorkload(b *testing.B, policyName string, pol daramjwee.Evict
 			CachedAt: time.Now(),
 		}
 
-		writer, _ := store.SetWithWriter(ctx, key, metadata)
-		io.WriteString(writer, data)
-		writer.Close()
+		writer, err := store.SetWithWriter(ctx, key, metadata)
+		if err != nil {
+			b.Fatalf("Failed to get writer during pre-population: %v", err)
+		}
+		if _, err := io.WriteString(writer, data); err != nil {
+			writer.Close()
+			b.Fatalf("Failed to write data during pre-population: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			b.Fatalf("Failed to close writer during pre-population: %v", err)
+		}
 	}
 
 	b.ResetTimer()
