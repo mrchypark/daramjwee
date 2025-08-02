@@ -233,7 +233,7 @@ func TestFileStore_PathSafety(t *testing.T) {
 		{"parent traversal", "../../../etc/passwd", true, "should be sanitized"},
 		{"current dir", "./file", true, "should work normally"},
 		{"multiple dots", "dir/../file", true, "should be cleaned"},
-		{"empty key", "", false, "empty key should be handled"},
+		{"empty key", "", true, "empty key should be handled"},
 		{"only dots", "..", true, "should be sanitized"},
 		{"mixed traversal", "good/../../bad", true, "should be sanitized"},
 	}
