@@ -52,7 +52,7 @@ lruPolicy := policy.NewLRU()
 s3fifoPolicy := policy.NewS3FIFO(1024*1024, 10) // 1MB total, 10% for small queue
 
 // SIEVE Policy
-sievePolicy := policy.NewSievePolicy()
+sievePolicy := policy.NewSieve()
 ```
 
 ## Examples
