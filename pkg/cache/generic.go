@@ -117,7 +117,7 @@ func (gc *GenericCache[T]) GetOrSet(ctx context.Context, key string, factory fun
 func (gc *GenericCache[T]) MustGet(ctx context.Context, key string, fetcher GenericFetcher[T]) T {
 	value, err := gc.Get(ctx, key, fetcher)
 	if err != nil {
-		panic(fmt.Sprintf("MustGet failed: %v", err))
+panic(fmt.Errorf("MustGet failed: %w", err))
 	}
 	return value
 }
