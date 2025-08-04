@@ -461,27 +461,6 @@ func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store
 	c.Worker.Submit(job)
 }
 
-// multiCloser combines multiple io.Closer instances into one.
-// NOTE: This is kept for backward compatibility and testing purposes.
-type multiCloser struct {
-	reader  io.Reader
-	closers []io.Closer
-}
-
-func newMultiCloser(r io.Reader, closers ...io.Closer) io.ReadCloser {
-	return &multiCloser{reader: r, closers: closers}
-}
-func (mc *multiCloser) Read(p []byte) (n int, err error) { return mc.reader.Read(p) }
-func (mc *multiCloser) Close() error {
-	var firstErr error
-	for _, c := range mc.closers {
-		if err := c.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
 // cancelWriteCloser cancels the context when the WriteCloser is closed.
 type cancelWriteCloser struct {
 	io.WriteCloser

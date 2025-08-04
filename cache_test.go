@@ -174,7 +174,7 @@ type mockWriteCloser struct {
 func (mwc *mockWriteCloser) Write(p []byte) (n int, err error) { return mwc.buf.Write(p) }
 
 // Close executes the onClose callback.
-func (mwc *mockWriteCloser) Close() error                      { return mwc.onClose() }
+func (mwc *mockWriteCloser) Close() error { return mwc.onClose() }
 
 // deterministicFetcher is a mock fetcher that allows controlling fetch start and end signals.
 type deterministicFetcher struct {
@@ -526,24 +526,6 @@ func (mc *mockCloser) Close() error {
 		return errors.New("mock closer failed as intended")
 	}
 	return nil
-}
-
-// TestMultiCloser_ClosesAll_EvenIfOneFails verifies that multiCloser calls Close on all
-// contained Closers, even if one of them returns an error.
-func TestMultiCloser_ClosesAll_EvenIfOneFails(t *testing.T) {
-	closer1 := &mockCloser{}
-	closer2 := &mockCloser{shouldError: true}
-	closer3 := &mockCloser{}
-
-	multi := newMultiCloser(nil, closer1, closer2, closer3)
-
-	err := multi.Close()
-
-	require.Error(t, err, "multiCloser should return the error from the failing closer")
-
-	assert.True(t, closer1.isClosed, "The first closer should have been closed")
-	assert.True(t, closer2.isClosed, "The failing closer should have been attempted to close")
-	assert.True(t, closer3.isClosed, "The third closer should have been closed despite the previous error")
 }
 
 // TestCache_Get_ColdHit_PromotionFails verifies the edge case where a cold cache hit occurs,
