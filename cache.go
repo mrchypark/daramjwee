@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -210,11 +211,11 @@ func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher F
 		}
 	}
 
-	hotStreamCloser := newCloserWithCallback(hotStream, func() {})
+	hotStreamCloser := newSafeCloser(hotStream, func() {})
 
 	if isStale {
 		level.Debug(c.Logger).Log("msg", "hot cache is stale, scheduling refresh", "key", key)
-		hotStreamCloser = newCloserWithCallback(hotStream, func() { c.ScheduleRefresh(context.Background(), key, fetcher) })
+		hotStreamCloser = newSafeCloser(hotStream, func() { c.ScheduleRefresh(context.Background(), key, fetcher) })
 	}
 
 	if meta.IsNegative {
@@ -475,25 +476,39 @@ func (cwc *cancelWriteCloser) Close() error {
 	return cwc.WriteCloser.Close()
 }
 
-// closerWithCallback wraps an io.ReadCloser and executes a callback function upon Close.
-type closerWithCallback struct {
+// safeCloser wraps an io.ReadCloser and executes a callback function upon Close.
+// It automatically closes when EOF is reached and prevents duplicate closes using sync.Once.
+type safeCloser struct {
 	io.ReadCloser
-	callback func()
+	callback  func()
+	closeOnce sync.Once
+	closeErr  error
 }
 
-// newCloserWithCallback creates a new ReadCloser that executes a callback function
-// after the underlying ReadCloser is closed.
-func newCloserWithCallback(rc io.ReadCloser, cb func()) io.ReadCloser {
-	return &closerWithCallback{
+// newSafeCloser creates a new ReadCloser that executes a callback function
+// after the underlying ReadCloser is closed, with automatic EOF detection and safe duplicate close handling.
+func newSafeCloser(rc io.ReadCloser, cb func()) io.ReadCloser {
+	return &safeCloser{
 		ReadCloser: rc,
 		callback:   cb,
 	}
 }
 
-// Close closes the underlying ReadCloser and then executes the callback function.
-// It returns the error from the underlying ReadCloser's Close method.
-func (c *closerWithCallback) Close() error {
-	// Use defer to ensure the callback is executed even if the underlying Close fails.
-	defer c.callback()
-	return c.ReadCloser.Close()
+// Read reads from the underlying ReadCloser and automatically closes when EOF is reached.
+func (c *safeCloser) Read(p []byte) (n int, err error) {
+	n, err = c.ReadCloser.Read(p)
+	if err == io.EOF {
+		c.Close() // 자동으로 닫기
+	}
+	return n, err
+}
+
+// Close closes the underlying ReadCloser and executes the callback function.
+// It uses sync.Once to ensure the close operation and callback are executed only once.
+func (c *safeCloser) Close() error {
+	c.closeOnce.Do(func() {
+		defer c.callback()
+		c.closeErr = c.ReadCloser.Close()
+	})
+	return c.closeErr
 }

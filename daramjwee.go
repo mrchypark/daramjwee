@@ -140,6 +140,11 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		return nil, &ConfigError{"hotStore is required"}
 	}
 
+	// Prevent using the same store instance for both hot and cold tiers
+	if cfg.ColdStore != nil && cfg.HotStore == cfg.ColdStore {
+		return nil, &ConfigError{"hot store and cold store cannot be the same instance"}
+	}
+
 	if cfg.ColdStore == nil {
 		level.Debug(logger).Log("msg", "cold store not configured, using null store")
 		cfg.ColdStore = newNullStore()

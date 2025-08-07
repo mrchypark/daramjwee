@@ -13,7 +13,9 @@ import (
 
 // --- 테스트를 위한 Mock Store ---
 // 이 테스트 파일 내에서만 사용할 간단한 Mock Store입니다.
-type optionsTestMockStore struct{}
+type optionsTestMockStore struct {
+	id int // 인스턴스를 구분하기 위한 필드
+}
 
 func (s *optionsTestMockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
 	return nil, nil, ErrNotFound
@@ -32,7 +34,9 @@ func (s *optionsTestMockStore) Stat(ctx context.Context, key string) (*Metadata,
 
 func TestNew_OptionValidation(t *testing.T) {
 	// 유효성 검사 테스트에 사용할 기본 HotStore
-	validHotStore := &optionsTestMockStore{}
+	validHotStore := &optionsTestMockStore{id: 1}
+	// 다른 인스턴스를 위한 별도의 ColdStore
+	validColdStore := &optionsTestMockStore{id: 2}
 
 	testCases := []struct {
 		name        string
@@ -50,7 +54,7 @@ func TestNew_OptionValidation(t *testing.T) {
 			name: "Success with all options valid",
 			options: []Option{
 				WithHotStore(validHotStore),
-				WithColdStore(&optionsTestMockStore{}),
+				WithColdStore(validColdStore), // 다른 인스턴스 사용
 				WithWorker("pool", 10, 100, 5*time.Second),
 				WithDefaultTimeout(10 * time.Second),
 				WithShutdownTimeout(20 * time.Second), // **수정**: ShutdownTimeout 테스트 추가
@@ -179,6 +183,15 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectErr:   true,
 			expectedMsg: "negative cache TTL cannot be a negative value",
 		},
+		{
+			name: "Failure with same instance for hot and cold store",
+			options: []Option{
+				WithHotStore(validHotStore),
+				WithColdStore(validHotStore), // 같은 인스턴스 사용
+			},
+			expectErr:   true,
+			expectedMsg: "hot store and cold store cannot be the same instance",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -204,7 +217,7 @@ func TestNew_OptionValidation(t *testing.T) {
 // TestNew_OptionOverrides는 동일한 옵션이 여러 번 제공되었을 때
 // 마지막에 제공된 옵션이 적용되는지 검증합니다.
 func TestNew_OptionOverrides(t *testing.T) {
-	validHotStore := &optionsTestMockStore{}
+	validHotStore := &optionsTestMockStore{id: 1}
 	finalTimeout := 15 * time.Second
 	finalFreshFor := 10 * time.Minute // **수정**: 변수명 및 값 변경
 
@@ -233,7 +246,7 @@ func TestNew_OptionOverrides(t *testing.T) {
 // TestNew_NilColdStoreIsValid는 ColdStore로 nil을 전달하는 것이 유효하며,
 // 이 경우 내부적으로 nullStore가 사용되는 것을 검증합니다.
 func TestNew_NilColdStoreIsValid(t *testing.T) {
-	validHotStore := &optionsTestMockStore{}
+	validHotStore := &optionsTestMockStore{id: 1}
 
 	options := []Option{
 		WithHotStore(validHotStore),
