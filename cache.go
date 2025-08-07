@@ -538,3 +538,12 @@ func (c *safeCloser) ReadAll() ([]byte, error) {
 		}
 	}
 }
+
+// ReadAll attempts to use safeCloser.ReadAll() if possible, otherwise falls back to io.ReadAll.
+// This helper function allows seamless usage regardless of the underlying ReadCloser type.
+func ReadAll(rc io.ReadCloser) ([]byte, error) {
+	if sc, ok := rc.(*safeCloser); ok {
+		return sc.ReadAll()
+	}
+	return io.ReadAll(rc)
+}

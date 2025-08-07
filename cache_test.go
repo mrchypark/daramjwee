@@ -124,3 +124,64 @@ func (t *testReadCloser) Close() error {
 	}
 	return nil
 }
+func TestReadAllSmart(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+		useSafe  bool
+	}{
+		{
+			name:     "with safeCloser",
+			input:    "test data with safeCloser",
+			expected: "test data with safeCloser",
+			useSafe:  true,
+		},
+		{
+			name:     "with regular ReadCloser",
+			input:    "test data with regular ReadCloser",
+			expected: "test data with regular ReadCloser",
+			useSafe:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var rc io.ReadCloser
+			callbackExecuted := false
+
+			if tt.useSafe {
+				// safeCloser 사용
+				reader := io.NopCloser(strings.NewReader(tt.input))
+				rc = newSafeCloser(reader, func() {
+					callbackExecuted = true
+				})
+			} else {
+				// 일반 ReadCloser 사용
+				rc = io.NopCloser(strings.NewReader(tt.input))
+			}
+
+			// ReadAllSmart 테스트
+			result, err := ReadAll(rc)
+
+			if err != nil {
+				t.Errorf("ReadAllSmart() error = %v", err)
+				return
+			}
+
+			if string(result) != tt.expected {
+				t.Errorf("ReadAllSmart() = %q, want %q", string(result), tt.expected)
+			}
+
+			// safeCloser인 경우 콜백이 실행되어야 함
+			if tt.useSafe && !callbackExecuted {
+				t.Error("callback should be executed for safeCloser")
+			}
+
+			// 일반 ReadCloser인 경우 콜백이 실행되지 않아야 함
+			if !tt.useSafe && callbackExecuted {
+				t.Error("callback should not be executed for regular ReadCloser")
+			}
+		})
+	}
+}
