@@ -487,7 +487,7 @@ type safeCloser struct {
 
 // newSafeCloser creates a new ReadCloser that executes a callback function
 // after the underlying ReadCloser is closed, with automatic EOF detection and safe duplicate close handling.
-func newSafeCloser(rc io.ReadCloser, cb func()) io.ReadCloser {
+func newSafeCloser(rc io.ReadCloser, cb func()) *safeCloser {
 	return &safeCloser{
 		ReadCloser: rc,
 		callback:   cb,
@@ -511,4 +511,30 @@ func (c *safeCloser) Close() error {
 		c.closeErr = c.ReadCloser.Close()
 	})
 	return c.closeErr
+}
+
+// ReadAll reads all data from the safeCloser and returns it as a byte slice.
+// It leverages the safeCloser's automatic EOF handling and close callback execution.
+// Unlike io.ReadAll, this method benefits from the automatic resource cleanup
+// provided by safeCloser when EOF is reached.
+func (c *safeCloser) ReadAll() ([]byte, error) {
+	// Use a reasonable initial buffer size to minimize allocations
+	buf := make([]byte, 0, 512)
+	readBuf := make([]byte, 512)
+
+	for {
+		n, err := c.Read(readBuf)
+		if n > 0 {
+			buf = append(buf, readBuf[:n]...)
+		}
+		if err == io.EOF {
+			// safeCloser automatically closes on EOF, so we're done
+			return buf, nil
+		}
+		if err != nil {
+			// For any other error, manually close and return the error
+			c.Close()
+			return buf, err
+		}
+	}
 }
