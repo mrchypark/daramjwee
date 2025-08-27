@@ -40,21 +40,17 @@ func TestScheduleRefresh_PersistsToCold(t *testing.T) {
     // Submit refresh
     require.NoError(t, cache.ScheduleRefresh(ctx, key, mf))
 
-    // Wait until the cold store contains the refreshed value, polling with timeout.
-    deadline := time.Now().Add(2 * time.Second)
-    for {
-        if time.Now().After(deadline) {
-            t.Fatalf("timed out waiting for cold store to contain refreshed value")
-        }
+    // Wait until the cold store contains the refreshed value.
+    require.Eventually(t, func() bool {
         r, _, err := cold.GetStream(ctx, key)
-        if err == nil {
-            got, err := io.ReadAll(r)
-            _ = r.Close()
-            require.NoError(t, err)
-            if string(got) == "new-value" {
-                break
-            }
+        if err != nil {
+            return false
         }
-        time.Sleep(10 * time.Millisecond)
-    }
+        defer r.Close()
+        got, err := io.ReadAll(r)
+        if err != nil {
+            return false
+        }
+        return string(got) == "new-value"
+    }, 2*time.Second, 10*time.Millisecond, "timed out waiting for cold store to contain refreshed value")
 }
