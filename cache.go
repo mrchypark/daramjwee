@@ -170,7 +170,7 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		} else {
 			level.Info(c.Logger).Log("msg", "background set successful", "key", key)
 			// After refreshing hot cache successfully, schedule background copy to cold store
-c.scheduleSetToStore(context.Background(), c.ColdStore, key)
+			c.scheduleSetToStore(context.Background(), c.ColdStore, key)
 		}
 	}
 
@@ -196,7 +196,7 @@ func (c *DaramjweeCache) Close() {
 }
 
 // handleHotHit processes the logic when an object is found in the hot cache.
-func (c *DaramjweeCache) handleHotHit(ctx context.Context, key string, fetcher Fetcher, hotStream io.ReadCloser, meta *Metadata) (io.ReadCloser, error) {
+func (c *DaramjweeCache) handleHotHit(_ context.Context, key string, fetcher Fetcher, hotStream io.ReadCloser, meta *Metadata) (io.ReadCloser, error) {
 	level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
 
 	var isStale bool
@@ -429,7 +429,7 @@ func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key str
 }
 
 // scheduleSetToStore schedules an asynchronous copy of the hot cache content to the cold cache.
-func (c *DaramjweeCache) scheduleSetToStore(ctx context.Context, destStore Store, key string) {
+func (c *DaramjweeCache) scheduleSetToStore(_ context.Context, destStore Store, key string) {
 	if c.Worker == nil {
 		level.Warn(c.Logger).Log("msg", "worker is not configured, cannot schedule set", "key", key)
 		return
