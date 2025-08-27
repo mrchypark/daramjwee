@@ -170,7 +170,7 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		} else {
 			level.Info(c.Logger).Log("msg", "background set successful", "key", key)
 			// After refreshing hot cache successfully, schedule background copy to cold store
-			c.scheduleSetToStore(context.Background(), c.ColdStore, key)
+			c.scheduleSetToStore(jobCtx, c.ColdStore, key)
 		}
 	}
 
