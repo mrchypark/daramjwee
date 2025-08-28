@@ -16,6 +16,7 @@ import (
 )
 
 var ErrCacheClosed = errors.New("daramjwee: cache is closed")
+var ErrNilMetadata = errors.New("daramjwee: nil metadata encountered")
 
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
@@ -52,6 +53,13 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 
 	// 2. Check Cold Cache
 	coldStream, coldMeta, err := c.getStreamFromStore(ctx, c.ColdStore, key)
+	if err == nil && coldMeta == nil {
+		err = ErrNilMetadata
+		if coldStream != nil {
+			defer coldStream.Close()
+		}
+	}
+
 	if err == nil {
 		return c.handleColdHit(ctx, key, coldStream, coldMeta)
 	}
