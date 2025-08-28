@@ -246,8 +246,6 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 		// Copy values from existing metadata.
 		*metaToPromote = *coldMeta
 	}
-	// Only update the CachedAt field of the copy to the current time.
-	metaToPromote.CachedAt = time.Now()
 
 	// Write-then-read approach: First save to hot cache completely
 	writer, err := c.setStreamToStore(ctx, c.HotStore, key, metaToPromote)
