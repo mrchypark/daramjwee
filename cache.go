@@ -55,9 +55,9 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	coldStream, coldMeta, err := c.getStreamFromStore(ctx, c.ColdStore, key)
 	if err == nil && coldMeta == nil {
 		err = ErrNilMetadata
-		if coldStream != nil {
-			defer coldStream.Close()
-		}
+                if coldStream != nil {
+                        coldStream.Close()
+                }
 	}
 
 	if err == nil {
