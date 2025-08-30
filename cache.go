@@ -57,9 +57,9 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	coldStream, coldMeta, err := c.getStreamFromStore(ctx, c.ColdStore, key)
 	if err == nil && coldMeta == nil {
 		err = ErrNilMetadata
-                if coldStream != nil {
-                        coldStream.Close()
-                }
+		if coldStream != nil {
+			coldStream.Close()
+		}
 	}
 
 	if err == nil {
@@ -204,7 +204,7 @@ func (c *DaramjweeCache) isColdStoreCachedStale(oldMeta *Metadata) bool {
 		freshnessLifetime = c.ColdStoreNegativeFreshFor
 	}
 
-	return freshnessLifetime == 0 || (freshnessLifetime > 0 && time.Now().After(oldMeta.CachedAt.Add(freshnessLifetime)))
+	return time.Now().After(oldMeta.CachedAt.Add(freshnessLifetime))
 }
 
 // Close safely shuts down the worker.
