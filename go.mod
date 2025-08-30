@@ -3,6 +3,7 @@ module github.com/mrchypark/daramjwee
 go 1.24.1
 
 require (
+	github.com/bradfitz/gomemcache v0.0.0-20250403215159-8d39553ac7cf
 	github.com/go-kit/log v0.2.1
 	github.com/goccy/go-json v0.10.4
 	github.com/stretchr/testify v1.10.0
@@ -44,7 +45,6 @@ require (
 	github.com/aws/smithy-go v1.20.4 // indirect
 	github.com/baidubce/bce-sdk-go v0.9.111 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bradfitz/gomemcache v0.0.0-20250403215159-8d39553ac7cf // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clbanning/mxj v1.8.4 // indirect
 	github.com/cncf/xds/go v0.0.0-20250121191232-2f005788dc42 // indirect

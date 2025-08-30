@@ -127,3 +127,83 @@ func TestMemcachedStore_Delete(t *testing.T) {
 	require.Error(t, err, "Stat should return an error after delete")
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound, "Stat should return ErrNotFound after delete")
 }
+
+func TestMemcachedStore_Set_ItemTooLarge(t *testing.T) {
+	mc := setupMemcached(t)
+	logger := log.NewNopLogger()
+	store := New(mc, logger).(*MemcachedStore)
+	store.maxItemSize = 100 // Set a small limit for testing
+
+	ctx := context.Background()
+	key := "test-large-item"
+	largeData := make([]byte, 101)
+	metadata := &daramjwee.Metadata{ETag: "v1"}
+
+	writer, err := store.SetWithWriter(ctx, key, metadata)
+	require.NoError(t, err)
+
+	_, err = writer.Write(largeData)
+	assert.ErrorIs(t, err, ErrItemTooLarge, "Write should return ErrItemTooLarge")
+
+	// Test case where the data itself is not too large, but the marshalled entry is
+	store.maxItemSize = 200
+	writer, err = store.SetWithWriter(ctx, key, metadata)
+	require.NoError(t, err)
+
+	smallData := make([]byte, 100)
+	_, err = writer.Write(smallData)
+	require.NoError(t, err)
+
+	// Closing should fail because the final entry with metadata is too large
+	err = writer.Close()
+	assert.ErrorIs(t, err, ErrItemTooLarge, "Close should return ErrItemTooLarge")
+}
+
+func TestMemcachedStore_ContextCancellation(t *testing.T) {
+	mc := setupMemcached(t)
+	logger := log.NewNopLogger()
+	store := New(mc, logger)
+
+	key := "test-cancel"
+	metadata := &daramjwee.Metadata{ETag: "v1"}
+
+	t.Run("SetWithWriter", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := store.SetWithWriter(ctx, key, metadata)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("GetStream", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, err := store.GetStream(ctx, key)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("Stat", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := store.Stat(ctx, key)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := store.Delete(ctx, key)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("WriterClose", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		writer, err := store.SetWithWriter(ctx, key, metadata)
+		require.NoError(t, err)
+
+		// Cancel the context after the writer is created
+		cancel()
+
+		err = writer.Close()
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+}
