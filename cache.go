@@ -188,7 +188,7 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 
 func (c *DaramjweeCache) isColdStoreCachedStale(oldMeta *Metadata) bool {
 	if oldMeta == nil {
-		return false
+		return true
 	}
 
 	freshnessLifetime := c.ColdStorePositiveFreshFor
