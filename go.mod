@@ -3,6 +3,7 @@ module github.com/mrchypark/daramjwee
 go 1.24.1
 
 require (
+	github.com/bradfitz/gomemcache v0.0.0-20250403215159-8d39553ac7cf
 	github.com/go-kit/log v0.2.1
 	github.com/goccy/go-json v0.10.4
 	github.com/stretchr/testify v1.10.0
