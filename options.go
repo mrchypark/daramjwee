@@ -31,6 +31,9 @@ type Config struct {
 
 	PositiveFreshFor time.Duration
 	NegativeFreshFor time.Duration
+
+	ColdStorePositiveFreshFor time.Duration
+	ColdStoreNegativeFreshFor time.Duration
 }
 
 // Option is a function type that modifies the Config.
@@ -120,6 +123,26 @@ func WithNegativeCache(freshFor time.Duration) Option {
 			return &ConfigError{"negative cache TTL cannot be a negative value"}
 		}
 		cfg.NegativeFreshFor = freshFor
+		return nil
+	}
+}
+
+func WithColdStorePositiveFreshFor(freshFor time.Duration) Option {
+	return func(cfg *Config) error {
+		if freshFor < 0 {
+			return &ConfigError{"cold store positive cache TTL cannot be a negative value"}
+		}
+		cfg.ColdStorePositiveFreshFor = freshFor
+		return nil
+	}
+}
+
+func WithColdStoreNegativeFreshFor(freshFor time.Duration) Option {
+	return func(cfg *Config) error {
+		if freshFor < 0 {
+			return &ConfigError{"cold store negative cache TTL cannot be a negative value"}
+		}
+		cfg.ColdStoreNegativeFreshFor = freshFor
 		return nil
 	}
 }

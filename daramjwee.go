@@ -156,14 +156,16 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	c := &DaramjweeCache{
-		Logger:           logger,
-		HotStore:         cfg.HotStore,
-		ColdStore:        cfg.ColdStore,
-		Worker:           workerManager,
-		DefaultTimeout:   cfg.DefaultTimeout,
-		ShutdownTimeout:  cfg.ShutdownTimeout,
-		PositiveFreshFor: cfg.PositiveFreshFor,
-		NegativeFreshFor: cfg.NegativeFreshFor,
+		Logger:                    logger,
+		HotStore:                  cfg.HotStore,
+		ColdStore:                 cfg.ColdStore,
+		Worker:                    workerManager,
+		DefaultTimeout:            cfg.DefaultTimeout,
+		ShutdownTimeout:           cfg.ShutdownTimeout,
+		PositiveFreshFor:          cfg.PositiveFreshFor,
+		NegativeFreshFor:          cfg.NegativeFreshFor,
+		ColdStorePositiveFreshFor: cfg.ColdStorePositiveFreshFor,
+		ColdStoreNegativeFreshFor: cfg.ColdStoreNegativeFreshFor,
 	}
 
 	level.Info(logger).Log("msg", "daramjwee cache initialized", "default_timeout", c.DefaultTimeout)
