@@ -20,15 +20,17 @@ var ErrNilMetadata = errors.New("daramjwee: nil metadata encountered")
 
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
-	HotStore         Store
-	ColdStore        Store // Optional
-	Logger           log.Logger
-	Worker           *worker.Manager
-	DefaultTimeout   time.Duration
-	ShutdownTimeout  time.Duration
-	PositiveFreshFor time.Duration
-	NegativeFreshFor time.Duration
-	isClosed         atomic.Bool
+	HotStore                  Store
+	ColdStore                 Store // Optional
+	Logger                    log.Logger
+	Worker                    *worker.Manager
+	DefaultTimeout            time.Duration
+	ShutdownTimeout           time.Duration
+	PositiveFreshFor          time.Duration
+	NegativeFreshFor          time.Duration
+	ColdStorePositiveFreshFor time.Duration
+	ColdStoreNegativeFreshFor time.Duration
+	isClosed                  atomic.Bool
 }
 
 var _ Cache = (*DaramjweeCache)(nil)
@@ -177,13 +179,32 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 			level.Error(c.Logger).Log("msg", "failed background set", "key", key, "copyErr", copyErr, "closeErr", closeErr)
 		} else {
 			level.Info(c.Logger).Log("msg", "background set successful", "key", key)
-			// After refreshing hot cache successfully, schedule background copy to cold store
-			c.scheduleSetToStore(context.Background(), c.ColdStore, key)
+
+			// WARN: if oldMetadata's data is changed in Fetcher, we need to be careful about stale data
+			isStale := c.isColdStoreCachedStale(oldMetadata)
+
+			if isStale {
+				// schedule background copy to cold store
+				c.scheduleSetToStore(context.Background(), c.ColdStore, key)
+			}
 		}
 	}
 
 	c.Worker.Submit(job)
 	return nil
+}
+
+func (c *DaramjweeCache) isColdStoreCachedStale(oldMeta *Metadata) bool {
+	if oldMeta == nil {
+		return true
+	}
+
+	freshnessLifetime := c.ColdStorePositiveFreshFor
+	if oldMeta.IsNegative {
+		freshnessLifetime = c.ColdStoreNegativeFreshFor
+	}
+
+	return freshnessLifetime == 0 || (freshnessLifetime > 0 && time.Now().After(oldMeta.CachedAt.Add(freshnessLifetime)))
 }
 
 // Close safely shuts down the worker.
