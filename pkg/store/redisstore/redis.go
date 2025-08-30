@@ -34,15 +34,20 @@ func New(client redis.UniversalClient, logger log.Logger) daramjwee.Store {
 
 // GetStream retrieves an object and its metadata as a stream from Redis.
 func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	default:
+	}
+
 	pipe := rs.client.Pipeline()
 	metaCmd := pipe.Get(ctx, metaKeyPrefix+key)
 	dataCmd := pipe.Get(ctx, dataKeyPrefix+key)
 
 	_, err := pipe.Exec(ctx)
-	if err != nil {
-		if err == redis.Nil {
-			return nil, nil, daramjwee.ErrNotFound
-		}
+	// Exec returns errors from individual commands, so we check them below.
+	// We only need to check for redis.Nil here if the pipeline is empty, which it is not.
+	if err != nil && err != redis.Nil {
 		return nil, nil, err
 	}
 
@@ -61,6 +66,11 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 
 	data, err := dataCmd.Bytes()
 	if err != nil {
+		if err == redis.Nil {
+			// This case indicates data inconsistency, as metadata exists but data does not.
+			// For simplicity, we treat this as not found.
+			return nil, nil, daramjwee.ErrNotFound
+		}
 		return nil, nil, err
 	}
 
@@ -68,7 +78,14 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 }
 
 // SetWithWriter returns a writer that streams data into Redis.
+// NOTE: This implementation buffers the entire object in memory before writing to Redis.
+// This can lead to high memory consumption for large objects.
 func (rs *RedisStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 	w := &redisStoreWriter{
 		ctx:      ctx,
 		rs:       rs,
@@ -81,11 +98,21 @@ func (rs *RedisStore) SetWithWriter(ctx context.Context, key string, metadata *d
 
 // Delete removes an object and its metadata from Redis.
 func (rs *RedisStore) Delete(ctx context.Context, key string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	return rs.client.Del(ctx, metaKeyPrefix+key, dataKeyPrefix+key).Err()
 }
 
 // Stat retrieves metadata for an object without its data from Redis.
 func (rs *RedisStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 	metaBytes, err := rs.client.Get(ctx, metaKeyPrefix+key).Bytes()
 	if err != nil {
 		if err == redis.Nil {
@@ -118,6 +145,12 @@ func (w *redisStoreWriter) Write(p []byte) (n int, err error) {
 
 // Close commits the buffered data and metadata to Redis atomically.
 func (w *redisStoreWriter) Close() error {
+	select {
+	case <-w.ctx.Done():
+		return w.ctx.Err()
+	default:
+	}
+
 	metaBytes, err := json.Marshal(w.metadata)
 	if err != nil {
 		level.Error(w.rs.logger).Log("msg", "failed to marshal metadata", "key", w.key, "err", err)

@@ -3,6 +3,7 @@ package redisstore
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"testing"
 	"time"
@@ -132,4 +133,78 @@ func TestRedisStore_Delete(t *testing.T) {
 
 	_, err = store.Stat(ctx, key)
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound, "Stat should return ErrNotFound after delete")
+}
+
+func TestRedisStore_GetStream_DataInconsistency(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	logger := log.NewNopLogger()
+	store := New(client, logger)
+
+	ctx := context.Background()
+	key := "test-inconsistent-key"
+	testMetadata := &daramjwee.Metadata{ETag: "v1"}
+
+	// Manually set metadata but not data to simulate inconsistency
+	metaBytes, err := json.Marshal(testMetadata)
+	require.NoError(t, err)
+	require.NoError(t, client.Set(ctx, metaKeyPrefix+key, metaBytes, 0).Err())
+
+	// GetStream should detect this and return ErrNotFound
+	_, _, err = store.GetStream(ctx, key)
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func TestRedisStore_ContextCancellation(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	logger := log.NewNopLogger()
+	store := New(client, logger)
+
+	key := "test-cancel"
+	metadata := &daramjwee.Metadata{ETag: "v1"}
+
+	t.Run("SetWithWriter", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := store.SetWithWriter(ctx, key, metadata)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("GetStream", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, err := store.GetStream(ctx, key)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("Stat", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := store.Stat(ctx, key)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := store.Delete(ctx, key)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("WriterClose", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		writer, err := store.SetWithWriter(ctx, key, metadata)
+		require.NoError(t, err)
+
+		// Cancel the context after the writer is created
+		cancel()
+
+		err = writer.Close()
+		assert.ErrorIs(t, err, context.Canceled)
+	})
 }
