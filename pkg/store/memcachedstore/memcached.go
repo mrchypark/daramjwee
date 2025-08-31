@@ -106,7 +106,10 @@ func (ms *MemcachedStore) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	err := ms.client.Delete(key)
-	if err != nil && err != memcache.ErrCacheMiss {
+	if err != nil {
+		if err == memcache.ErrCacheMiss {
+			return daramjwee.ErrNotFound
+		}
 		return fmt.Errorf("memcachedstore: could not delete item: %w", err)
 	}
 	return nil

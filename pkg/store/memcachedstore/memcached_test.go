@@ -126,6 +126,10 @@ func TestMemcachedStore_Delete(t *testing.T) {
 	_, err = store.Stat(ctx, key)
 	require.Error(t, err, "Stat should return an error after delete")
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound, "Stat should return ErrNotFound after delete")
+
+	// 5. Deleting a non-existent key should return ErrNotFound
+	err = store.Delete(ctx, "non-existent-key")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound, "Delete on non-existent key should return ErrNotFound")
 }
 
 func TestMemcachedStore_Set_ItemTooLarge(t *testing.T) {
