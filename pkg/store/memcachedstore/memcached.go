@@ -167,7 +167,7 @@ func (w *memcachedStoreWriter) Close() error {
 	entryBytes, err := json.Marshal(entry)
 	if err != nil {
 		level.Error(w.ms.logger).Log("msg", "failed to marshal entry", "key", w.key, "err", err)
-		return  fmt.Errorf("memcachedstore: could not marshal entry: %w", err)
+		return fmt.Errorf("memcachedstore: could not marshal entry: %w", err)
 	}
 
 	if len(entryBytes) > w.ms.maxItemSize {
