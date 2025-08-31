@@ -1,10 +1,10 @@
-
 package redisstore
 
 import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +29,7 @@ func TestRedisStore_SetAndGet(t *testing.T) {
 		Addr: mr.Addr(),
 	})
 	logger := log.NewNopLogger()
-	store := New(client, logger)
+	store := New(client, logger).(*RedisStore)
 
 	ctx := context.Background()
 	key := "test-key"
@@ -63,6 +63,38 @@ func TestRedisStore_SetAndGet(t *testing.T) {
 	readData, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, testData, readData)
+}
+
+func TestRedisStore_GetStream_Streaming(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	logger := log.NewNopLogger()
+	store := New(client, logger).(*RedisStore)
+
+	ctx := context.Background()
+	key := "test-streaming-key"
+	// Create a large data slice to force multiple reads
+	largeData := []byte(strings.Repeat("a", chunkSize*2))
+	testMetadata := &daramjwee.Metadata{ETag: "v1"}
+
+	// 1. Set data
+	writer, err := store.SetWithWriter(ctx, key, testMetadata)
+	require.NoError(t, err)
+	_, err = writer.Write(largeData)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	// 2. Get stream
+	reader, _, err := store.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// 3. Read from the stream and verify
+	readData, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, largeData, readData)
 }
 
 func TestRedisStore_Stat(t *testing.T) {
@@ -141,7 +173,7 @@ func TestRedisStore_GetStream_DataInconsistency(t *testing.T) {
 		Addr: mr.Addr(),
 	})
 	logger := log.NewNopLogger()
-	store := New(client, logger)
+	store := New(client, logger).(*RedisStore)
 
 	ctx := context.Background()
 	key := "test-inconsistent-key"
@@ -150,7 +182,7 @@ func TestRedisStore_GetStream_DataInconsistency(t *testing.T) {
 	// Manually set metadata but not data to simulate inconsistency
 	metaBytes, err := json.Marshal(testMetadata)
 	require.NoError(t, err)
-	require.NoError(t, client.Set(ctx, metaKeyPrefix+key, metaBytes, 0).Err())
+	require.NoError(t, client.Set(ctx, store.MetaKey(key), metaBytes, 0).Err())
 
 	// GetStream should detect this and return ErrNotFound
 	_, _, err = store.GetStream(ctx, key)
