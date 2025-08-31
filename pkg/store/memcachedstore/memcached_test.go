@@ -131,8 +131,7 @@ func TestMemcachedStore_Delete(t *testing.T) {
 func TestMemcachedStore_Set_ItemTooLarge(t *testing.T) {
 	mc := setupMemcached(t)
 	logger := log.NewNopLogger()
-	store := New(mc, logger).(*MemcachedStore)
-	store.maxItemSize = 100 // Set a small limit for testing
+	store := New(mc, logger, WithMaxItemSize(100))
 
 	ctx := context.Background()
 	key := "test-large-item"
@@ -146,7 +145,7 @@ func TestMemcachedStore_Set_ItemTooLarge(t *testing.T) {
 	assert.ErrorIs(t, err, ErrItemTooLarge, "Write should return ErrItemTooLarge")
 
 	// Test case where the data itself is not too large, but the marshalled entry is
-	store.maxItemSize = 200
+	store = New(mc, logger, WithMaxItemSize(200))
 	writer, err = store.SetWithWriter(ctx, key, metadata)
 	require.NoError(t, err)
 
@@ -157,6 +156,14 @@ func TestMemcachedStore_Set_ItemTooLarge(t *testing.T) {
 	// Closing should fail because the final entry with metadata is too large
 	err = writer.Close()
 	assert.ErrorIs(t, err, ErrItemTooLarge, "Close should return ErrItemTooLarge")
+}
+
+func TestMemcachedStore_WithMaxItemSize(t *testing.T) {
+	mc := setupMemcached(t)
+	logger := log.NewNopLogger()
+	store := New(mc, logger, WithMaxItemSize(500)).(*MemcachedStore)
+
+	assert.Equal(t, 500, store.maxItemSize)
 }
 
 func TestMemcachedStore_ContextCancellation(t *testing.T) {

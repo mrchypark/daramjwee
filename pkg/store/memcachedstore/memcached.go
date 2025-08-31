@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -37,21 +38,33 @@ type MemcachedStore struct {
 	maxItemSize int
 }
 
+// Option is a functional option for configuring the MemcachedStore.
+type Option func(*MemcachedStore)
+
+// WithMaxItemSize sets the maximum item size for the MemcachedStore.
+func WithMaxItemSize(size int) Option {
+	return func(ms *MemcachedStore) {
+		ms.maxItemSize = size
+	}
+}
+
 // New creates a new MemcachedStore.
-func New(client *memcache.Client, logger log.Logger) daramjwee.Store {
-	return &MemcachedStore{
+func New(client *memcache.Client, logger log.Logger, opts ...Option) daramjwee.Store {
+	ms := &MemcachedStore{
 		client:      client,
 		logger:      logger,
 		maxItemSize: DefaultMaxItemSize,
 	}
+	for _, opt := range opts {
+		opt(ms)
+	}
+	return ms
 }
 
 // GetStream retrieves an object and its metadata as a stream from Memcached.
 func (ms *MemcachedStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	select {
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
 
 	item, err := ms.client.Get(key)
@@ -59,12 +72,12 @@ func (ms *MemcachedStore) GetStream(ctx context.Context, key string) (io.ReadClo
 		if err == memcache.ErrCacheMiss {
 			return nil, nil, daramjwee.ErrNotFound
 		}
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("memcachedstore: could not get item: %w", err)
 	}
 
 	var entry memcachedEntry
 	if err := json.Unmarshal(item.Value, &entry); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("memcachedstore: could not unmarshal entry: %w", err)
 	}
 
 	return io.NopCloser(bytes.NewReader(entry.Data)), entry.Metadata, nil
@@ -74,10 +87,8 @@ func (ms *MemcachedStore) GetStream(ctx context.Context, key string) (io.ReadClo
 // NOTE: This implementation buffers the entire object in memory before writing to Memcached.
 // This can lead to high memory consumption for large objects.
 func (ms *MemcachedStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	w := &memcachedStoreWriter{
 		ms:       ms,
@@ -91,16 +102,14 @@ func (ms *MemcachedStore) SetWithWriter(ctx context.Context, key string, metadat
 
 // Delete removes an object from Memcached.
 func (ms *MemcachedStore) Delete(ctx context.Context, key string) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	err := ms.client.Delete(key)
 	if err == memcache.ErrCacheMiss {
 		return nil // Deleting a non-existent key is not an error.
 	}
-	return err
+	return fmt.Errorf("memcachedstore: could not delete item: %w", err)
 }
 
 // Stat retrieves metadata for an object without its data from Memcached.
@@ -108,22 +117,20 @@ func (ms *MemcachedStore) Delete(ctx context.Context, key string) error {
 // from Memcached just to return the metadata part. This is a limitation of the
 // chosen storage strategy of bundling metadata and data in a single key.
 func (ms *MemcachedStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	item, err := ms.client.Get(key)
 	if err != nil {
 		if err == memcache.ErrCacheMiss {
 			return nil, daramjwee.ErrNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("memcachedstore: could not get item: %w", err)
 	}
 
 	var entry memcachedEntry
 	if err := json.Unmarshal(item.Value, &entry); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("memcachedstore: could not unmarshal entry: %w", err)
 	}
 
 	return entry.Metadata, nil
@@ -148,10 +155,8 @@ func (w *memcachedStoreWriter) Write(p []byte) (n int, err error) {
 
 // Close commits the buffered data and metadata to Memcached.
 func (w *memcachedStoreWriter) Close() error {
-	select {
-	case <-w.ctx.Done():
-		return w.ctx.Err()
-	default:
+	if err := w.ctx.Err(); err != nil {
+		return err
 	}
 
 	entry := memcachedEntry{
@@ -162,7 +167,7 @@ func (w *memcachedStoreWriter) Close() error {
 	entryBytes, err := json.Marshal(entry)
 	if err != nil {
 		level.Error(w.ms.logger).Log("msg", "failed to marshal entry", "key", w.key, "err", err)
-		return err
+		return  fmt.Errorf("memcachedstore: could not marshal entry: %w", err)
 	}
 
 	if len(entryBytes) > w.ms.maxItemSize {
@@ -172,7 +177,8 @@ func (w *memcachedStoreWriter) Close() error {
 	err = w.ms.client.Set(&memcache.Item{Key: w.key, Value: entryBytes})
 	if err != nil {
 		level.Error(w.ms.logger).Log("msg", "failed to set entry in memcached", "key", w.key, "err", err)
+		return fmt.Errorf("memcachedstore: could not set entry: %w", err)
 	}
 
-	return err
+	return nil
 }
