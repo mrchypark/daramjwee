@@ -106,10 +106,10 @@ func (ms *MemcachedStore) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	err := ms.client.Delete(key)
-	if err == memcache.ErrCacheMiss {
-		return nil // Deleting a non-existent key is not an error.
+	if err != nil && err != memcache.ErrCacheMiss {
+		return fmt.Errorf("memcachedstore: could not delete item: %w", err)
 	}
-	return fmt.Errorf("memcachedstore: could not delete item: %w", err)
+	return nil
 }
 
 // Stat retrieves metadata for an object without its data from Memcached.
