@@ -150,7 +150,17 @@ type memcachedStoreWriter struct {
 
 // Write writes the provided data to the internal buffer.
 func (w *memcachedStoreWriter) Write(p []byte) (n int, err error) {
-	if w.buf.Len()+len(p) > w.ms.maxItemSize {
+	// Estimate the size of the final entry
+	entry := memcachedEntry{
+		Metadata: w.metadata,
+		Data:     w.buf.Bytes(),
+	}
+	entryBytes, err := json.Marshal(entry)
+	if err != nil {
+		return 0, fmt.Errorf("memcachedstore: could not marshal entry for size estimation: %w", err)
+	}
+
+	if len(entryBytes)+len(p) > w.ms.maxItemSize {
 		return 0, ErrItemTooLarge
 	}
 	return w.buf.Write(p)
