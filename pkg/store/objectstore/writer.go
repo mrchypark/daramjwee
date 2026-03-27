@@ -58,6 +58,7 @@ func (w *writer) Close() error {
 		_ = removeLocalSegment(sealedPath)
 		return err
 	}
+	w.store.enqueueFlush(w.key)
 	return nil
 }
 

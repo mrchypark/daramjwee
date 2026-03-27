@@ -10,11 +10,13 @@ import (
 )
 
 type Entry struct {
-	SegmentPath string             `json:"segment_path"`
-	Offset      int64              `json:"offset"`
-	Length      int64              `json:"length"`
-	Missing     bool               `json:"missing,omitempty"`
-	Metadata    daramjwee.Metadata `json:"metadata"`
+	SegmentPath  string             `json:"segment_path"`
+	Offset       int64              `json:"offset"`
+	Length       int64              `json:"length"`
+	Missing      bool               `json:"missing,omitempty"`
+	RemotePath   string             `json:"remote_path,omitempty"`
+	RemoteOffset int64              `json:"remote_offset,omitempty"`
+	Metadata     daramjwee.Metadata `json:"metadata"`
 }
 
 type Catalog struct {
@@ -65,6 +67,53 @@ func (c *Catalog) Entries() map[string]Entry {
 		snapshot[key] = entry
 	}
 	return snapshot
+}
+
+func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	current, ok := c.entries[key]
+	next, keep := fn(current, ok)
+	if keep {
+		c.entries[key] = next
+	} else {
+		delete(c.entries, key)
+	}
+	if err := c.persistLocked(); err != nil {
+		if ok {
+			c.entries[key] = current
+		} else {
+			delete(c.entries, key)
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *Catalog) UpdateMany(updates map[string]Entry) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	previous := make(map[string]Entry, len(updates))
+	existed := make(map[string]bool, len(updates))
+	for key, next := range updates {
+		prev, ok := c.entries[key]
+		previous[key] = prev
+		existed[key] = ok
+		c.entries[key] = next
+	}
+	if err := c.persistLocked(); err != nil {
+		for key := range updates {
+			if existed[key] {
+				c.entries[key] = previous[key]
+			} else {
+				delete(c.entries, key)
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Catalog) Set(key string, entry Entry) error {

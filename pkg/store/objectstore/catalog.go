@@ -67,6 +67,20 @@ func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) error {
 	return nil
 }
 
+func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) error {
+	if s.catalog == nil {
+		return nil
+	}
+	return s.catalog.Update(key, fn)
+}
+
+func (s *Store) updateLocalEntries(entries map[string]localCatalogEntry) error {
+	if s.catalog == nil {
+		return nil
+	}
+	return s.catalog.UpdateMany(entries)
+}
+
 func (s *Store) deleteLocalEntry(key string) error {
 	if s.catalog == nil {
 		return nil

@@ -24,6 +24,7 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/pagecache"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/rangeio"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/segment"
+	internalshard "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/shard"
 	"github.com/thanos-io/objstore"
 	"github.com/zeebo/xxh3"
 	"golang.org/x/sync/singleflight"
@@ -61,6 +62,11 @@ type Store struct {
 	pageLoads      singleflight.Group
 	versionSeq     atomic.Uint64
 	initErr        error
+	flushMu        sync.Mutex
+	flushRunMu     sync.Mutex
+	pendingShards  map[string]struct{}
+	flushTimer     *time.Timer
+	autoFlush      bool
 	now            func() time.Time
 }
 
@@ -105,6 +111,8 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		catalog:        cat,
 		lockManager:    newKeyLockManager(2048),
 		initErr:        initErr,
+		pendingShards:  make(map[string]struct{}),
+		autoFlush:      true,
 		now:            time.Now,
 	}
 	if store.initErr == nil {
@@ -198,11 +206,18 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	s.lockManager.Lock(key)
 	defer s.lockManager.Unlock(key)
 
+	prev, _, err := s.loadLocalEntry(key)
+	if err != nil {
+		return err
+	}
 	if err := s.deleteLocalEntry(key); err != nil {
 		return err
 	}
+	if prev.RemotePath != "" || prev.Missing {
+		s.enqueueFlush(key)
+	}
 
-	err := s.bucket.Delete(ctx, s.manifestPath(key))
+	err = s.bucket.Delete(ctx, s.manifestPath(key))
 	if err == nil || s.bucket.IsObjNotFoundErr(err) {
 		return nil
 	}
@@ -350,7 +365,7 @@ func encodeKey(key string) string {
 }
 
 func shardForKey(key string) string {
-	return fmt.Sprintf("%02x", xxh3.HashString(key)%256)
+	return internalshard.ForKey(key)
 }
 
 func joinPath(parts ...string) string {
