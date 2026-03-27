@@ -1,0 +1,75 @@
+package objectstore
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"testing"
+
+	"github.com/go-kit/log"
+	"github.com/mrchypark/daramjwee"
+	"github.com/thanos-io/objstore"
+)
+
+func BenchmarkStore_ReadCold(b *testing.B) {
+	store := benchmarkStore(false)
+	benchmarkReadAll(b, store, "bench-key")
+}
+
+func BenchmarkStore_ReadWarm(b *testing.B) {
+	store := benchmarkStore(true)
+	stream, _, err := store.GetStream(context.Background(), "bench-key")
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, stream); err != nil {
+		b.Fatal(err)
+	}
+	if err := stream.Close(); err != nil {
+		b.Fatal(err)
+	}
+
+	benchmarkReadAll(b, store, "bench-key")
+}
+
+func benchmarkStore(enableCache bool) *Store {
+	opts := []Option{
+		WithWholeObjectThreshold(32 << 10),
+		WithPageSize(32 << 10),
+	}
+	if enableCache {
+		opts = append(opts, WithMemoryPageCache(4<<20))
+	}
+
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), opts...)
+	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{ETag: "bench"})
+	if err != nil {
+		panic(err)
+	}
+	if _, err := writer.Write(bytes.Repeat([]byte("0123456789abcdef"), 1<<16)); err != nil {
+		panic(err)
+	}
+	if err := writer.Close(); err != nil {
+		panic(err)
+	}
+	return store
+}
+
+func benchmarkReadAll(b *testing.B, store *Store, key string) {
+	b.Helper()
+	b.ReportAllocs()
+	ctx := context.Background()
+
+	for i := 0; i < b.N; i++ {
+		stream, _, err := store.GetStream(ctx, key)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := io.Copy(io.Discard, stream); err != nil {
+			b.Fatal(err)
+		}
+		if err := stream.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
