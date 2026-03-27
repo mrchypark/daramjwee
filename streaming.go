@@ -64,8 +64,8 @@ func (w *streamTeeWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func streamThrough(src io.ReadCloser, sink WriteSink, onPublish func()) io.ReadCloser {
-	return newStreamingReadCloser(src, sink, nil, onPublish)
+func streamThrough(src io.ReadCloser, sink WriteSink, cancel func(), onPublish func()) io.ReadCloser {
+	return newStreamingReadCloser(src, sink, cancel, onPublish)
 }
 
 func newStreamingReadCloser(src io.ReadCloser, sink WriteSink, cancel func(), onPublish func()) io.ReadCloser {

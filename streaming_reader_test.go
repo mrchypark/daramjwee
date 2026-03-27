@@ -12,7 +12,7 @@ import (
 
 func TestStreamThrough_FullReadAndClosePublishes(t *testing.T) {
 	sink := &recordingWriteSink{}
-	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil)
+	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil, nil)
 
 	got, err := io.ReadAll(stream)
 	require.NoError(t, err)
@@ -28,7 +28,7 @@ func TestStreamThrough_FullReadAndClosePublishes(t *testing.T) {
 
 func TestStreamThrough_FullReadWithoutCloseDoesNotPublish(t *testing.T) {
 	sink := &recordingWriteSink{}
-	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil)
+	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil, nil)
 
 	got, err := io.ReadAll(stream)
 	require.NoError(t, err)
@@ -39,7 +39,7 @@ func TestStreamThrough_FullReadWithoutCloseDoesNotPublish(t *testing.T) {
 
 func TestStreamThrough_PartialReadThenCloseAborts(t *testing.T) {
 	sink := &recordingWriteSink{}
-	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil)
+	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil, nil)
 
 	buf := make([]byte, 2)
 	n, err := stream.Read(buf)
@@ -55,7 +55,7 @@ func TestStreamThrough_PartialReadThenCloseAborts(t *testing.T) {
 func TestStreamThrough_SourceErrorAborts(t *testing.T) {
 	sink := &recordingWriteSink{}
 	readErr := errors.New("source read failed")
-	stream := streamThrough(&errorReadCloser{chunks: [][]byte{[]byte("he")}, err: readErr}, sink, nil)
+	stream := streamThrough(&errorReadCloser{chunks: [][]byte{[]byte("he")}, err: readErr}, sink, nil, nil)
 
 	all, err := io.ReadAll(stream)
 	require.ErrorIs(t, err, readErr)
@@ -68,7 +68,7 @@ func TestStreamThrough_SourceErrorAborts(t *testing.T) {
 
 func TestStreamThrough_ShortWriteReturnsErrShortWrite(t *testing.T) {
 	sink := &recordingWriteSink{shortWrite: true}
-	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil)
+	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil, nil)
 
 	buf := make([]byte, 5)
 	n, err := stream.Read(buf)
@@ -82,7 +82,7 @@ func TestStreamThrough_ShortWriteReturnsErrShortWrite(t *testing.T) {
 func TestStreamThrough_CloseSurfacesPublishError(t *testing.T) {
 	closeErr := errors.New("publish failed")
 	sink := &recordingWriteSink{closeErr: closeErr}
-	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil)
+	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil, nil)
 
 	_, err := io.ReadAll(stream)
 	require.NoError(t, err)
@@ -94,7 +94,7 @@ func TestStreamThrough_CloseSurfacesPublishError(t *testing.T) {
 func TestStreamThrough_CopyUsesSourceWriterTo(t *testing.T) {
 	src := &writerToSpyReadCloser{Reader: bytes.NewReader([]byte("hello"))}
 	sink := &recordingWriteSink{}
-	stream := streamThrough(src, sink, nil)
+	stream := streamThrough(src, sink, nil, nil)
 
 	n, err := io.Copy(io.Discard, stream)
 	require.NoError(t, err)
@@ -111,7 +111,7 @@ func TestStreamThrough_CopyUsesSourceWriterTo(t *testing.T) {
 func TestStreamThrough_CopyShortWriteWithWriterToAborts(t *testing.T) {
 	src := &writerToSpyReadCloser{Reader: bytes.NewReader([]byte("hello"))}
 	sink := &recordingWriteSink{shortWrite: true}
-	stream := streamThrough(src, sink, nil)
+	stream := streamThrough(src, sink, nil, nil)
 
 	_, err := io.Copy(io.Discard, stream)
 	require.ErrorIs(t, err, io.ErrShortWrite)
