@@ -5,11 +5,20 @@ import "time"
 type Option func(*config)
 
 type config struct {
+	dataDir              string
 	prefix               string
 	defaultGCGrace       time.Duration
 	wholeThreshold       int64
 	pageSize             int64
 	memoryPageCacheBytes int64
+}
+
+// WithDataDir configures the local objectstore working directory used for
+// ingest segments and catalog state. When omitted, a temporary directory is used.
+func WithDataDir(dir string) Option {
+	return func(cfg *config) {
+		cfg.dataDir = dir
+	}
 }
 
 // WithPrefix scopes all objectstore paths under the provided prefix.

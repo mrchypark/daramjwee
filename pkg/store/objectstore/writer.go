@@ -2,28 +2,25 @@ package objectstore
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"sync"
 
-	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee"
 )
 
 type writer struct {
-	ctx      context.Context
-	store    *Store
-	key      string
-	blobPath string
+	ctx     context.Context
+	store   *Store
+	key     string
+	segment interface {
+		Write([]byte) (int, error)
+		Seal() (string, int64, error)
+		Abort() error
+	}
 	metadata *daramjwee.Metadata
-	pw       *io.PipeWriter
-	wg       sync.WaitGroup
 
-	mu        sync.Mutex
-	done      bool
-	size      int64
-	uploadErr error
+	mu   sync.Mutex
+	done bool
 }
 
 func (w *writer) Write(p []byte) (int, error) {
@@ -34,11 +31,7 @@ func (w *writer) Write(p []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 
-	n, err := w.pw.Write(p)
-	w.mu.Lock()
-	w.size += int64(n)
-	w.mu.Unlock()
-	return n, err
+	return w.segment.Write(p)
 }
 
 func (w *writer) Close() error {
@@ -47,25 +40,24 @@ func (w *writer) Close() error {
 	}
 	defer w.store.lockManager.Unlock(w.key)
 
-	if err := w.pw.Close(); err != nil {
+	sealedPath, size, err := w.segment.Seal()
+	if err != nil {
 		return err
 	}
-	w.wg.Wait()
-
-	if w.uploadErr != nil {
-		level.Error(w.store.logger).Log("msg", "blob upload failed", "key", w.key, "blob_path", w.blobPath, "err", w.uploadErr)
-		return fmt.Errorf("objectstore: blob upload for %q failed: %w", w.key, w.uploadErr)
+	metadata := daramjwee.Metadata{}
+	if w.metadata != nil {
+		metadata = *w.metadata
 	}
-
-	if err := w.store.publishManifest(w.ctx, w.key, w.blobPath, w.currentSize(), w.metadata); err != nil {
-		cleanupErr := ignoreNotFound(w.store.bucket.Delete(context.Background(), w.blobPath), w.store.bucket)
-		if cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup failed: %w", cleanupErr))
-		}
-		level.Error(w.store.logger).Log("msg", "manifest publish failed", "key", w.key, "blob_path", w.blobPath, "err", err)
-		return fmt.Errorf("objectstore: manifest publish for %q failed: %w", w.key, err)
+	err = w.store.publishLocalEntry(w.key, localCatalogEntry{
+		SegmentPath: sealedPath,
+		Offset:      0,
+		Length:      size,
+		Metadata:    metadata,
+	})
+	if err != nil {
+		_ = removeLocalSegment(sealedPath)
+		return err
 	}
-
 	return nil
 }
 
@@ -74,12 +66,7 @@ func (w *writer) Abort() error {
 		return nil
 	}
 	defer w.store.lockManager.Unlock(w.key)
-
-	closeErr := w.pw.CloseWithError(context.Canceled)
-	w.wg.Wait()
-
-	deleteErr := ignoreNotFound(w.store.bucket.Delete(context.Background(), w.blobPath), w.store.bucket)
-	return errors.Join(closeErr, deleteErr)
+	return w.segment.Abort()
 }
 
 func (w *writer) markDone() bool {
@@ -90,10 +77,4 @@ func (w *writer) markDone() bool {
 	}
 	w.done = true
 	return true
-}
-
-func (w *writer) currentSize() int64 {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.size
 }

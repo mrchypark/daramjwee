@@ -2,7 +2,6 @@ package objectstore
 
 import (
 	"context"
-	"errors"
 	"io"
 	"testing"
 	"time"
@@ -76,29 +75,6 @@ func TestStore_OverwriteReplacesVisibleValue(t *testing.T) {
 	assert.Equal(t, "v2", meta.ETag)
 }
 
-func TestStore_CloseErrorDoesNotPublish(t *testing.T) {
-	ctx := context.Background()
-	store := New(&errorBucket{
-		Bucket: objstore.NewInMemBucket(),
-		uploadFunc: func(ctx context.Context, name string, r io.Reader) error {
-			_, _ = io.ReadAll(r)
-			return errors.New("upload failed")
-		},
-	}, log.NewNopLogger())
-
-	writer, err := store.BeginSet(ctx, "upload-error", &daramjwee.Metadata{ETag: "v1"})
-	require.NoError(t, err)
-	_, err = io.WriteString(writer, "payload")
-	require.NoError(t, err)
-
-	err = writer.Close()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "upload failed")
-
-	_, err = store.Stat(ctx, "upload-error")
-	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
-}
-
 func TestStore_DeleteRemovesVisibility(t *testing.T) {
 	ctx := context.Background()
 	store := New(objstore.NewInMemBucket(), log.NewNopLogger())
@@ -157,17 +133,4 @@ func TestStore_MetadataRoundTrip(t *testing.T) {
 	assert.Equal(t, "meta-v1", meta.ETag)
 	assert.True(t, meta.IsNegative)
 	assert.True(t, meta.CachedAt.Equal(now))
-}
-
-type errorBucket struct {
-	objstore.Bucket
-	uploadFunc func(ctx context.Context, name string, r io.Reader) error
-}
-
-func (b *errorBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
-	if b.uploadFunc != nil {
-		return b.uploadFunc(ctx, name, r)
-	}
-	_, _ = io.ReadAll(r)
-	return errors.New("simulated upload error")
 }

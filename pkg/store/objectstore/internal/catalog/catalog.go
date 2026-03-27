@@ -1,0 +1,135 @@
+package catalog
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+
+	"github.com/goccy/go-json"
+	"github.com/mrchypark/daramjwee"
+)
+
+type Entry struct {
+	SegmentPath string             `json:"segment_path"`
+	Offset      int64              `json:"offset"`
+	Length      int64              `json:"length"`
+	Missing     bool               `json:"missing,omitempty"`
+	Metadata    daramjwee.Metadata `json:"metadata"`
+}
+
+type Catalog struct {
+	path    string
+	mu      sync.RWMutex
+	entries map[string]Entry
+}
+
+func Open(dir string) (*Catalog, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+
+	c := &Catalog{
+		path:    filepath.Join(dir, "snapshot.json"),
+		entries: make(map[string]Entry),
+	}
+
+	data, err := os.ReadFile(c.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return c, nil
+		}
+		return nil, err
+	}
+	if len(data) == 0 {
+		return c, nil
+	}
+	if err := json.Unmarshal(data, &c.entries); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *Catalog) Get(key string) (Entry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[key]
+	return entry, ok
+}
+
+func (c *Catalog) Entries() map[string]Entry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	snapshot := make(map[string]Entry, len(c.entries))
+	for key, entry := range c.entries {
+		snapshot[key] = entry
+	}
+	return snapshot
+}
+
+func (c *Catalog) Set(key string, entry Entry) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prev, existed := c.entries[key]
+	c.entries[key] = entry
+	if err := c.persistLocked(); err != nil {
+		if existed {
+			c.entries[key] = prev
+		} else {
+			delete(c.entries, key)
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *Catalog) Delete(key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prev, existed := c.entries[key]
+	delete(c.entries, key)
+	if err := c.persistLocked(); err != nil {
+		if existed {
+			c.entries[key] = prev
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *Catalog) persistLocked() error {
+	data, err := json.Marshal(c.entries)
+	if err != nil {
+		return err
+	}
+
+	tmpPath := c.path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return err
+	}
+	if err := syncPath(tmpPath); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, c.path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(c.path))
+}
+
+func syncPath(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}
+
+func syncDir(dir string) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}

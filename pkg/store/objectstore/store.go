@@ -3,9 +3,12 @@ package objectstore
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,8 +20,10 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee"
+	internalcatalog "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/catalog"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/pagecache"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/rangeio"
+	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/segment"
 	"github.com/thanos-io/objstore"
 	"github.com/zeebo/xxh3"
 	"golang.org/x/sync/singleflight"
@@ -45,14 +50,17 @@ type manifest struct {
 type Store struct {
 	bucket         objstore.Bucket
 	logger         log.Logger
+	dataDir        string
 	prefix         string
 	defaultGCGrace time.Duration
 	wholeThreshold int64
 	pageSize       int64
 	pageCache      *pagecache.Cache
+	catalog        *internalcatalog.Catalog
 	lockManager    *keyLockManager
 	pageLoads      singleflight.Group
 	versionSeq     atomic.Uint64
+	initErr        error
 	now            func() time.Time
 }
 
@@ -75,21 +83,57 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		cfg.pageSize = 256 << 10
 	}
 
-	return &Store{
+	dataDir := cfg.dataDir
+	var initErr error
+	if dataDir == "" {
+		dataDir, initErr = os.MkdirTemp("", "daramjwee-objectstore-*")
+	}
+
+	var cat *internalcatalog.Catalog
+	if initErr == nil {
+		cat, initErr = internalcatalog.Open(filepath.Join(dataDir, "catalog"))
+	}
+	store := &Store{
 		bucket:         bucket,
 		logger:         logger,
+		dataDir:        dataDir,
 		prefix:         trimSlashes(cfg.prefix),
 		defaultGCGrace: cfg.defaultGCGrace,
 		wholeThreshold: cfg.wholeThreshold,
 		pageSize:       cfg.pageSize,
 		pageCache:      pagecache.New(cfg.memoryPageCacheBytes),
+		catalog:        cat,
 		lockManager:    newKeyLockManager(2048),
+		initErr:        initErr,
 		now:            time.Now,
 	}
+	if store.initErr == nil {
+		if err := store.sweepOrphanedLocalSegments(); err != nil {
+			level.Warn(store.logger).Log("msg", "failed to sweep orphaned local segments", "dir", store.dataDir, "err", err)
+		}
+	}
+	return store
 }
 
 // GetStream returns the current published generation for a key.
 func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, nil, err
+	}
+
+	if entry, ok, err := s.loadLiveLocalEntry(key); err != nil {
+		if errors.Is(err, errMissingLocalEntry) {
+			return nil, nil, daramjwee.ErrNotFound
+		}
+		return nil, nil, err
+	} else if ok {
+		stream, err := openLocalEntry(entry)
+		if err != nil {
+			return nil, nil, err
+		}
+		return stream, cloneMetadata(&entry.Metadata), nil
+	}
+
 	m, err := s.loadManifest(ctx, key)
 	if err != nil {
 		return nil, nil, err
@@ -122,26 +166,25 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 
 // BeginSet starts a staged write for a new immutable generation.
 func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
 	s.lockManager.Lock(key)
 
-	version := s.nextVersion()
-	blobPath := s.blobPath(key, version)
-	pr, pw := io.Pipe()
+	segmentID := s.nextVersion()
+	segmentWriter, err := segment.Open(s.dataDir, shardForKey(key), segmentID)
+	if err != nil {
+		s.lockManager.Unlock(key)
+		return nil, err
+	}
 
 	w := &writer{
 		ctx:      ctx,
 		store:    s,
 		key:      key,
-		blobPath: blobPath,
-		pw:       pw,
+		segment:  segmentWriter,
 		metadata: cloneMetadata(metadata),
 	}
-
-	w.wg.Add(1)
-	go func() {
-		defer w.wg.Done()
-		w.uploadErr = s.bucket.Upload(ctx, blobPath, pr)
-	}()
 
 	return w, nil
 }
@@ -149,8 +192,15 @@ func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Me
 // Delete removes the currently visible entry for a key.
 // Blob reclamation is handled by best-effort cleanup and conservative sweep.
 func (s *Store) Delete(ctx context.Context, key string) error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
 	s.lockManager.Lock(key)
 	defer s.lockManager.Unlock(key)
+
+	if err := s.deleteLocalEntry(key); err != nil {
+		return err
+	}
 
 	err := s.bucket.Delete(ctx, s.manifestPath(key))
 	if err == nil || s.bucket.IsObjNotFoundErr(err) {
@@ -161,11 +211,28 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 
 // Stat returns metadata for the published generation.
 func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
+
+	if entry, ok, err := s.loadLiveLocalEntry(key); err != nil {
+		if errors.Is(err, errMissingLocalEntry) {
+			return nil, daramjwee.ErrNotFound
+		}
+		return nil, err
+	} else if ok {
+		return cloneMetadata(&entry.Metadata), nil
+	}
+
 	m, err := s.loadManifest(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 	return cloneMetadata(&m.Metadata), nil
+}
+
+func (s *Store) ensureReady() error {
+	return s.initErr
 }
 
 func (s *Store) loadManifest(ctx context.Context, key string) (*manifest, error) {
@@ -318,6 +385,24 @@ func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
 	}
 	cloned := *meta
 	return &cloned
+}
+
+type fileSectionReadCloser struct {
+	io.Reader
+	file *os.File
+}
+
+func (r *fileSectionReadCloser) Close() error {
+	return r.file.Close()
+}
+
+func openLocalEntry(entry localCatalogEntry) (io.ReadCloser, error) {
+	file, err := os.Open(entry.SegmentPath)
+	if err != nil {
+		return nil, err
+	}
+	section := io.NewSectionReader(file, entry.Offset, entry.Length)
+	return &fileSectionReadCloser{Reader: section, file: file}, nil
 }
 
 func blobTimestampFromPath(blobPath string) (time.Time, bool) {
