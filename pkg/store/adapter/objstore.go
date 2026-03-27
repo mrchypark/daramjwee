@@ -3,6 +3,7 @@ package adapter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee"
 	"github.com/thanos-io/objstore"
+	"github.com/zeebo/xxh3"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -20,15 +22,17 @@ import (
 // This implementation manages metadata (like ETags) by storing a separate '.meta.json'
 // object for each data object. It supports true streaming for uploads.
 type objstoreAdapter struct {
-	bucket objstore.Bucket
-	logger log.Logger
+	bucket      objstore.Bucket
+	logger      log.Logger
+	lockManager *keyLockManager
 }
 
 // NewObjstoreAdapter creates a new adapter.
 func NewObjstoreAdapter(bucket objstore.Bucket, logger log.Logger) daramjwee.Store {
 	return &objstoreAdapter{
-		bucket: bucket,
-		logger: logger,
+		bucket:      bucket,
+		logger:      logger,
+		lockManager: newKeyLockManager(2048),
 	}
 }
 
@@ -50,12 +54,13 @@ func (a *objstoreAdapter) GetStream(ctx context.Context, key string) (io.ReadClo
 	return r, meta, nil
 }
 
-// SetWithWriter returns a WriteCloser that enables true streaming uploads.
+// BeginSet returns a WriteSink that enables true streaming uploads.
 // It uses an io.Pipe, allowing the caller to write data chunk by chunk,
 // which is concurrently uploaded to the object store in a separate goroutine.
 // This is highly memory-efficient as the entire object does not need to be
 // buffered in memory before the upload begins.
-func (a *objstoreAdapter) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
+func (a *objstoreAdapter) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	a.lockManager.Lock(key)
 	pr, pw := io.Pipe()
 
 	writer := &streamingObjstoreWriter{
@@ -77,9 +82,16 @@ func (a *objstoreAdapter) SetWithWriter(ctx context.Context, key string, metadat
 	return writer, nil
 }
 
+func (a *objstoreAdapter) ValidateHotStore() error {
+	return &daramjwee.ConfigError{Message: "unsupported hot store: objstore adapter"}
+}
+
 // Delete removes an object and its associated metadata from the object storage.
 // It attempts to delete both the data object and the metadata object concurrently.
 func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
+	a.lockManager.Lock(key)
+	defer a.lockManager.Unlock(key)
+
 	g, gCtx := errgroup.WithContext(ctx)
 
 	dataPath := a.toDataPath(key)
@@ -88,6 +100,9 @@ func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
 	// Delete data object
 	g.Go(func() error {
 		if err := a.bucket.Delete(gCtx, dataPath); err != nil {
+			if a.bucket.IsObjNotFoundErr(err) {
+				return nil
+			}
 			level.Error(a.logger).Log("msg", "failed to delete data object", "key", dataPath, "err", err)
 			return err
 		}
@@ -97,6 +112,9 @@ func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
 	// Delete meta object
 	g.Go(func() error {
 		if err := a.bucket.Delete(gCtx, metaPath); err != nil {
+			if a.bucket.IsObjNotFoundErr(err) {
+				return nil
+			}
 			level.Error(a.logger).Log("msg", "failed to delete meta object", "key", metaPath, "err", err)
 			return err
 		}
@@ -155,16 +173,26 @@ type streamingObjstoreWriter struct {
 	pw        *io.PipeWriter
 	wg        *sync.WaitGroup
 	uploadErr error
+	mu        sync.Mutex
+	done      bool
 }
 
 // Write writes data to the pipe, which is immediately streamed to the object store.
 func (w *streamingObjstoreWriter) Write(p []byte) (n int, err error) {
+	if w.isDone() {
+		return 0, io.ErrClosedPipe
+	}
 	return w.pw.Write(p)
 }
 
 // Close finalizes the write operation. It closes the pipe, waits for the data
 // upload to finish, and then uploads the metadata object.
 func (w *streamingObjstoreWriter) Close() error {
+	if !w.markDone() {
+		return nil
+	}
+	defer w.adapter.lockManager.Unlock(w.key)
+
 	// 1. Close the pipe writer. This signals the end of the stream to the
 	//    background upload goroutine and causes it to complete.
 	if err := w.pw.Close(); err != nil {
@@ -184,16 +212,88 @@ func (w *streamingObjstoreWriter) Close() error {
 	metaPath := w.adapter.toMetaPath(w.key)
 	metaBytes, err := json.Marshal(w.metadata)
 	if err != nil {
+		if deleteErr := w.adapter.bucket.Delete(context.Background(), w.adapter.toDataPath(w.key)); deleteErr != nil {
+			level.Error(w.adapter.logger).Log("msg", "failed to clean up data object after metadata marshal failure", "key", w.key, "err", deleteErr)
+			err = errors.Join(err, fmt.Errorf("cleanup failed: %w", deleteErr))
+		}
 		level.Error(w.adapter.logger).Log("msg", "failed to marshal metadata", "key", metaPath, "err", err)
 		return fmt.Errorf("failed to marshal metadata for key '%s': %w", w.key, err)
 	}
 
 	err = w.adapter.bucket.Upload(w.ctx, metaPath, bytes.NewReader(metaBytes))
 	if err != nil {
+		if deleteErr := w.adapter.bucket.Delete(context.Background(), w.adapter.toDataPath(w.key)); deleteErr != nil {
+			level.Error(w.adapter.logger).Log("msg", "failed to clean up data object after metadata upload failure", "key", w.key, "err", deleteErr)
+			err = errors.Join(err, fmt.Errorf("cleanup failed: %w", deleteErr))
+		}
 		level.Error(w.adapter.logger).Log("msg", "failed to upload metadata object", "key", metaPath, "err", err)
 		return fmt.Errorf("failed to upload metadata for key '%s': %w", w.key, err)
 	}
 
 	level.Debug(w.adapter.logger).Log("msg", "successfully uploaded data and metadata", "key", w.key)
 	return nil
+}
+
+func (w *streamingObjstoreWriter) Abort() error {
+	if !w.markDone() {
+		return nil
+	}
+	defer w.adapter.lockManager.Unlock(w.key)
+
+	closeErr := w.pw.CloseWithError(context.Canceled)
+	w.wg.Wait()
+
+	dataKey := w.adapter.toDataPath(w.key)
+	metaKey := w.adapter.toMetaPath(w.key)
+	deleteErr := errors.Join(
+		ignoreNotFound(w.adapter.bucket.Delete(context.Background(), dataKey), w.adapter.bucket),
+		ignoreNotFound(w.adapter.bucket.Delete(context.Background(), metaKey), w.adapter.bucket),
+	)
+	return errors.Join(closeErr, deleteErr)
+}
+
+func (w *streamingObjstoreWriter) markDone() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return false
+	}
+	w.done = true
+	return true
+}
+
+func (w *streamingObjstoreWriter) isDone() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.done
+}
+
+type keyLockManager struct {
+	locks []sync.Mutex
+	slots uint64
+}
+
+func newKeyLockManager(slots int) *keyLockManager {
+	if slots <= 0 {
+		slots = 2048
+	}
+	return &keyLockManager{
+		locks: make([]sync.Mutex, slots),
+		slots: uint64(slots),
+	}
+}
+
+func (m *keyLockManager) Lock(key string) {
+	m.locks[xxh3.HashString(key)%m.slots].Lock()
+}
+
+func (m *keyLockManager) Unlock(key string) {
+	m.locks[xxh3.HashString(key)%m.slots].Unlock()
+}
+
+func ignoreNotFound(err error, bucket objstore.Bucket) error {
+	if err == nil || bucket.IsObjNotFoundErr(err) {
+		return nil
+	}
+	return err
 }

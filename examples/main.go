@@ -43,7 +43,7 @@ func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 
 	obj, ok := fakeOrigin[f.key]
 	if !ok {
-		return nil, daramjwee.ErrNotFound
+		return nil, daramjwee.ErrCacheableNotFound
 	}
 
 	// If ETag matches, indicate that the data has not been modified.

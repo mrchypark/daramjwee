@@ -56,8 +56,13 @@ func (gc *GenericCache[T]) Get(ctx context.Context, key string, fetcher GenericF
 	}
 	defer reader.Close()
 
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		return zero, fmt.Errorf("failed to read cached data: %w", err)
+	}
+
 	var value T
-	if err := json.NewDecoder(reader).Decode(&value); err != nil {
+	if err := json.Unmarshal(payload, &value); err != nil {
 		return zero, fmt.Errorf("failed to unmarshal cached data: %w", err)
 	}
 
@@ -79,8 +84,7 @@ func (gc *GenericCache[T]) Set(ctx context.Context, key string, value T, metadat
 
 	_, writeErr := writer.Write(data)
 	if writeErr != nil {
-		// Attempt to close to release resources, but the primary error is the write error.
-		_ = writer.Close()
+		_ = writer.Abort()
 		return fmt.Errorf("failed to write to cache: %w", writeErr)
 	}
 

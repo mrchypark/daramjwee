@@ -2,7 +2,9 @@ package filestore
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -94,43 +96,45 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 // GetStream reads an object from the store.
 // It returns an io.ReadCloser, the object's metadata, and an error if any.
 func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	path := fs.toDataPath(key)
-	fs.lockManager.RLock(path)
+	for _, path := range fs.dataPathCandidates(key) {
+		fs.lockManager.RLock(path)
 
-	file, err := os.Open(path)
-	if err != nil {
-		fs.lockManager.RUnlock(path)
-		if os.IsNotExist(err) {
-			return nil, nil, daramjwee.ErrNotFound
+		file, err := os.Open(path)
+		if err != nil {
+			fs.lockManager.RUnlock(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, nil, err
 		}
-		return nil, nil, err
+
+		meta, dataOffset, err := readMetadata(file)
+		if err != nil {
+			file.Close()
+			fs.lockManager.RUnlock(path)
+			return nil, nil, err
+		}
+
+		if _, err := file.Seek(dataOffset, io.SeekStart); err != nil {
+			file.Close()
+			fs.lockManager.RUnlock(path)
+			return nil, nil, fmt.Errorf("failed to seek to data section: %w", err)
+		}
+
+		// Notify the policy that this key was accessed
+		fs.mu.Lock()
+		fs.policy.Touch(key)
+		fs.mu.Unlock()
+
+		return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
 	}
-
-	meta, dataOffset, err := readMetadata(file)
-	if err != nil {
-		file.Close()
-		fs.lockManager.RUnlock(path)
-		return nil, nil, err
-	}
-
-	if _, err := file.Seek(dataOffset, io.SeekStart); err != nil {
-		file.Close()
-		fs.lockManager.RUnlock(path)
-		return nil, nil, fmt.Errorf("failed to seek to data section: %w", err)
-	}
-
-	// Notify the policy that this key was accessed
-	fs.mu.Lock()
-	fs.policy.Touch(key)
-	fs.mu.Unlock()
-
-	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
+	return nil, nil, daramjwee.ErrNotFound
 }
 
-// SetWithWriter returns a writer that streams data to the store.
+// BeginSet returns a sink that streams data to the store.
 // The data is written to a temporary file and then atomically moved to the final location
 // upon closing the writer, or copied if WithCopyAndTruncate option is used.
-func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
+func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 
@@ -154,15 +158,19 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 		return nil, err
 	}
 
-	onClose := func() (err error) {
+	cleanupTemp := func() error {
 		defer fs.lockManager.Unlock(path)
+		if err := os.Remove(tmpFile.Name()); err != nil && !os.IsNotExist(err) {
+			level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", err)
+			return err
+		}
+		return nil
+	}
 
+	onClose := func() (err error) {
 		defer func() {
-			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil && !os.IsNotExist(errRemove) {
-				level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
-				if err == nil {
-					err = errRemove
-				}
+			if cleanupErr := cleanupTemp(); cleanupErr != nil && err == nil {
+				err = cleanupErr
 			}
 		}()
 
@@ -182,19 +190,25 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 		if err := fs.updateAfterSet(key, path); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
 		}
+		if err := fs.removeLegacyPathOnly(key); err != nil {
+			level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
+		}
 
 		return nil
 	}
 
-	return newLockedWriteCloser(tmpFile, onClose), nil
+	return newLockedWriteCloser(tmpFile, onClose, cleanupTemp), nil
+}
+
+func (fs *FileStore) ValidateHotStore() error {
+	if fs.useCopyAndTruncate {
+		return &daramjwee.ConfigError{Message: "unsupported hot store: filestore copy-and-truncate mode"}
+	}
+	return nil
 }
 
 // Delete removes an object from the store.
 func (fs *FileStore) Delete(ctx context.Context, key string) error {
-	path := fs.toDataPath(key)
-	fs.lockManager.Lock(path)
-	defer fs.lockManager.Unlock(path)
-
 	// Get file size before deletion for policy update
 	fs.mu.Lock()
 	fileSize, exists := fs.fileSizes[key]
@@ -205,52 +219,66 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	}
 	fs.mu.Unlock()
 
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
-		// If deletion failed but we already updated the policy, revert the changes
-		if exists {
-			fs.mu.Lock()
-			fs.fileSizes[key] = fileSize
-			fs.currentSize += fileSize
-			fs.policy.Add(key, fileSize)
-			fs.mu.Unlock()
+	for _, path := range fs.dataPathCandidates(key) {
+		fs.lockManager.Lock(path)
+		err := os.Remove(path)
+		fs.lockManager.Unlock(path)
+		if err != nil && !os.IsNotExist(err) {
+			// If deletion failed but we already updated the policy, revert the changes
+			if exists {
+				fs.mu.Lock()
+				fs.fileSizes[key] = fileSize
+				fs.currentSize += fileSize
+				fs.policy.Add(key, fileSize)
+				fs.mu.Unlock()
+			}
+			return err
 		}
-		return err
 	}
 	return nil
 }
 
 // Stat reads the metadata of an object without reading the data.
 func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	path := fs.toDataPath(key)
-	fs.lockManager.RLock(path)
-	defer fs.lockManager.RUnlock(path)
+	for _, path := range fs.dataPathCandidates(key) {
+		fs.lockManager.RLock(path)
 
-	file, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, daramjwee.ErrNotFound
+		file, err := os.Open(path)
+		if err != nil {
+			fs.lockManager.RUnlock(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
 		}
-		return nil, err
+
+		meta, _, err := readMetadata(file)
+		closeErr := file.Close()
+		fs.lockManager.RUnlock(path)
+		if err != nil {
+			return nil, err
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+
+		// Access via Stat should also be considered a "touch"
+		fs.mu.Lock()
+		fs.policy.Touch(key)
+		fs.mu.Unlock()
+
+		return meta, nil
 	}
-	defer file.Close()
-
-	meta, _, err := readMetadata(file)
-	if err != nil {
-		return nil, err
-	}
-
-	// Access via Stat should also be considered a "touch"
-	fs.mu.Lock()
-	fs.policy.Touch(key)
-	fs.mu.Unlock()
-
-	return meta, nil
+	return nil, daramjwee.ErrNotFound
 }
 
 // toDataPath converts a key into a safe file path within the base directory.
 // It prevents path traversal by cleaning the path and ensuring it stays within baseDir.
 func (fs *FileStore) toDataPath(key string) string {
+	return filepath.Join(fs.baseDir, encodeKey(key))
+}
+
+func (fs *FileStore) legacyDataPath(key string) string {
 	safeFallback := func(key string) string {
 		safeKey := strings.ReplaceAll(key, "..", "")
 		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
@@ -261,27 +289,20 @@ func (fs *FileStore) toDataPath(key string) string {
 		return filepath.Join(fs.baseDir, safeKey)
 	}
 
-	// Handle empty key
 	if key == "" {
 		return filepath.Join(fs.baseDir, "empty_key")
 	}
 
-	// Sanitize the key to prevent path traversal while preserving directory structure.
-	// By cleaning the key relative to a root, we resolve all ".." segments safely.
-	// We use "/" as it's the canonical separator for this operation.
 	slashedKey := filepath.ToSlash(key)
 	cleanKey := filepath.Clean("/" + slashedKey)
 	cleanKey = strings.TrimPrefix(cleanKey, "/")
 
-	// If cleaning results in an empty or dot path, use a safe default.
 	if cleanKey == "" || cleanKey == "." {
 		cleanKey = "root_file"
 	}
 
-	// Join with base directory. Join will handle OS-specific separators.
 	fullPath := filepath.Join(fs.baseDir, cleanKey)
 
-	// Final safety check: ensure the resolved path is still within baseDir.
 	absBase, err := filepath.Abs(fs.baseDir)
 	if err != nil {
 		return safeFallback(key)
@@ -292,12 +313,20 @@ func (fs *FileStore) toDataPath(key string) string {
 		return safeFallback(key)
 	}
 
-	// Check if path is within base directory
 	if !strings.HasPrefix(absPath+string(os.PathSeparator), absBase+string(os.PathSeparator)) && absPath != absBase {
 		return safeFallback(key)
 	}
 
 	return fullPath
+}
+
+func (fs *FileStore) dataPathCandidates(key string) []string {
+	encodedPath := fs.toDataPath(key)
+	legacyPath := fs.legacyDataPath(key)
+	if legacyPath == encodedPath {
+		return []string{encodedPath}
+	}
+	return []string{encodedPath, legacyPath}
 }
 
 // writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
@@ -398,17 +427,33 @@ func (lrc *lockedReadCloser) Close() error {
 type lockedWriteCloser struct {
 	*os.File
 	onClose func() error
+	onAbort func() error
+	mu      sync.Mutex
+	done    bool
 }
 
 // newLockedWriteCloser creates a new lockedWriteCloser.
-func newLockedWriteCloser(f *os.File, onClose func() error) io.WriteCloser {
-	return &lockedWriteCloser{File: f, onClose: onClose}
+func newLockedWriteCloser(f *os.File, onClose func() error, onAbort func() error) daramjwee.WriteSink {
+	return &lockedWriteCloser{File: f, onClose: onClose, onAbort: onAbort}
 }
 
 // Close closes the underlying file and then executes the onClose callback.
 // It prioritizes the error from the onClose callback.
 func (lwc *lockedWriteCloser) Close() error {
+	if !lwc.markDone() {
+		return nil
+	}
+
 	closeErr := lwc.File.Close()
+	if closeErr != nil {
+		if lwc.onAbort != nil {
+			abortErr := lwc.onAbort()
+			if abortErr != nil {
+				return errors.Join(closeErr, abortErr)
+			}
+		}
+		return closeErr
+	}
 
 	onCloseErr := lwc.onClose()
 
@@ -416,6 +461,29 @@ func (lwc *lockedWriteCloser) Close() error {
 		return onCloseErr
 	}
 	return closeErr
+}
+
+func (lwc *lockedWriteCloser) Abort() error {
+	if !lwc.markDone() {
+		return nil
+	}
+
+	closeErr := lwc.File.Close()
+	var abortErr error
+	if lwc.onAbort != nil {
+		abortErr = lwc.onAbort()
+	}
+	return errors.Join(closeErr, abortErr)
+}
+
+func (lwc *lockedWriteCloser) markDone() bool {
+	lwc.mu.Lock()
+	defer lwc.mu.Unlock()
+	if lwc.done {
+		return false
+	}
+	lwc.done = true
+	return true
 }
 
 // initializeCurrentSize scans the base directory to calculate the current total size
@@ -441,7 +509,10 @@ func (fs *FileStore) initializeCurrentSize() error {
 			return err
 		}
 
-		key := filepath.ToSlash(relPath)
+		key, ok := decodeStoredKey(filepath.ToSlash(relPath))
+		if !ok {
+			key = filepath.ToSlash(relPath)
+		}
 		size := info.Size()
 
 		fs.fileSizes[key] = size
@@ -525,6 +596,9 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 			fs.mu.Unlock()
 		} else {
 			level.Debug(fs.logger).Log("msg", "file evicted", "key", keyToEvict)
+			fs.mu.Lock()
+			fs.policy.Remove(keyToEvict)
+			fs.mu.Unlock()
 		}
 	}
 
@@ -534,16 +608,46 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 // deleteFileOnly removes a file from disk without updating internal tracking.
 // This is used during eviction when tracking has already been updated optimistically.
 func (fs *FileStore) deleteFileOnly(key string) error {
-	path := fs.toDataPath(key)
-
-	// Lock the file for deletion
-	fs.lockManager.Lock(path)
-	defer fs.lockManager.Unlock(path)
-
-	// Remove the file
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove file during eviction: %w", err)
+	for _, path := range fs.dataPathCandidates(key) {
+		fs.lockManager.Lock(path)
+		err := os.Remove(path)
+		fs.lockManager.Unlock(path)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove file during eviction: %w", err)
+		}
 	}
 
 	return nil
+}
+
+func (fs *FileStore) removeLegacyPathOnly(key string) error {
+	legacyPath := fs.legacyDataPath(key)
+	currentPath := fs.toDataPath(key)
+	if legacyPath == currentPath {
+		return nil
+	}
+
+	fs.lockManager.Lock(legacyPath)
+	defer fs.lockManager.Unlock(legacyPath)
+
+	err := os.Remove(legacyPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove legacy file: %w", err)
+	}
+	return nil
+}
+
+func encodeKey(key string) string {
+	return "b64_" + base64.RawURLEncoding.EncodeToString([]byte(key))
+}
+
+func decodeStoredKey(relPath string) (string, bool) {
+	if !strings.HasPrefix(relPath, "b64_") {
+		return "", false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(relPath, "b64_"))
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
 }

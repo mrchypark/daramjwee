@@ -22,11 +22,16 @@ var ErrNotModified = errors.New("daramjwee: resource not modified")
 // is cacheable (e.g., a negative cache entry).
 var ErrCacheableNotFound = errors.New("daramjwee: resource not found, but this state is cacheable")
 
+// ErrNilFetcher is returned when a cache operation that may call the origin
+// is invoked without a Fetcher.
+var ErrNilFetcher = errors.New("daramjwee: nil fetcher")
+
 // Cache is the primary public interface for interacting with daramjwee.
 // It enforces a memory-safe, stream-based interaction model.
 type Cache interface {
 	// Get retrieves an object as a stream.
 	// On a cache miss, it uses the provided Fetcher to retrieve data from the origin.
+	// The fetcher must not be nil.
 	// The caller is responsible for closing the returned io.ReadCloser.
 	Get(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error)
 
@@ -34,14 +39,15 @@ type Cache interface {
 	// The cache entry is finalized when the returned writer is closed.
 	// This pattern is ideal for use with io.MultiWriter for simultaneous
 	// response-to-client and writing-to-cache scenarios.
-	// NOTE: The caller is responsible for calling Close() on the returned
-	// io.WriteCloser to ensure the cache entry is committed and resources are released.
-	Set(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error)
+	// NOTE: The caller is responsible for calling Close() or Abort() on the
+	// returned sink to ensure resources are released.
+	Set(ctx context.Context, key string, metadata *Metadata) (WriteSink, error)
 
 	// Delete removes an object from the cache.
 	Delete(ctx context.Context, key string) error
 
 	// ScheduleRefresh asynchronously refreshes a cache entry using the provided Fetcher.
+	// The fetcher must not be nil.
 	ScheduleRefresh(ctx context.Context, key string, fetcher Fetcher) error
 
 	// Close gracefully shuts down the cache and its background workers.
@@ -67,16 +73,30 @@ type Fetcher interface {
 	Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error)
 }
 
+// WriteSink is the terminal write contract for cache stores.
+// Close publishes the staged write, and Abort discards it.
+type WriteSink interface {
+	io.WriteCloser
+	Abort() error
+}
+
 // Store defines the interface for a single cache storage tier (e.g., memory, disk).
 type Store interface {
 	// GetStream retrieves an object and its metadata as a stream.
+	// Successful lookups must return non-nil metadata.
 	GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error)
-	// SetWithWriter returns a writer that streams data into the store.
-	SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error)
+	// BeginSet returns a sink that stages data into the store.
+	BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error)
 	// Delete removes an object from the store.
 	Delete(ctx context.Context, key string) error
 	// Stat retrieves metadata for an object without its data.
 	Stat(ctx context.Context, key string) (*Metadata, error)
+}
+
+// HotStoreValidator optionally validates whether a store mode is supported as a hot tier.
+// Stores that do not implement it are accepted as-is.
+type HotStoreValidator interface {
+	ValidateHotStore() error
 }
 
 // EvictionPolicy defines the contract for a cache eviction strategy.
@@ -139,6 +159,11 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	if cfg.HotStore == nil {
 		return nil, &ConfigError{"hotStore is required"}
 	}
+	if validator, ok := cfg.HotStore.(HotStoreValidator); ok {
+		if err := validator.ValidateHotStore(); err != nil {
+			return nil, err
+		}
+	}
 
 	// Prevent using the same store instance for both hot and cold tiers
 	if cfg.ColdStore != nil && cfg.HotStore == cfg.ColdStore {
@@ -166,6 +191,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		NegativeFreshFor:          cfg.NegativeFreshFor,
 		ColdStorePositiveFreshFor: cfg.ColdStorePositiveFreshFor,
 		ColdStoreNegativeFreshFor: cfg.ColdStoreNegativeFreshFor,
+		loggingDisabled:           isNoopLogger(logger),
 	}
 
 	level.Info(logger).Log("msg", "daramjwee cache initialized", "default_timeout", c.DefaultTimeout)

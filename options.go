@@ -61,7 +61,7 @@ func WithColdStore(store Store) Option {
 }
 
 // WithWorker specifies the worker strategy and detailed settings for background tasks.
-// If not set, reasonable defaults ("pool", size 10) are used.
+// If not set, the defaults are strategy "pool", size 1, queue size 500.
 func WithWorker(strategyType string, poolSize int, queueSize int, jobTimeout time.Duration) Option {
 	return func(cfg *Config) error {
 		if strategyType == "" {

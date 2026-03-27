@@ -20,9 +20,9 @@ func (ns *nullStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 	return nil, nil, ErrNotFound
 }
 
-// SetWithWriter returns an io.WriteCloser that discards all data.
-func (ns *nullStore) SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
-	return &nullWriteCloser{}, nil
+// BeginSet returns a WriteSink that discards all data.
+func (ns *nullStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
+	return &nullWriteSink{}, nil
 }
 
 // Delete does nothing and returns nil.
@@ -35,15 +35,31 @@ func (ns *nullStore) Stat(ctx context.Context, key string) (*Metadata, error) {
 	return nil, ErrNotFound
 }
 
-// nullWriteCloser is an io.WriteCloser implementation that discards all written data.
-type nullWriteCloser struct{}
+func (ns *nullStore) ValidateHotStore() error {
+	return &ConfigError{"unsupported hot store"}
+}
+
+// nullWriteSink is a WriteSink implementation that discards all written data.
+type nullWriteSink struct {
+	done bool
+}
 
 // Write discards the provided bytes and reports success.
-func (nwc *nullWriteCloser) Write(p []byte) (n int, err error) {
+func (nwc *nullWriteSink) Write(p []byte) (n int, err error) {
+	if nwc.done {
+		return 0, io.ErrClosedPipe
+	}
 	return len(p), nil
 }
 
 // Close does nothing and returns nil.
-func (nwc *nullWriteCloser) Close() error {
+func (nwc *nullWriteSink) Close() error {
+	nwc.done = true
+	return nil
+}
+
+// Abort does nothing and returns nil.
+func (nwc *nullWriteSink) Abort() error {
+	nwc.done = true
 	return nil
 }

@@ -4,19 +4,18 @@ package daramjwee
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
-	"github.com/mrchypark/daramjwee/internal/worker"
+		"github.com/mrchypark/daramjwee/internal/worker"
 )
 
 var ErrCacheClosed = errors.New("daramjwee: cache is closed")
 var ErrNilMetadata = errors.New("daramjwee: nil metadata encountered")
+var ErrBackgroundJobRejected = errors.New("daramjwee: background job rejected")
 
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
@@ -30,6 +29,7 @@ type DaramjweeCache struct {
 	NegativeFreshFor          time.Duration
 	ColdStorePositiveFreshFor time.Duration
 	ColdStoreNegativeFreshFor time.Duration
+	loggingDisabled           bool
 	isClosed                  atomic.Bool
 }
 
@@ -41,41 +41,59 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	if c.isClosed.Load() {
 		return nil, ErrCacheClosed
 	}
+	if fetcher == nil {
+		return nil, ErrNilFetcher
+	}
 	ctx, cancel := c.newCtxWithTimeout(ctx)
-	defer cancel()
 
 	// 1. Check Hot Cache
 	hotStream, hotMeta, err := c.getStreamFromStore(ctx, c.HotStore, key)
 	if err == nil {
-		return c.handleHotHit(ctx, key, fetcher, hotStream, hotMeta)
+		stream, streamErr := c.handleHotHit(ctx, key, fetcher, hotStream, hotMeta, cancel)
+		if streamErr != nil {
+			cancel()
+			return nil, streamErr
+		}
+		return stream, nil
+	}
+	if errors.Is(err, ErrNilMetadata) {
+		cancel()
+		return nil, err
 	}
 	if !errors.Is(err, ErrNotFound) {
-		level.Error(c.Logger).Log("msg", "hot store get failed", "key", key, "err", err)
+		c.errorLog("msg", "hot store get failed", "key", key, "err", err)
 	}
 
 	// 2. Check Cold Cache
 	coldStream, coldMeta, err := c.getStreamFromStore(ctx, c.ColdStore, key)
-	if err == nil && coldMeta == nil {
-		err = ErrNilMetadata
-		if coldStream != nil {
-			coldStream.Close()
-		}
-	}
-
 	if err == nil {
-		return c.handleColdHit(ctx, key, coldStream, coldMeta)
+		stream, streamErr := c.handleColdHit(ctx, key, coldStream, coldMeta, cancel)
+		if streamErr != nil {
+			cancel()
+			return nil, streamErr
+		}
+		return stream, nil
+	}
+	if errors.Is(err, ErrNilMetadata) {
+		cancel()
+		return nil, err
 	}
 	if !errors.Is(err, ErrNotFound) {
-		level.Error(c.Logger).Log("msg", "cold store get failed", "key", key, "err", err)
+		c.errorLog("msg", "cold store get failed", "key", key, "err", err)
 	}
 
 	// 3. Fetch from Origin
-	return c.handleMiss(ctx, key, fetcher)
+	stream, streamErr := c.handleMiss(ctx, key, fetcher, cancel)
+	if streamErr != nil {
+		cancel()
+		return nil, streamErr
+	}
+	return stream, nil
 }
 
 // Set returns a WriteCloser to directly write data to the cache.
 // The data is written to the hot store.
-func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
+func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
 	if c.isClosed.Load() {
 		return nil, ErrCacheClosed
 	}
@@ -94,7 +112,7 @@ func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata
 		cancel()
 		return nil, err
 	}
-	return newCancelWriteCloser(wc, cancel), nil
+	return newCancelWriteSink(wc, cancel), nil
 }
 
 // Delete sequentially deletes an object from all cache tiers to prevent deadlocks.
@@ -111,7 +129,7 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	// 1. Always delete from Hot Store first.
 	if c.HotStore != nil {
 		if err := c.deleteFromStore(ctx, c.HotStore, key); err != nil && !errors.Is(err, ErrNotFound) {
-			level.Error(c.Logger).Log("msg", "failed to delete from hot store", "key", key, "err", err)
+				c.errorLog("msg", "failed to delete from hot store", "key", key, "err", err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -120,7 +138,7 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 
 	// 2. Then delete from Cold Store.
 	if err := c.deleteFromStore(ctx, c.ColdStore, key); err != nil && !errors.Is(err, ErrNotFound) {
-		level.Error(c.Logger).Log("msg", "failed to delete from cold store", "key", key, "err", err)
+			c.errorLog("msg", "failed to delete from cold store", "key", key, "err", err)
 		if firstErr == nil {
 			firstErr = err
 		}
@@ -134,13 +152,24 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 	if c.isClosed.Load() {
 		return ErrCacheClosed
 	}
+	if fetcher == nil {
+		return ErrNilFetcher
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
 	if c.Worker == nil {
 		return errors.New("worker is not configured, cannot schedule refresh")
 	}
 
 	job := func(jobCtx context.Context) {
-		level.Info(c.Logger).Log("msg", "starting background refresh", "key", key)
+		jobCtx, cancel := mergeContexts(jobCtx, ctx)
+		defer cancel()
+
+		c.infoLog("msg", "starting background refresh", "key", key)
 
 		var oldMetadata *Metadata
 		if meta, err := c.statFromStore(jobCtx, c.HotStore, key); err == nil && meta != nil {
@@ -150,12 +179,12 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		result, err := fetcher.Fetch(jobCtx, oldMetadata)
 		if err != nil {
 			if errors.Is(err, ErrCacheableNotFound) {
-				level.Debug(c.Logger).Log("msg", "re-caching as negative entry during background refresh", "key", key)
+				c.debugLog("msg", "re-caching as negative entry during background refresh", "key", key)
 				c.handleNegativeCache(jobCtx, key)
 			} else if errors.Is(err, ErrNotModified) {
-				level.Debug(c.Logger).Log("msg", "background refresh: object not modified", "key", key)
+				c.debugLog("msg", "background refresh: object not modified", "key", key)
 			} else {
-				level.Error(c.Logger).Log("msg", "background fetch failed", "key", key, "err", err)
+				c.errorLog("msg", "background fetch failed", "key", key, "err", err)
 			}
 			return
 		}
@@ -168,33 +197,48 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 
 		writer, err := c.setStreamToStore(jobCtx, c.HotStore, key, result.Metadata)
 		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to get cache writer for refresh", "key", key, "err", err)
+			c.errorLog("msg", "failed to get cache writer for refresh", "key", key, "err", err)
 			return
 		}
 
 		_, copyErr := io.Copy(writer, result.Body)
-		closeErr := writer.Close()
+		var closeErr error
+		if copyErr != nil {
+			closeErr = writer.Abort()
+		} else {
+			closeErr = writer.Close()
+		}
 
 		if copyErr != nil || closeErr != nil {
-			level.Error(c.Logger).Log("msg", "failed background set", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+			c.errorLog("msg", "failed background set", "key", key, "copyErr", copyErr, "closeErr", closeErr)
 		} else {
-			level.Info(c.Logger).Log("msg", "background set successful", "key", key)
+			c.infoLog("msg", "background set successful", "key", key)
 
-			// WARN: if oldMetadata's data is changed in Fetcher, we need to be careful about stale data
-			isStale := c.isColdStoreCachedStale(oldMetadata)
+			if hasRealColdStore(c.ColdStore) {
+				var coldMetadata *Metadata
+				if meta, err := c.statFromStore(jobCtx, c.ColdStore, key); err == nil {
+					coldMetadata = meta
+				}
+				isStale := c.isColdStoreCachedStale(coldMetadata)
 
-			if isStale {
-				// schedule background copy to cold store
-				c.scheduleSetToStore(context.Background(), c.ColdStore, key)
+				if isStale {
+					// schedule background copy to cold store
+					c.scheduleSetToStore(jobCtx, c.ColdStore, key)
+				}
 			}
 		}
 	}
 
-	c.Worker.Submit(job)
+	if !c.Worker.Submit(job) {
+		return ErrBackgroundJobRejected
+	}
 	return nil
 }
 
 func (c *DaramjweeCache) isColdStoreCachedStale(oldMeta *Metadata) bool {
+	if !hasRealColdStore(c.ColdStore) {
+		return false
+	}
 	if oldMeta == nil {
 		return true
 	}
@@ -215,18 +259,18 @@ func (c *DaramjweeCache) Close() {
 	}
 
 	if c.Worker != nil {
-		level.Info(c.Logger).Log("msg", "shutting down daramjwee cache")
+		c.infoLog("msg", "shutting down daramjwee cache")
 		if err := c.Worker.Shutdown(c.ShutdownTimeout); err != nil {
-			level.Error(c.Logger).Log("msg", "graceful shutdown failed", "err", err)
+			c.errorLog("msg", "graceful shutdown failed", "err", err)
 		} else {
-			level.Info(c.Logger).Log("msg", "daramjwee cache shutdown complete")
+			c.infoLog("msg", "daramjwee cache shutdown complete")
 		}
 	}
 }
 
 // handleHotHit processes the logic when an object is found in the hot cache.
-func (c *DaramjweeCache) handleHotHit(_ context.Context, key string, fetcher Fetcher, hotStream io.ReadCloser, meta *Metadata) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "hot cache hit", "key", key)
+func (c *DaramjweeCache) handleHotHit(_ context.Context, key string, fetcher Fetcher, hotStream io.ReadCloser, meta *Metadata, cancel context.CancelFunc) (io.ReadCloser, error) {
+	c.debugLog("msg", "hot cache hit", "key", key)
 
 	var isStale bool
 	// Calculate expiration using metadata and FreshFor duration
@@ -242,12 +286,19 @@ func (c *DaramjweeCache) handleHotHit(_ context.Context, key string, fetcher Fet
 		}
 	}
 
-	hotStreamCloser := newSafeCloser(hotStream, func() {})
-
-	if isStale {
-		level.Debug(c.Logger).Log("msg", "hot cache is stale, scheduling refresh", "key", key)
-		hotStreamCloser = newSafeCloser(hotStream, func() { c.ScheduleRefresh(context.Background(), key, fetcher) })
+	callback := func() {
+		cancel()
 	}
+	if isStale {
+		c.debugLog("msg", "hot cache is stale, scheduling refresh", "key", key)
+		callback = func() {
+			defer cancel()
+			if err := c.ScheduleRefresh(context.Background(), key, fetcher); err != nil {
+				c.warnLog("msg", "failed to schedule stale refresh", "key", key, "err", err)
+			}
+		}
+	}
+	hotStreamCloser := newSafeCloser(hotStream, callback)
 
 	if meta.IsNegative {
 		hotStreamCloser.Close()
@@ -258,8 +309,8 @@ func (c *DaramjweeCache) handleHotHit(_ context.Context, key string, fetcher Fet
 }
 
 // handleColdHit processes the logic when an object is found in the cold cache.
-func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStream io.ReadCloser, coldMeta *Metadata) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "cold cache hit, promoting to hot", "key", key)
+func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStream io.ReadCloser, coldMeta *Metadata, cancel context.CancelFunc) (io.ReadCloser, error) {
+	c.debugLog("msg", "cold cache hit, promoting to hot", "key", key)
 
 	// Create a copy of the metadata to promote to the hot cache.
 	// This prevents data races if multiple goroutines handle Cold Hit concurrently
@@ -270,57 +321,17 @@ func (c *DaramjweeCache) handleColdHit(ctx context.Context, key string, coldStre
 		*metaToPromote = *coldMeta
 	}
 
-	// Write-then-read approach: First save to hot cache completely
 	writer, err := c.setStreamToStore(ctx, c.HotStore, key, metaToPromote)
 	if err != nil {
-		level.Error(c.Logger).Log("msg", "failed to get hot store writer for promotion", "key", key, "err", err)
-		return coldStream, nil // Return original cold stream if promotion fails
+		c.warnLog("msg", "failed to acquire hot sink for promotion", "key", key, "err", err)
+		return newCancelOnCloseReadCloser(coldStream, cancel), nil
 	}
-
-	// Copy the entire stream from cold to hot cache
-	_, copyErr := io.Copy(writer, coldStream)
-	closeErr := writer.Close()
-	coldStreamCloseErr := coldStream.Close()
-
-	if copyErr != nil || closeErr != nil {
-		level.Error(c.Logger).Log("msg", "failed to promote to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr, "coldStreamCloseErr", coldStreamCloseErr)
-		// It's safer to delete the key from the hot store to avoid leaving a partial/corrupt object.
-		if delErr := c.deleteFromStore(context.Background(), c.HotStore, key); delErr != nil && !errors.Is(delErr, ErrNotFound) {
-			level.Warn(c.Logger).Log("msg", "failed to clean up partially promoted key from hot cache", "key", key, "err", delErr)
-		}
-		// Since we already closed coldStream, we need to read from cold again
-		coldStream, _, err := c.getStreamFromStore(ctx, c.ColdStore, key)
-		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to re-read from cold cache after promotion failure", "key", key, "err", err)
-			return nil, err
-		}
-		return coldStream, nil
-	}
-
-	if coldStreamCloseErr != nil {
-		level.Warn(c.Logger).Log("msg", "closing cold stream after promotion failed", "key", key, "err", coldStreamCloseErr)
-	}
-
-	// Now read from hot cache and return to user
-	hotStream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
-	if err != nil {
-		level.Error(c.Logger).Log("msg", "failed to read from hot cache after promotion", "key", key, "err", err)
-		// Fallback to reading from cold cache again to maintain availability
-		level.Info(c.Logger).Log("msg", "falling back to cold cache after read-after-write failure", "key", key)
-		coldStream, _, fallbackErr := c.getStreamFromStore(ctx, c.ColdStore, key)
-		if fallbackErr != nil {
-			level.Error(c.Logger).Log("msg", "fallback to cold cache failed", "key", key, "originalErr", err, "fallbackErr", fallbackErr)
-			return nil, fmt.Errorf("failed to read from hot cache after promotion: %w; fallback to cold cache also failed: %v", err, fallbackErr)
-		}
-		return coldStream, nil
-	}
-
-	return hotStream, nil
+	return newStreamingReadCloser(coldStream, writer, cancel, nil), nil
 }
 
 // handleMiss processes the logic when an object is not found in either hot or cold cache.
-func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "full cache miss, fetching from origin", "key", key)
+func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc) (io.ReadCloser, error) {
+	c.debugLog("msg", "full cache miss, fetching from origin", "key", key)
 
 	var oldMetadata *Metadata
 	if meta, err := c.statFromStore(ctx, c.HotStore, key); err == nil {
@@ -333,17 +344,20 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 			return c.handleNegativeCache(ctx, key)
 		}
 		if errors.Is(err, ErrNotModified) {
-			level.Debug(c.Logger).Log("msg", "object not modified, serving from hot cache again", "key", key)
+			c.debugLog("msg", "object not modified, serving from hot cache again", "key", key)
 			stream, meta, err := c.getStreamFromStore(ctx, c.HotStore, key)
 			if err != nil {
-				level.Warn(c.Logger).Log("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
+				if errors.Is(err, ErrNilMetadata) {
+					return nil, err
+				}
+				c.warnLog("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
 				return nil, ErrNotFound
 			}
 			if meta.IsNegative {
 				stream.Close()
 				return nil, ErrNotFound
 			}
-			return stream, nil
+			return newCancelReadCloser(stream, cancel), nil
 		}
 		return nil, err
 	}
@@ -353,63 +367,22 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 	}
 	result.Metadata.CachedAt = time.Now()
 
-	// Write-then-read approach: First save to hot cache completely
 	writer, err := c.setStreamToStore(ctx, c.HotStore, key, result.Metadata)
 	if err != nil {
-		level.Error(c.Logger).Log("msg", "failed to get cache writer", "key", key, "err", err)
-		return result.Body, nil // Return original stream if cache write fails
+		c.warnLog("msg", "failed to acquire hot sink on miss", "key", key, "err", err)
+		return newCancelOnCloseReadCloser(result.Body, cancel), nil
 	}
 
-	// Copy the entire stream to hot cache
-	_, copyErr := io.Copy(writer, result.Body)
-	closeErr := writer.Close()
-	bodyCloseErr := result.Body.Close()
-
-	if copyErr != nil || closeErr != nil {
-		level.Error(c.Logger).Log("msg", "failed to write to hot cache", "key", key, "copyErr", copyErr, "closeErr", closeErr, "bodyCloseErr", bodyCloseErr)
-		// It's safer to delete the key from the hot store to avoid leaving a partial/corrupt object.
-		if delErr := c.deleteFromStore(context.Background(), c.HotStore, key); delErr != nil && !errors.Is(delErr, ErrNotFound) {
-			level.Warn(c.Logger).Log("msg", "failed to clean up partially written key from hot cache", "key", key, "err", delErr)
+	return newStreamingReadCloser(result.Body, writer, cancel, func() {
+		if hasRealColdStore(c.ColdStore) {
+			c.scheduleSetToStore(context.Background(), c.ColdStore, key)
 		}
-		// Since we already closed result.Body, we need to return an error that preserves context.
-		var writeErr error
-		if copyErr != nil {
-			writeErr = copyErr
-		} else {
-			writeErr = closeErr
-		}
-		return nil, fmt.Errorf("cache write failed and original stream consumed: %w", writeErr)
-	}
-
-	if bodyCloseErr != nil {
-		level.Warn(c.Logger).Log("msg", "closing result body after caching failed", "key", key, "err", bodyCloseErr)
-	}
-
-	// Schedule background copy to cold store
-	c.scheduleSetToStore(context.Background(), c.ColdStore, key)
-
-	// Now read from hot cache and return to user
-	hotStream, _, err := c.getStreamFromStore(ctx, c.HotStore, key)
-	if err != nil {
-		level.Error(c.Logger).Log("msg", "failed to read from hot cache after write", "key", key, "err", err)
-		// Fallback to fetching from origin again, as the original stream is consumed.
-		// This maintains availability for the client at the cost of a second fetch.
-		level.Info(c.Logger).Log("msg", "refetching from origin after read-after-write failure", "key", key)
-		result, fetchErr := fetcher.Fetch(ctx, nil) // Pass nil for oldMetadata as cache state is uncertain.
-		if fetchErr != nil {
-			level.Error(c.Logger).Log("msg", "fallback fetch failed", "key", key, "originalErr", err, "fallbackErr", fetchErr)
-			return nil, fmt.Errorf("failed to read from hot cache after write: %w; fallback fetch also failed: %v", err, fetchErr)
-		}
-		// Do not attempt to cache this second result to avoid potential loops.
-		return result.Body, nil
-	}
-
-	return hotStream, nil
+	}), nil
 }
 
 // handleNegativeCache processes the logic for storing a negative cache entry.
 func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (io.ReadCloser, error) {
-	level.Debug(c.Logger).Log("msg", "caching as negative entry", "key", key, "NegativeFreshFor", c.NegativeFreshFor)
+	c.debugLog("msg", "caching as negative entry", "key", key, "NegativeFreshFor", c.NegativeFreshFor)
 
 	meta := &Metadata{
 		IsNegative: true,
@@ -418,10 +391,10 @@ func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (i
 
 	writer, err := c.setStreamToStore(ctx, c.HotStore, key, meta)
 	if err != nil {
-		level.Warn(c.Logger).Log("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
+		c.warnLog("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
 	} else {
 		if closeErr := writer.Close(); closeErr != nil {
-			level.Warn(c.Logger).Log("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
+			c.warnLog("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
 		}
 	}
 	return nil, ErrNotFound
@@ -437,12 +410,22 @@ func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context
 
 // getStreamFromStore is a wrapper that calls the Store interface's GetStream method.
 func (c *DaramjweeCache) getStreamFromStore(ctx context.Context, store Store, key string) (io.ReadCloser, *Metadata, error) {
-	return store.GetStream(ctx, key)
+	stream, meta, err := store.GetStream(ctx, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	if meta == nil {
+		if stream != nil {
+			_ = stream.Close()
+		}
+		return nil, nil, ErrNilMetadata
+	}
+	return stream, meta, nil
 }
 
-// setStreamToStore is a wrapper that calls the Store interface's SetWithWriter method.
-func (c *DaramjweeCache) setStreamToStore(ctx context.Context, store Store, key string, metadata *Metadata) (io.WriteCloser, error) {
-	return store.SetWithWriter(ctx, key, metadata)
+// setStreamToStore is a wrapper that calls the Store interface's BeginSet method.
+func (c *DaramjweeCache) setStreamToStore(ctx context.Context, store Store, key string, metadata *Metadata) (WriteSink, error) {
+	return store.BeginSet(ctx, key, metadata)
 }
 
 // deleteFromStore is a wrapper that calls the Store interface's Delete method.
@@ -457,52 +440,84 @@ func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key str
 
 // scheduleSetToStore schedules an asynchronous copy of the hot cache content to the cold cache.
 func (c *DaramjweeCache) scheduleSetToStore(_ context.Context, destStore Store, key string) {
+	if !hasRealColdStore(destStore) {
+		return
+	}
 	if c.Worker == nil {
-		level.Warn(c.Logger).Log("msg", "worker is not configured, cannot schedule set", "key", key)
+		c.warnLog("msg", "worker is not configured, cannot schedule set", "key", key)
 		return
 	}
 
 	job := func(jobCtx context.Context) {
-		level.Info(c.Logger).Log("msg", "starting background set", "key", key, "dest", "cold")
+		c.infoLog("msg", "starting background set", "key", key, "dest", "cold")
 
 		srcStream, meta, err := c.getStreamFromStore(jobCtx, c.HotStore, key)
 		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to get stream from hot store for background set", "key", key, "err", err)
+			c.errorLog("msg", "failed to get stream from hot store for background set", "key", key, "err", err)
 			return
 		}
 		defer srcStream.Close()
 
 		destWriter, err := c.setStreamToStore(jobCtx, destStore, key, meta)
 		if err != nil {
-			level.Error(c.Logger).Log("msg", "failed to get writer for dest store for background set", "key", key, "err", err)
+			c.errorLog("msg", "failed to get writer for dest store for background set", "key", key, "err", err)
 			return
 		}
 
 		_, copyErr := io.Copy(destWriter, srcStream)
-		closeErr := destWriter.Close()
+		var closeErr error
+		if copyErr != nil {
+			closeErr = destWriter.Abort()
+		} else {
+			closeErr = destWriter.Close()
+		}
 
 		if copyErr != nil || closeErr != nil {
-			level.Error(c.Logger).Log("msg", "failed background set", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+			c.errorLog("msg", "failed background set", "key", key, "copyErr", copyErr, "closeErr", closeErr)
 		} else {
-			level.Info(c.Logger).Log("msg", "background set successful", "key", key, "dest", "cold")
+			c.infoLog("msg", "background set successful", "key", key, "dest", "cold")
 		}
 	}
 
-	c.Worker.Submit(job)
+	if !c.Worker.Submit(job) {
+		c.warnLog("msg", "background set rejected", "key", key, "dest", "cold")
+	}
+}
+
+func hasRealColdStore(store Store) bool {
+	if store == nil {
+		return false
+	}
+	_, isNullStore := store.(*nullStore)
+	return !isNullStore
 }
 
 // cancelWriteCloser cancels the context when the WriteCloser is closed.
-type cancelWriteCloser struct {
-	io.WriteCloser
-	cancel context.CancelFunc
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
 }
 
-func newCancelWriteCloser(wc io.WriteCloser, cancel context.CancelFunc) io.WriteCloser {
-	return &cancelWriteCloser{WriteCloser: wc, cancel: cancel}
+func newCancelReadCloser(rc io.ReadCloser, cancel context.CancelFunc) io.ReadCloser {
+	return &cancelReadCloser{ReadCloser: rc, cancel: cancel}
 }
-func (cwc *cancelWriteCloser) Close() error {
-	defer cwc.cancel()
-	return cwc.WriteCloser.Close()
+
+func (crc *cancelReadCloser) Read(p []byte) (n int, err error) {
+	n, err = crc.ReadCloser.Read(p)
+	if err == io.EOF {
+		_ = crc.Close()
+	}
+	return n, err
+}
+
+func (crc *cancelReadCloser) Close() error {
+	crc.closeOnce.Do(func() {
+		defer crc.cancel()
+		crc.closeErr = crc.ReadCloser.Close()
+	})
+	return crc.closeErr
 }
 
 // safeCloser wraps an io.ReadCloser and executes a callback function upon Close.
@@ -575,4 +590,16 @@ func ReadAll(rc io.ReadCloser) ([]byte, error) {
 		return sc.ReadAll()
 	}
 	return io.ReadAll(rc)
+}
+
+func mergeContexts(primary, secondary context.Context) (context.Context, context.CancelFunc) {
+	if secondary == nil || secondary.Done() == nil {
+		return primary, func() {}
+	}
+	ctx, cancel := context.WithCancel(primary)
+	stop := context.AfterFunc(secondary, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }

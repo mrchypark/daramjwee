@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,8 +36,8 @@ func TestObjstoreAdapter_SetAndGetStream(t *testing.T) {
 	etag := "etag-123"
 	content := "hello, daramjwee!"
 
-	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
-	require.NoError(t, err, "SetWithWriter should not return an error")
+	wc, err := testStore.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+	require.NoError(t, err, "BeginSet should not return an error")
 	require.NotNil(t, wc, "writer should not be nil")
 
 	_, err = io.WriteString(wc, content)
@@ -72,7 +73,7 @@ func TestObjstoreAdapter_Stat(t *testing.T) {
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound, "Stat for a non-existent key should return ErrNotFound")
 
 	// Create an object to test Stat
-	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
+	wc, err := testStore.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 	_, err = wc.Write([]byte("some data"))
 	require.NoError(t, err)
@@ -93,7 +94,7 @@ func TestObjstoreAdapter_Delete(t *testing.T) {
 	etag := "etag-for-delete"
 
 	// Create an object to delete
-	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
+	wc, err := testStore.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 	_, err = wc.Write([]byte("data to be deleted"))
 	require.NoError(t, err)
@@ -135,7 +136,7 @@ func TestObjstoreAdapter_StreamingWriter_UploadError(t *testing.T) {
 		testStore.(*objstoreAdapter).bucket = originalBucket
 	}()
 
-	wc, err := testStore.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
+	wc, err := testStore.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 
 	_, err = wc.Write([]byte("this will fail"))
@@ -169,7 +170,7 @@ func TestObjstoreAdapter_NegativeCache_NoBody(t *testing.T) {
 
 	// 1. Set an item with IsNegative=true and an empty body.
 	meta := &daramjwee.Metadata{ETag: "v-neg", IsNegative: true}
-	wc, err := testStore.SetWithWriter(ctx, key, meta)
+	wc, err := testStore.BeginSet(ctx, key, meta)
 	require.NoError(t, err)
 	// Write *no* data.
 	err = wc.Close()
@@ -202,7 +203,7 @@ func TestObjstoreAdapter_MetadataFields(t *testing.T) {
 		CachedAt:   now,
 		IsNegative: true,
 	}
-	wc, err := testStore.SetWithWriter(ctx, key, originalMeta)
+	wc, err := testStore.BeginSet(ctx, key, originalMeta)
 	require.NoError(t, err)
 	_, err = wc.Write([]byte("data"))
 	require.NoError(t, err)
@@ -259,8 +260,8 @@ func TestObjstoreAdapter_GoroutineLeakOnContextCancel(t *testing.T) {
 	// 3. 취소 가능한 컨텍스트를 생성합니다.
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 4. SetWithWriter를 호출하여 백그라운드 업로드 고루틴을 실행시킵니다.
-	writer, err := testStore.SetWithWriter(ctx, "leak-test-key", &daramjwee.Metadata{})
+	// 4. BeginSet를 호출하여 백그라운드 업로드 고루틴을 실행시킵니다.
+	writer, err := testStore.BeginSet(ctx, "leak-test-key", &daramjwee.Metadata{})
 	require.NoError(t, err)
 	require.NotNil(t, writer)
 
@@ -298,4 +299,67 @@ func (b *errorBucketWithFunc) Upload(ctx context.Context, name string, r io.Read
 	// 기본 동작: 즉시 에러 반환
 	_, _ = io.ReadAll(r)
 	return errors.New("simulated upload error")
+}
+
+func TestObjstoreAdapter_CleansUpDataWhenMetadataUploadFails(t *testing.T) {
+	ctx := context.Background()
+	inMemBucket := objstore.NewInMemBucket()
+	adapter := NewObjstoreAdapter(inMemBucket, testLogger).(*objstoreAdapter)
+
+	adapter.bucket = &errorBucketWithFunc{
+		Bucket: inMemBucket,
+		uploadFunc: func(ctx context.Context, name string, r io.Reader) error {
+			if strings.HasSuffix(name, ".meta.json") {
+				_, _ = io.ReadAll(r)
+				return errors.New("metadata upload failed")
+			}
+			return inMemBucket.Upload(ctx, name, r)
+		},
+	}
+
+	writer, err := adapter.BeginSet(ctx, "cleanup-key", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("data"))
+	require.NoError(t, err)
+	require.Error(t, writer.Close())
+
+	exists, err := inMemBucket.Exists(ctx, "cleanup-key")
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestObjstoreAdapter_ReturnsCleanupFailureWhenMetadataUploadCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	inMemBucket := objstore.NewInMemBucket()
+	adapter := NewObjstoreAdapter(inMemBucket, testLogger).(*objstoreAdapter)
+
+	adapter.bucket = &cleanupErrorBucket{
+		Bucket: inMemBucket,
+	}
+
+	writer, err := adapter.BeginSet(ctx, "cleanup-error-key", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("data"))
+	require.NoError(t, err)
+
+	err = writer.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metadata upload failed")
+	assert.Contains(t, err.Error(), "cleanup failed")
+}
+
+type cleanupErrorBucket struct {
+	objstore.Bucket
+}
+
+func (b *cleanupErrorBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+	if strings.HasSuffix(name, ".meta.json") {
+		_, _ = io.ReadAll(r)
+		return errors.New("metadata upload failed")
+	}
+	return b.Bucket.Upload(ctx, name, r)
+}
+
+func (b *cleanupErrorBucket) Delete(ctx context.Context, name string) error {
+	return errors.New("cleanup delete failed")
 }

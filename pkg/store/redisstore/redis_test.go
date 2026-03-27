@@ -11,6 +11,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,16 @@ func setupMiniRedis(t *testing.T) *miniredis.Miniredis {
 	require.NoError(t, err)
 	t.Cleanup(mr.Close)
 	return mr
+}
+
+func TestRedisStore_WriteSinkConformance(t *testing.T) {
+	storetest.RunWriteSinkConformance(t, func(t *testing.T) daramjwee.Store {
+		t.Helper()
+		mr := setupMiniRedis(t)
+		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		t.Cleanup(func() { _ = client.Close() })
+		return New(client, log.NewNopLogger())
+	})
 }
 
 func TestRedisStore_SetAndGet(t *testing.T) {
@@ -40,8 +51,8 @@ func TestRedisStore_SetAndGet(t *testing.T) {
 		IsNegative: false,
 	}
 
-	// 1. Set data using SetWithWriter
-	writer, err := store.SetWithWriter(ctx, key, testMetadata)
+	// 1. Set data using BeginSet
+	writer, err := store.BeginSet(ctx, key, testMetadata)
 	require.NoError(t, err)
 	n, err := writer.Write(testData)
 	require.NoError(t, err)
@@ -80,7 +91,7 @@ func TestRedisStore_GetStream_Streaming(t *testing.T) {
 	testMetadata := &daramjwee.Metadata{ETag: "v1"}
 
 	// 1. Set data
-	writer, err := store.SetWithWriter(ctx, key, testMetadata)
+	writer, err := store.BeginSet(ctx, key, testMetadata)
 	require.NoError(t, err)
 	_, err = writer.Write(largeData)
 	require.NoError(t, err)
@@ -115,7 +126,7 @@ func TestRedisStore_Stat(t *testing.T) {
 	}
 
 	// 1. Set data first
-	writer, err := store.SetWithWriter(ctx, key, testMetadata)
+	writer, err := store.BeginSet(ctx, key, testMetadata)
 	require.NoError(t, err)
 	_, err = writer.Write(testData)
 	require.NoError(t, err)
@@ -145,7 +156,7 @@ func TestRedisStore_Delete(t *testing.T) {
 	testMetadata := &daramjwee.Metadata{ETag: "v1"}
 
 	// 1. Set data first
-	writer, err := store.SetWithWriter(ctx, key, testMetadata)
+	writer, err := store.BeginSet(ctx, key, testMetadata)
 	require.NoError(t, err)
 	_, err = writer.Write(testData)
 	require.NoError(t, err)
@@ -200,10 +211,10 @@ func TestRedisStore_ContextCancellation(t *testing.T) {
 	key := "test-cancel"
 	metadata := &daramjwee.Metadata{ETag: "v1"}
 
-	t.Run("SetWithWriter", func(t *testing.T) {
+	t.Run("BeginSet", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := store.SetWithWriter(ctx, key, metadata)
+		_, err := store.BeginSet(ctx, key, metadata)
 		assert.ErrorIs(t, err, context.Canceled)
 	})
 
@@ -230,7 +241,7 @@ func TestRedisStore_ContextCancellation(t *testing.T) {
 
 	t.Run("WriterClose", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		writer, err := store.SetWithWriter(ctx, key, metadata)
+		writer, err := store.BeginSet(ctx, key, metadata)
 		require.NoError(t, err)
 
 		// Cancel the context after the writer is created
@@ -239,4 +250,75 @@ func TestRedisStore_ContextCancellation(t *testing.T) {
 		err = writer.Close()
 		assert.ErrorIs(t, err, context.Canceled)
 	})
+}
+
+func TestRedisStore_AbortDeletesTempKey(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := New(client, log.NewNopLogger()).(*RedisStore)
+	ctx := context.Background()
+
+	sink, err := store.BeginSet(ctx, "abort-key", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+
+	writer := sink.(*redisStoreWriter)
+	_, err = sink.Write([]byte("partial"))
+	require.NoError(t, err)
+	require.True(t, mr.Exists(writer.tempKey))
+
+	require.NoError(t, sink.Abort())
+	require.False(t, mr.Exists(writer.tempKey))
+	require.False(t, mr.Exists(store.DataKey("abort-key")))
+	require.False(t, mr.Exists(store.MetaKey("abort-key")))
+}
+
+func TestRedisStore_ActiveStreamKeepsTempKeyVisible(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := New(client, log.NewNopLogger()).(*RedisStore)
+	ctx := context.Background()
+
+	sink, err := store.BeginSet(ctx, "active-key", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+
+	writer := sink.(*redisStoreWriter)
+	_, err = sink.Write([]byte("streaming"))
+	require.NoError(t, err)
+
+	require.True(t, mr.Exists(writer.tempKey))
+	value, err := mr.Get(writer.tempKey)
+	require.NoError(t, err)
+	require.Equal(t, "streaming", value)
+	require.NoError(t, sink.Abort())
+}
+
+func TestRedisStore_ZeroByteWrite(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	logger := log.NewNopLogger()
+	store := New(client, logger).(*RedisStore)
+
+	ctx := context.Background()
+	key := "zero-byte-key"
+	metadata := &daramjwee.Metadata{ETag: "v0", IsNegative: true}
+
+	writer, err := store.BeginSet(ctx, key, metadata)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	reader, meta, err := store.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Len(t, body, 0)
+	assert.Equal(t, metadata.ETag, meta.ETag)
+	assert.True(t, meta.IsNegative)
 }

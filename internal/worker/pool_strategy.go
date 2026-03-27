@@ -57,7 +57,7 @@ func (p *PoolStrategy) start() {
 
 			for job := range p.jobs {
 				ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
-				job(ctx)
+				runJobSafely(logger, job, ctx)
 				cancel()
 			}
 			level.Info(logger).Log("msg", "worker stopped")

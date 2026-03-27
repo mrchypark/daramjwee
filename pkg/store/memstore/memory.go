@@ -12,7 +12,7 @@ import (
 var (
 	writerPool = sync.Pool{
 		New: func() any {
-			return &memStoreWriter{
+			return &memStoreSink{
 				buf: bytes.NewBuffer(make([]byte, 0, 1024)), // Pre-allocate buffer
 			}
 		},
@@ -69,16 +69,17 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 	reader := bytes.NewReader(e.value)
 	readCloser := io.NopCloser(reader)
 
-	return readCloser, e.metadata, nil
+	return readCloser, cloneMetadata(e.metadata), nil
 }
 
-// SetWithWriter returns a writer that streams data into an in-memory buffer.
+// BeginSet returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
-func (ms *MemStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
-	w := writerPool.Get().(*memStoreWriter)
+func (ms *MemStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	w := writerPool.Get().(*memStoreSink)
 	w.ms = ms
 	w.key = key
 	w.metadata = metadata
+	w.done = false
 	return w, nil
 }
 
@@ -112,25 +113,37 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 	// Access via Stat should also be considered a "touch".
 	ms.policy.Touch(key)
 
-	return e.metadata, nil
+	return cloneMetadata(e.metadata), nil
 }
 
-// memStoreWriter is a helper type that satisfies the io.WriteCloser interface.
-type memStoreWriter struct {
+func (ms *MemStore) ValidateHotStore() error {
+	return nil
+}
+
+// memStoreSink is a helper type that satisfies the daramjwee.WriteSink interface.
+type memStoreSink struct {
 	ms       *MemStore
 	key      string
 	metadata *daramjwee.Metadata
 	buf      *bytes.Buffer
+	done     bool
 }
 
 // Write writes the provided data to the internal buffer.
-func (w *memStoreWriter) Write(p []byte) (n int, err error) {
+func (w *memStoreSink) Write(p []byte) (n int, err error) {
+	if w.done {
+		return 0, io.ErrClosedPipe
+	}
 	return w.buf.Write(p)
 }
 
 // Close is called when the write operation is complete.
 // It commits the buffered data to the MemStore and handles eviction if capacity is exceeded.
-func (w *memStoreWriter) Close() error {
+func (w *memStoreSink) Close() error {
+	if w.done {
+		return nil
+	}
+	w.done = true
 	w.ms.mu.Lock()
 	defer w.ms.mu.Unlock()
 
@@ -146,7 +159,7 @@ func (w *memStoreWriter) Close() error {
 
 	newEntry := entry{
 		value:    finalData,
-		metadata: w.metadata,
+		metadata: cloneMetadata(w.metadata),
 	}
 
 	w.ms.data[w.key] = newEntry
@@ -164,13 +177,14 @@ func (w *memStoreWriter) Close() error {
 			}
 
 			var actuallyEvicted bool
-			for _, keyToEvict := range keysToEvict {
-				if entryToEvict, ok := w.ms.data[keyToEvict]; ok {
-					w.ms.currentSize -= int64(len(entryToEvict.value))
-					delete(w.ms.data, keyToEvict)
-					actuallyEvicted = true
+				for _, keyToEvict := range keysToEvict {
+					if entryToEvict, ok := w.ms.data[keyToEvict]; ok {
+						w.ms.currentSize -= int64(len(entryToEvict.value))
+						delete(w.ms.data, keyToEvict)
+						w.ms.policy.Remove(keyToEvict)
+						actuallyEvicted = true
+					}
 				}
-			}
 
 			if !actuallyEvicted {
 				// If the policy keeps returning non-existent keys, break to prevent infinite loop.
@@ -181,10 +195,32 @@ func (w *memStoreWriter) Close() error {
 
 	// Reset the writer and return it to the pool.
 	w.buf.Reset()
+	w.release()
+
+	return nil
+}
+
+func (w *memStoreSink) Abort() error {
+	if w.done {
+		return nil
+	}
+	w.done = true
+	w.buf.Reset()
+	w.release()
+	return nil
+}
+
+func (w *memStoreSink) release() {
 	w.ms = nil
 	w.key = ""
 	w.metadata = nil
 	writerPool.Put(w)
+}
 
-	return nil
+func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
+	if meta == nil {
+		return nil
+	}
+	cloned := *meta
+	return &cloned
 }

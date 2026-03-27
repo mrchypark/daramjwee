@@ -2,6 +2,8 @@
 
 The Generic Cache package provides type-safe operations on top of daramjwee.Cache, eliminating the need for manual stream handling and JSON marshaling/unmarshaling for common use cases.
 
+Because JSON unmarshaling needs the full payload, `GenericCache.Get` drains the underlying cache stream to EOF before returning. That means it preserves correctness for daramjwee's stream-through fills, but it does not preserve first-byte streaming to the caller the way the raw `daramjwee.Cache` API does.
+
 ## Features
 
 - **Type Safety**: Compile-time type checking for cached values
@@ -135,11 +137,10 @@ userFetcher := cache.GenericFetcher[User](func(ctx context.Context, oldMetadata 
 
 ## Error Handling
 
-The generic cache preserves all daramjwee error semantics:
+The generic cache preserves the public `daramjwee.Cache` error surface:
 
-- `daramjwee.ErrNotFound`: Key not found and fetcher couldn't retrieve it
-- `daramjwee.ErrNotModified`: Resource hasn't changed (304-like behavior)
-- `daramjwee.ErrCacheableNotFound`: Not found but this state should be cached
+- `daramjwee.ErrNotFound`: Key not found and the wrapped fetcher could not supply a value
+- Fetchers may internally return `daramjwee.ErrNotModified` or `daramjwee.ErrCacheableNotFound`, but those are normalized by the base cache before `GenericCache.Get` returns
 
 ```go
 user, err := userCache.Get(ctx, "user:1", fetcher)
@@ -151,6 +152,7 @@ if errors.Is(err, daramjwee.ErrNotFound) {
 ## Performance Considerations
 
 - JSON marshaling/unmarshaling adds overhead compared to raw streams
+- Reads are fully buffered before `json.Unmarshal`, so this wrapper is not suitable when caller-visible first-byte streaming matters
 - Best suited for small to medium-sized objects
 - For large binary data, consider using the raw daramjwee.Cache interface
 - The generic cache is optimized for developer productivity over raw performance

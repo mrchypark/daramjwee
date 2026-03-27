@@ -20,7 +20,7 @@ type optionsTestMockStore struct {
 func (s *optionsTestMockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
 	return nil, nil, ErrNotFound
 }
-func (s *optionsTestMockStore) SetWithWriter(ctx context.Context, key string, metadata *Metadata) (io.WriteCloser, error) {
+func (s *optionsTestMockStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
 	return nil, nil
 }
 func (s *optionsTestMockStore) Delete(ctx context.Context, key string) error {
