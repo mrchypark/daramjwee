@@ -7,9 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,32 +30,10 @@ func (s *nilMetadataStore) Stat(ctx context.Context, key string) (*daramjwee.Met
 	return nil, daramjwee.ErrNotFound
 }
 
-type unsupportedHotStore struct{}
-
-func (s *unsupportedHotStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	return nil, nil, daramjwee.ErrNotFound
-}
-
-func (s *unsupportedHotStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
-	return nil, assert.AnError
-}
-
-func (s *unsupportedHotStore) Delete(ctx context.Context, key string) error {
-	return nil
-}
-
-func (s *unsupportedHotStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	return nil, daramjwee.ErrNotFound
-}
-
-func (s *unsupportedHotStore) ValidateHotStore() error {
-	return &daramjwee.ConfigError{Message: "unsupported hot store"}
-}
-
 func TestCache_SetPublishesOnClose(t *testing.T) {
 	hot := newMockStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -82,7 +58,7 @@ func TestCache_SetPublishesOnClose(t *testing.T) {
 func TestCache_SetDiscardsOnAbort(t *testing.T) {
 	hot := newMockStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -98,28 +74,10 @@ func TestCache_SetDiscardsOnAbort(t *testing.T) {
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
-func TestCache_RejectsUnsupportedHotStore(t *testing.T) {
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(&unsupportedHotStore{}), daramjwee.WithDefaultTimeout(time.Second))
-	require.Error(t, err)
-	assert.Nil(t, cache)
-	assert.Contains(t, err.Error(), "unsupported hot store")
-}
-
-func TestCache_RejectsCopyAndTruncateFileStoreAsHotStore(t *testing.T) {
-	dir := t.TempDir()
-	hot, err := filestore.New(dir, log.NewNopLogger(), filestore.WithCopyAndTruncate())
-	require.NoError(t, err)
-
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithDefaultTimeout(time.Second))
-	require.Error(t, err)
-	assert.Nil(t, cache)
-	assert.Contains(t, err.Error(), "unsupported hot store")
-}
-
 func TestCache_GetRejectsNilFetcher(t *testing.T) {
 	hot := newMockStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -131,7 +89,7 @@ func TestCache_GetRejectsNilFetcher(t *testing.T) {
 func TestCache_ScheduleRefreshRejectsNilFetcher(t *testing.T) {
 	hot := newMockStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -140,8 +98,8 @@ func TestCache_ScheduleRefreshRejectsNilFetcher(t *testing.T) {
 	assert.ErrorIs(t, err, daramjwee.ErrNilFetcher)
 }
 
-func TestCache_GetReturnsErrNilMetadataForHotHit(t *testing.T) {
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(&nilMetadataStore{}), daramjwee.WithDefaultTimeout(time.Second))
+func TestCache_GetReturnsErrNilMetadataForTopTierHit(t *testing.T) {
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(&nilMetadataStore{}), daramjwee.WithDefaultTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 

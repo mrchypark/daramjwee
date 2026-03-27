@@ -21,8 +21,7 @@ func TestScheduleRefresh_ReturnsErrorWhenWorkerQueueIsFull(t *testing.T) {
 
 	cache, err := daramjwee.New(
 		nil,
-		daramjwee.WithHotStore(hot),
-		daramjwee.WithColdStore(cold),
+		daramjwee.WithTiers(hot, cold),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 		daramjwee.WithWorker("pool", 1, 1, 5*time.Second),
 	)
@@ -53,10 +52,9 @@ func TestScheduleRefresh_PersistsToColdWhenColdEntryIsMissing(t *testing.T) {
 
 	cache, err := daramjwee.New(
 		nil,
-		daramjwee.WithHotStore(hot),
-		daramjwee.WithColdStore(cold),
+		daramjwee.WithTiers(hot, cold),
 		daramjwee.WithDefaultTimeout(2*time.Second),
-		daramjwee.WithColdStorePositiveFreshFor(time.Hour),
+		daramjwee.WithTierFreshness(time.Hour, 0),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -88,7 +86,7 @@ func TestScheduleRefresh_DoesNotPublishPartialDataOnCopyFailure(t *testing.T) {
 
 	cache, err := daramjwee.New(
 		nil,
-		daramjwee.WithHotStore(hot),
+		daramjwee.WithTiers(hot),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
@@ -131,7 +129,7 @@ func TestScheduleRefresh_WithoutColdStoreDoesNotPanicWorker(t *testing.T) {
 
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(hot),
+		daramjwee.WithTiers(hot),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 		daramjwee.WithCache(time.Minute),
 		daramjwee.WithWorker("pool", 1, 4, 2*time.Second),

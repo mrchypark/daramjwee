@@ -12,8 +12,8 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/adapter"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
+	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
 	"github.com/thanos-io/objstore/client"
 )
 
@@ -31,10 +31,9 @@ func (f SimpleFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadat
 	}, nil
 }
 
-// main showcases a two-tier cache setup: a local fileStore as the hot tier
-// and an Azure Blob Storage-backed objStore adapter as the cold tier.
-// This architecture provides fast access for frequently used items while
-// leveraging cheaper, durable storage for less-frequently accessed items.
+// main showcases an ordered tier chain: a local fileStore as tier 0 and an
+// Azure Blob Storage-backed objectstore as the next tier. This architecture
+// provides fast local hits while keeping a larger backing store behind it.
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -57,8 +56,8 @@ func main() {
 		logger.Log("level", "error", "msg", "FATAL: failed to create azure client", "err", err)
 		os.Exit(1)
 	}
-	coldStore := adapter.NewObjstoreAdapter(azureClient, logger)
-	logger.Log("level", "info", "msg", "Cold cache (Azure objStore) initialized.")
+	coldStore := objectstore.New(azureClient, logger)
+	logger.Log("level", "info", "msg", "Tier 1 (Azure objectstore) initialized.")
 
 	hotStoreDir, err := os.MkdirTemp("", "daramjwee-hot-cache-*")
 	if err != nil {
@@ -72,7 +71,7 @@ func main() {
 		}
 	}()
 
-	logger.Log("level", "info", "msg", "Hot cache (fileStore) initialized", "path", hotStoreDir)
+	logger.Log("level", "info", "msg", "Tier 0 (fileStore) initialized", "path", hotStoreDir)
 	hotStore, err := filestore.New(hotStoreDir, logger)
 	if err != nil {
 		logger.Log("level", "error", "msg", "FATAL: failed to create file store", "err", err)
@@ -81,14 +80,13 @@ func main() {
 
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(hotStore),
-		daramjwee.WithColdStore(coldStore),
+		daramjwee.WithTiers(hotStore, coldStore),
 	)
 	if err != nil {
 		logger.Log("level", "error", "msg", "FATAL: failed to initialize daramjwee cache", "err", err)
 		os.Exit(1)
 	}
-	logger.Log("level", "info", "msg", "Daramjwee cache initialized with fileStore (Hot) and Azure (Cold) tiers.")
+	logger.Log("level", "info", "msg", "Daramjwee cache initialized with ordered tiers: fileStore tier 0 and Azure tier 1.")
 
 	const cacheKey = "my-azure-object"
 	originData := []byte("Hello from Origin!")
@@ -99,7 +97,7 @@ func main() {
 	logger.Log("msg", "---> SCENARIO 1: First Get - Expecting full cache miss (hot and cold).")
 	getAndCompare(ctx, logger, cache, cacheKey, f, originData)
 
-	logger.Log("msg", "---> SCENARIO 2: Second Get - Expecting HOT cache hit.")
+	logger.Log("msg", "---> SCENARIO 2: Second Get - Expecting tier-0 hit.")
 	getAndCompare(ctx, logger, cache, cacheKey, f, originData)
 
 	logger.Log("msg", "---> SCENARIO 3: Third Get - Simulating node restart (deleting hot cache).")
@@ -117,16 +115,15 @@ func main() {
 	}
 	cache, err = daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(hotStore),
-		daramjwee.WithColdStore(coldStore),
+		daramjwee.WithTiers(hotStore, coldStore),
 	)
 	if err != nil {
 		logger.Log("level", "error", "msg", "FATAL: failed to re-initialize daramjwee cache", "err", err)
 		os.Exit(1)
 	}
-	logger.Log("level", "info", "msg", "Cache re-initialized with an empty hot tier.")
+	logger.Log("level", "info", "msg", "Cache re-initialized with an empty tier 0.")
 
-	logger.Log("msg", "---> Expecting COLD cache hit from Azure and promotion to hot tier.")
+	logger.Log("msg", "---> Expecting lower-tier hit from Azure and promotion to tier 0.")
 	getAndCompare(ctx, logger, cache, cacheKey, f, originData)
 
 	logger.Log("msg", "✅ All scenarios completed successfully!")

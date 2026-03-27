@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"time"
 
 	"github.com/go-kit/log"
@@ -93,12 +94,6 @@ type Store interface {
 	Stat(ctx context.Context, key string) (*Metadata, error)
 }
 
-// HotStoreValidator optionally validates whether a store mode is supported as a hot tier.
-// Stores that do not implement it are accepted as-is.
-type HotStoreValidator interface {
-	ValidateHotStore() error
-}
-
 // EvictionPolicy defines the contract for a cache eviction strategy.
 type EvictionPolicy interface {
 	// Touch is called when an item is accessed.
@@ -140,14 +135,14 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	cfg := Config{
-		DefaultTimeout:   30 * time.Second,
-		WorkerStrategy:   "pool",
-		WorkerPoolSize:   1,
-		WorkerQueueSize:  500,
-		WorkerJobTimeout: 30 * time.Second,
-		ShutdownTimeout:  30 * time.Second,
-		PositiveFreshFor: 0 * time.Second,
-		NegativeFreshFor: 0 * time.Second,
+		DefaultTimeout:       30 * time.Second,
+		WorkerStrategy:       "pool",
+		WorkerPoolSize:       1,
+		WorkerQueueSize:      500,
+		WorkerJobTimeout:     30 * time.Second,
+		ShutdownTimeout:      30 * time.Second,
+		TierPositiveFreshFor: 0,
+		TierNegativeFreshFor: 0,
 	}
 
 	for _, opt := range opts {
@@ -156,23 +151,19 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		}
 	}
 
-	if cfg.HotStore == nil {
-		return nil, &ConfigError{"hotStore is required"}
+	if len(cfg.Tiers) == 0 {
+		return nil, &ConfigError{"at least one tier is required"}
 	}
-	if validator, ok := cfg.HotStore.(HotStoreValidator); ok {
-		if err := validator.ValidateHotStore(); err != nil {
-			return nil, err
+
+	seen := make([]Store, 0, len(cfg.Tiers))
+	for _, tier := range cfg.Tiers {
+		if tier == nil {
+			return nil, &ConfigError{"tier cannot be nil"}
 		}
-	}
-
-	// Prevent using the same store instance for both hot and cold tiers
-	if cfg.ColdStore != nil && cfg.HotStore == cfg.ColdStore {
-		return nil, &ConfigError{"hot store and cold store cannot be the same instance"}
-	}
-
-	if cfg.ColdStore == nil {
-		level.Debug(logger).Log("msg", "cold store not configured, using null store")
-		cfg.ColdStore = newNullStore()
+		if containsSameStore(seen, tier) {
+			return nil, &ConfigError{"duplicate tier store instance"}
+		}
+		seen = append(seen, tier)
 	}
 
 	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.WorkerPoolSize, cfg.WorkerQueueSize, cfg.WorkerJobTimeout)
@@ -181,19 +172,53 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	c := &DaramjweeCache{
-		Logger:                    logger,
-		HotStore:                  cfg.HotStore,
-		ColdStore:                 cfg.ColdStore,
-		Worker:                    workerManager,
-		DefaultTimeout:            cfg.DefaultTimeout,
-		ShutdownTimeout:           cfg.ShutdownTimeout,
-		PositiveFreshFor:          cfg.PositiveFreshFor,
-		NegativeFreshFor:          cfg.NegativeFreshFor,
-		ColdStorePositiveFreshFor: cfg.ColdStorePositiveFreshFor,
-		ColdStoreNegativeFreshFor: cfg.ColdStoreNegativeFreshFor,
-		loggingDisabled:           isNoopLogger(logger),
+		Logger:                      logger,
+		Tiers:                       append([]Store(nil), cfg.Tiers...),
+		DurableTier:                 nil,
+		Worker:                      workerManager,
+		DefaultTimeout:              cfg.DefaultTimeout,
+		ShutdownTimeout:             cfg.ShutdownTimeout,
+		RegularTierPositiveFreshFor: cfg.TierPositiveFreshFor,
+		RegularTierNegativeFreshFor: cfg.TierNegativeFreshFor,
+		DurableTierPositiveFreshFor: 0,
+		DurableTierNegativeFreshFor: 0,
+		loggingDisabled:             isNoopLogger(logger),
 	}
 
 	level.Info(logger).Log("msg", "daramjwee cache initialized", "default_timeout", c.DefaultTimeout)
 	return c, nil
+}
+
+func containsSameStore(stores []Store, candidate Store) bool {
+	for _, existing := range stores {
+		if sameStoreInstance(existing, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameStoreInstance(a, b Store) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	ta := reflect.TypeOf(a)
+	tb := reflect.TypeOf(b)
+	if ta != tb {
+		return false
+	}
+
+	if ta.Comparable() {
+		return a == b
+	}
+
+	va := reflect.ValueOf(a)
+	vb := reflect.ValueOf(b)
+	switch va.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		return va.Pointer() == vb.Pointer()
+	default:
+		return false
+	}
 }
