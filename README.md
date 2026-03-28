@@ -8,7 +8,13 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
 `daramjwee` is built on two primary principles:
 
-1.  **Stream-Oriented API:** Public reads and writes are expressed through `io.Reader` and `io.Writer` interfaces, and store implementations can stream data without forcing full in-memory buffering in user code. **Crucially, the user must always `Close()` the stream to finalize operations and prevent resource leaks.** Tier-0 hits are returned directly as streams; lower-tier hits and origin misses are streamed to the caller while tier 0 is filled in the same read lifecycle. If the caller stops early and closes the stream, the staged write is discarded instead of publishing partial data.
+1.  **Stream-Oriented API:** Public reads and writes are expressed through `io.Reader` and `io.Writer` interfaces, so store implementations can stream data without forcing full in-memory buffering in user code.
+
+    Key semantics:
+    - Callers must always `Close()` the returned stream to finalize the operation and release resources.
+    - Tier-0 hits are returned directly as streams.
+    - Lower-tier hits and origin misses are streamed to the caller while tier 0 is filled in the same read lifecycle.
+    - If the caller stops early and closes the stream, the staged write is discarded instead of publishing partial data.
 2.  **Modular and Pluggable Architecture:** Key components such as the storage backend (`Store`), eviction strategy (`EvictionPolicy`), and asynchronous task runner (`Worker`) are all designed as interfaces. This allows users to easily swap in their own implementations to fit specific needs.
 
 ## Current Status & Key Implementations
@@ -17,9 +23,9 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
   * **Robust Storage Backends (`Store`):**
 
-      * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyAndTruncate`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**, and it is rejected as a regular tier because it cannot satisfy the stream-through publish contract.
+      * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyAndTruncate`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**, and it is not supported as a regular tier due to limitations with the stream-through publish contract.
       * **`MemStore`**: A thread-safe, high-throughput in-memory store with fully integrated capacity-based eviction logic. Its performance is optimized using `sync.Pool` to reduce memory allocations under high concurrency.
-      * **`objectstore`**: A first-party `Store` for `thanos-io/objstore` providers (S3, GCS, Azure Blob Storage). It uses a local ingest catalog plus remote packed segments/direct blobs so the top-level cache can keep a simple ordered-tier model while the backend optimizes object count and range-read cost internally.
+      * **`objectstore`**: A first-party `Store` for `thanos-io/objstore` providers (S3, GCS, Azure Blob Storage). It is designed for cost-efficient durable caching, especially when object count and large-object read cost matter, while still fitting into the same ordered-tier cache model as the other backends.
 
   * **Advanced Eviction Policies (`EvictionPolicy`):**
 
@@ -65,7 +71,7 @@ flowchart TD
     M --> N[Return 'Not Found' to Client];
     N --> E;
     
-    J -- Not Modified (304) --> O{Re-fetch from Hot Tier};
+    J -- Not Modified (304) --> O{Re-fetch from Tier 0};
     O -- Success --> D;
     O -- Failure (e.g., evicted) --> N;
 ```
@@ -77,7 +83,7 @@ flowchart TD
       * **Hit:** Streams the object to the caller while simultaneously filling tier 0, so the next access is a tier-0 hit if the caller finishes and closes the stream.
 3.  **Fetch from Origin:** If the object is in neither tier (Cache Miss), it invokes the user-provided `Fetcher`.
       * **Success:** The fetched data is streamed directly to the client while simultaneously filling tier 0. Once the read completes and the caller closes the stream, the entry becomes visible in tier 0 and can be fanned out asynchronously to lower tiers.
-      * **Not Modified:** If the origin returns `ErrNotModified`, `daramjwee` attempts to re-serve the data from the Hot Tier.
+      * **Not Modified:** If the origin returns `ErrNotModified`, `daramjwee` attempts to re-serve the data from tier 0.
       * **Not Found:** If the origin returns `ErrCacheableNotFound`, a negative entry is stored to prevent repeated fetches.
 
 ## Getting Started

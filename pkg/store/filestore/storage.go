@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -190,7 +191,9 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		if err := fs.updateAfterSet(key, path); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
 		}
-		if err := fs.removeLegacyPathOnly(key); err != nil {
+		if err := fs.removeLegacyPathOnly(key, map[uint64]struct{}{
+			fs.lockManager.getSlot(path): {},
+		}); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
 		}
 
@@ -202,32 +205,22 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 
 // Delete removes an object from the store.
 func (fs *FileStore) Delete(ctx context.Context, key string) error {
-	// Get file size before deletion for policy update
+	paths := fs.dataPathCandidates(key)
+	locked := fs.lockPaths(paths, nil)
+	defer fs.unlockPaths(locked)
+
+	if err := removeFiles(paths); err != nil {
+		return err
+	}
+
 	fs.mu.Lock()
-	fileSize, exists := fs.fileSizes[key]
-	if exists {
+	if fileSize, exists := fs.fileSizes[key]; exists {
 		fs.currentSize -= fileSize
 		delete(fs.fileSizes, key)
-		fs.policy.Remove(key)
 	}
+	fs.policy.Remove(key)
 	fs.mu.Unlock()
 
-	for _, path := range fs.dataPathCandidates(key) {
-		fs.lockManager.Lock(path)
-		err := os.Remove(path)
-		fs.lockManager.Unlock(path)
-		if err != nil && !os.IsNotExist(err) {
-			// If deletion failed but we already updated the policy, revert the changes
-			if exists {
-				fs.mu.Lock()
-				fs.fileSizes[key] = fileSize
-				fs.currentSize += fileSize
-				fs.policy.Add(key, fileSize)
-				fs.mu.Unlock()
-			}
-			return err
-		}
-	}
 	return nil
 }
 
@@ -320,6 +313,57 @@ func (fs *FileStore) dataPathCandidates(key string) []string {
 		return []string{encodedPath}
 	}
 	return []string{encodedPath, legacyPath}
+}
+
+func (fs *FileStore) lockPaths(paths []string, heldSlots map[uint64]struct{}) []string {
+	type slotPath struct {
+		slot uint64
+		path string
+	}
+
+	bySlot := make(map[uint64]string, len(paths))
+	for _, path := range paths {
+		slot := fs.lockManager.getSlot(path)
+		if _, skip := heldSlots[slot]; skip {
+			continue
+		}
+		if existing, ok := bySlot[slot]; !ok || path < existing {
+			bySlot[slot] = path
+		}
+	}
+
+	ordered := make([]slotPath, 0, len(bySlot))
+	for slot, path := range bySlot {
+		ordered = append(ordered, slotPath{slot: slot, path: path})
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].slot == ordered[j].slot {
+			return ordered[i].path < ordered[j].path
+		}
+		return ordered[i].slot < ordered[j].slot
+	})
+
+	locked := make([]string, 0, len(ordered))
+	for _, candidate := range ordered {
+		fs.lockManager.Lock(candidate.path)
+		locked = append(locked, candidate.path)
+	}
+	return locked
+}
+
+func (fs *FileStore) unlockPaths(paths []string) {
+	for i := len(paths) - 1; i >= 0; i-- {
+		fs.lockManager.Unlock(paths[i])
+	}
+}
+
+func removeFiles(paths []string) error {
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
@@ -540,8 +584,10 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 
 	// Collect keys to evict while holding the lock
 	var keysToEvict []string
+	projectedSize := fs.currentSize
+	scheduled := make(map[string]struct{})
 	if fs.capacity > 0 {
-		for fs.currentSize > fs.capacity {
+		for projectedSize > fs.capacity {
 			candidates := fs.policy.Evict()
 			if len(candidates) == 0 {
 				break
@@ -550,6 +596,9 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 			var filteredCandidates []string
 			for _, candidate := range candidates {
 				if candidate != key {
+					if _, alreadyScheduled := scheduled[candidate]; alreadyScheduled {
+						continue
+					}
 					filteredCandidates = append(filteredCandidates, candidate)
 				}
 			}
@@ -563,11 +612,10 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 
 			keysToEvict = append(keysToEvict, filteredCandidates...)
 
-			// Optimistically update size tracking
 			for _, keyToEvict := range filteredCandidates {
+				scheduled[keyToEvict] = struct{}{}
 				if size, exists := fs.fileSizes[keyToEvict]; exists {
-					fs.currentSize -= size
-					delete(fs.fileSizes, keyToEvict)
+					projectedSize -= size
 				}
 			}
 		}
@@ -576,52 +624,54 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 	fs.mu.Unlock()
 
 	// Perform actual file deletions without holding the mutex
+	heldSlots := map[uint64]struct{}{
+		fs.lockManager.getSlot(path): {},
+	}
 	for _, keyToEvict := range keysToEvict {
-		if err := fs.deleteFileOnly(keyToEvict); err != nil {
+		if err := fs.evictKey(keyToEvict, heldSlots); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to evict file", "key", keyToEvict, "err", err)
-			// Revert the optimistic update for this key
 			fs.mu.Lock()
-			if fileInfo, statErr := os.Stat(fs.toDataPath(keyToEvict)); statErr == nil {
-				fs.fileSizes[keyToEvict] = fileInfo.Size()
-				fs.currentSize += fileInfo.Size()
-				fs.policy.Add(keyToEvict, fileInfo.Size())
+			if size, exists := fs.fileSizes[keyToEvict]; exists {
+				fs.policy.Add(keyToEvict, size)
 			}
 			fs.mu.Unlock()
 		} else {
 			level.Debug(fs.logger).Log("msg", "file evicted", "key", keyToEvict)
-			fs.mu.Lock()
-			fs.policy.Remove(keyToEvict)
-			fs.mu.Unlock()
 		}
 	}
 
 	return nil
 }
 
-// deleteFileOnly removes a file from disk without updating internal tracking.
-// This is used during eviction when tracking has already been updated optimistically.
-func (fs *FileStore) deleteFileOnly(key string) error {
-	for _, path := range fs.dataPathCandidates(key) {
-		fs.lockManager.Lock(path)
-		err := os.Remove(path)
-		fs.lockManager.Unlock(path)
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove file during eviction: %w", err)
-		}
+func (fs *FileStore) evictKey(key string, heldSlots map[uint64]struct{}) error {
+	paths := fs.dataPathCandidates(key)
+	locked := fs.lockPaths(paths, heldSlots)
+	defer fs.unlockPaths(locked)
+
+	if err := removeFiles(paths); err != nil {
+		return fmt.Errorf("failed to remove file during eviction: %w", err)
 	}
+
+	fs.mu.Lock()
+	if size, exists := fs.fileSizes[key]; exists {
+		fs.currentSize -= size
+		delete(fs.fileSizes, key)
+	}
+	fs.policy.Remove(key)
+	fs.mu.Unlock()
 
 	return nil
 }
 
-func (fs *FileStore) removeLegacyPathOnly(key string) error {
+func (fs *FileStore) removeLegacyPathOnly(key string, heldSlots map[uint64]struct{}) error {
 	legacyPath := fs.legacyDataPath(key)
 	currentPath := fs.toDataPath(key)
 	if legacyPath == currentPath {
 		return nil
 	}
 
-	fs.lockManager.Lock(legacyPath)
-	defer fs.lockManager.Unlock(legacyPath)
+	locked := fs.lockPaths([]string{legacyPath}, heldSlots)
+	defer fs.unlockPaths(locked)
 
 	err := os.Remove(legacyPath)
 	if err != nil && !os.IsNotExist(err) {

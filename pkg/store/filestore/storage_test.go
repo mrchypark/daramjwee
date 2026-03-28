@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/policy"
 	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -120,6 +121,122 @@ func TestFileStore_Delete(t *testing.T) {
 
 	err = fs.Delete(ctx, key) // Deleting again should not error
 	require.NoError(t, err)
+}
+
+func TestFileStore_DeleteWaitsForPathLockBeforeUpdatingTracking(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "delete-blocked"
+
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("payload"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	path := fs.toDataPath(key)
+	fs.lockManager.Lock(path)
+	pathLocked := true
+	defer func() {
+		if pathLocked {
+			fs.lockManager.Unlock(path)
+		}
+	}()
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- fs.Delete(ctx, key)
+	}()
+
+	require.Eventually(t, func() bool {
+		fs.mu.RLock()
+		defer fs.mu.RUnlock()
+		_, exists := fs.fileSizes[key]
+		return exists && fs.currentSize > 0
+	}, time.Second, 10*time.Millisecond)
+
+	fs.lockManager.Unlock(path)
+	pathLocked = false
+	require.NoError(t, <-deleteDone)
+	fs.lockManager.Lock(path)
+	pathLocked = true
+
+	fs.mu.RLock()
+	_, exists := fs.fileSizes[key]
+	currentSize := fs.currentSize
+	fs.mu.RUnlock()
+	assert.False(t, exists)
+	assert.Zero(t, currentSize)
+}
+
+func TestFileStore_EvictionDoesNotDropTrackingBeforeFileRemoval(t *testing.T) {
+	fs := setupTestStore(t, WithEvictionPolicy(policy.NewLRU()))
+	ctx := context.Background()
+
+	keys := []string{"evict-victim", ""}
+	for i := 0; i < 32; i++ {
+		candidate := fmt.Sprintf("evict-trigger-%d", i)
+		if fs.lockManager.getSlot(fs.toDataPath(keys[0])) != fs.lockManager.getSlot(fs.toDataPath(candidate)) {
+			keys[1] = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, keys[1])
+	require.NotEqual(t, fs.lockManager.getSlot(fs.toDataPath(keys[0])), fs.lockManager.getSlot(fs.toDataPath(keys[1])))
+
+	first, err := fs.BeginSet(ctx, keys[0], &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte(strings.Repeat("a", 64)))
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	fs.mu.Lock()
+	fs.capacity = fs.currentSize + 1
+	fs.mu.Unlock()
+
+	victimPath := fs.toDataPath(keys[0])
+	fs.lockManager.Lock(victimPath)
+	victimLocked := true
+	defer func() {
+		if victimLocked {
+			fs.lockManager.Unlock(victimPath)
+		}
+	}()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writer, err := fs.BeginSet(ctx, keys[1], &daramjwee.Metadata{ETag: "v2"})
+		if err != nil {
+			writeDone <- err
+			return
+		}
+		if _, err := writer.Write([]byte(strings.Repeat("b", 64))); err != nil {
+			writeDone <- err
+			return
+		}
+		writeDone <- writer.Close()
+	}()
+
+	require.Eventually(t, func() bool {
+		fs.mu.RLock()
+		defer fs.mu.RUnlock()
+		_, victimExists := fs.fileSizes[keys[0]]
+		_, triggerExists := fs.fileSizes[keys[1]]
+		return victimExists && triggerExists && fs.currentSize > fs.capacity
+	}, time.Second, 10*time.Millisecond)
+
+	fs.lockManager.Unlock(victimPath)
+	victimLocked = false
+	require.NoError(t, <-writeDone)
+	fs.lockManager.Lock(victimPath)
+	victimLocked = true
+
+	fs.mu.RLock()
+	_, victimExists := fs.fileSizes[keys[0]]
+	_, triggerExists := fs.fileSizes[keys[1]]
+	fs.mu.RUnlock()
+	assert.False(t, victimExists)
+	assert.True(t, triggerExists)
 }
 
 // TestFileStore_Overwrite tests overwriting an existing object.

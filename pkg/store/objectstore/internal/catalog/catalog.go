@@ -9,6 +9,13 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
+var (
+	writeFileFn = os.WriteFile
+	renameFn    = os.Rename
+	syncPathFn  = syncPath
+	syncDirFn   = syncDir
+)
+
 type Entry struct {
 	SegmentPath  string             `json:"segment_path"`
 	Offset       int64              `json:"offset"`
@@ -80,11 +87,13 @@ func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) error {
 	} else {
 		delete(c.entries, key)
 	}
-	if err := c.persistLocked(); err != nil {
-		if ok {
-			c.entries[key] = current
-		} else {
-			delete(c.entries, key)
+	if committed, err := c.persistLocked(); err != nil {
+		if !committed {
+			if ok {
+				c.entries[key] = current
+			} else {
+				delete(c.entries, key)
+			}
 		}
 		return err
 	}
@@ -103,12 +112,14 @@ func (c *Catalog) UpdateMany(updates map[string]Entry) error {
 		existed[key] = ok
 		c.entries[key] = next
 	}
-	if err := c.persistLocked(); err != nil {
-		for key := range updates {
-			if existed[key] {
-				c.entries[key] = previous[key]
-			} else {
-				delete(c.entries, key)
+	if committed, err := c.persistLocked(); err != nil {
+		if !committed {
+			for key := range updates {
+				if existed[key] {
+					c.entries[key] = previous[key]
+				} else {
+					delete(c.entries, key)
+				}
 			}
 		}
 		return err
@@ -121,11 +132,13 @@ func (c *Catalog) Set(key string, entry Entry) error {
 	defer c.mu.Unlock()
 	prev, existed := c.entries[key]
 	c.entries[key] = entry
-	if err := c.persistLocked(); err != nil {
-		if existed {
-			c.entries[key] = prev
-		} else {
-			delete(c.entries, key)
+	if committed, err := c.persistLocked(); err != nil {
+		if !committed {
+			if existed {
+				c.entries[key] = prev
+			} else {
+				delete(c.entries, key)
+			}
 		}
 		return err
 	}
@@ -137,8 +150,8 @@ func (c *Catalog) Delete(key string) error {
 	defer c.mu.Unlock()
 	prev, existed := c.entries[key]
 	delete(c.entries, key)
-	if err := c.persistLocked(); err != nil {
-		if existed {
+	if committed, err := c.persistLocked(); err != nil {
+		if !committed && existed {
 			c.entries[key] = prev
 		}
 		return err
@@ -146,23 +159,28 @@ func (c *Catalog) Delete(key string) error {
 	return nil
 }
 
-func (c *Catalog) persistLocked() error {
+func (c *Catalog) persistLocked() (bool, error) {
 	data, err := json.Marshal(c.entries)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	tmpPath := c.path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return err
+	if err := writeFileFn(tmpPath, data, 0o644); err != nil {
+		return false, err
 	}
-	if err := syncPath(tmpPath); err != nil {
-		return err
+	if err := syncPathFn(tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return false, err
 	}
-	if err := os.Rename(tmpPath, c.path); err != nil {
-		return err
+	if err := renameFn(tmpPath, c.path); err != nil {
+		_ = os.Remove(tmpPath)
+		return false, err
 	}
-	return syncDir(filepath.Dir(c.path))
+	if err := syncDirFn(filepath.Dir(c.path)); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func syncPath(path string) error {
