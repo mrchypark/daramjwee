@@ -34,6 +34,17 @@ func (s *Store) loadCheckpointSnapshot(ctx context.Context, shardID string) (*ch
 	return &cp, nil
 }
 
+func decodeCheckpoint(reader io.Reader, cp *checkpoint) error {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, cp); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) loadRemoteEntry(ctx context.Context, key string) (*checkpointEntry, error) {
 	cp, err := s.loadCheckpointSnapshot(ctx, shardForKey(key))
 	if err != nil {

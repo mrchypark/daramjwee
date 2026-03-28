@@ -122,8 +122,8 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		now:             time.Now,
 	}
 	if store.initErr == nil {
-		if err := store.sweepOrphanedLocalSegments(); err != nil {
-			level.Warn(store.logger).Log("msg", "failed to sweep orphaned local segments", "dir", store.dataDir, "err", err)
+		if err := store.recoverLocalState(); err != nil {
+			level.Warn(store.logger).Log("msg", "failed to recover local objectstore state", "dir", store.dataDir, "err", err)
 		}
 	}
 	return store
@@ -448,8 +448,8 @@ func openLocalEntry(entry localCatalogEntry) (io.ReadCloser, error) {
 	return &fileSectionReadCloser{Reader: section, file: file}, nil
 }
 
-func blobTimestampFromPath(blobPath string) (time.Time, bool) {
-	version := strings.TrimSuffix(path.Base(blobPath), ".data")
+func objectTimestampFromPath(objectPath string) (time.Time, bool) {
+	version := strings.TrimSuffix(path.Base(objectPath), path.Ext(objectPath))
 	sep := strings.IndexByte(version, '-')
 	if sep <= 0 {
 		return time.Time{}, false
@@ -459,6 +459,10 @@ func blobTimestampFromPath(blobPath string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(0, nanos), true
+}
+
+func blobTimestampFromPath(blobPath string) (time.Time, bool) {
+	return objectTimestampFromPath(blobPath)
 }
 
 type keyLockManager struct {
