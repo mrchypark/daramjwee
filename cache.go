@@ -353,7 +353,7 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 				stream.Close()
 				return nil, ErrNotFound
 			}
-			return newCancelReadCloser(stream, cancel), nil
+			return newCancelOnCloseReadCloser(stream, cancel), nil
 		}
 		return nil, err
 	}
@@ -537,33 +537,6 @@ func (c *DaramjweeCache) publishEmptyThrough(sink WriteSink, cancel func(), onPu
 }
 
 // cancelWriteCloser cancels the context when the WriteCloser is closed.
-type cancelReadCloser struct {
-	io.ReadCloser
-	cancel    context.CancelFunc
-	closeOnce sync.Once
-	closeErr  error
-}
-
-func newCancelReadCloser(rc io.ReadCloser, cancel context.CancelFunc) io.ReadCloser {
-	return &cancelReadCloser{ReadCloser: rc, cancel: cancel}
-}
-
-func (crc *cancelReadCloser) Read(p []byte) (n int, err error) {
-	n, err = crc.ReadCloser.Read(p)
-	if err == io.EOF {
-		_ = crc.Close()
-	}
-	return n, err
-}
-
-func (crc *cancelReadCloser) Close() error {
-	crc.closeOnce.Do(func() {
-		defer crc.cancel()
-		crc.closeErr = crc.ReadCloser.Close()
-	})
-	return crc.closeErr
-}
-
 // safeCloser wraps an io.ReadCloser and executes a callback function upon Close.
 // It automatically closes when EOF is reached and prevents duplicate closes using sync.Once.
 type safeCloser struct {

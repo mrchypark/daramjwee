@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,6 +218,29 @@ func TestCache_PublishFailureDoesNotScheduleColdPersist(t *testing.T) {
 	}, 200*time.Millisecond, 20*time.Millisecond)
 }
 
+func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
+	hot := &statOnlyThenReadableStore{
+		data: []byte("cached-value"),
+		meta: &daramjwee.Metadata{ETag: "v1"},
+	}
+	fetcher := &errFetcher{err: daramjwee.ErrNotModified}
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(2*time.Second))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "not-modified-key", fetcher)
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "cached-value", string(body))
+	assert.Equal(t, 0, hot.closeCount(), "stream should remain open until caller closes it")
+
+	require.NoError(t, stream.Close())
+	assert.Equal(t, 1, hot.closeCount(), "explicit close should close the underlying hot stream exactly once")
+}
+
 type getResult struct {
 	stream io.ReadCloser
 	err    error
@@ -259,6 +284,64 @@ type discardSink struct{}
 func (s *discardSink) Write(p []byte) (int, error) { return len(p), nil }
 func (s *discardSink) Close() error                { return nil }
 func (s *discardSink) Abort() error                { return nil }
+
+type errFetcher struct {
+	err error
+}
+
+func (f *errFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	return nil, f.err
+}
+
+type closeTrackingReadCloser struct {
+	*bytes.Reader
+	once    sync.Once
+	onClose func()
+}
+
+func (r *closeTrackingReadCloser) Close() error {
+	r.once.Do(func() {
+		if r.onClose != nil {
+			r.onClose()
+		}
+	})
+	return nil
+}
+
+type statOnlyThenReadableStore struct {
+	data     []byte
+	meta     *daramjwee.Metadata
+	getCalls int32
+	closed   int32
+}
+
+func (s *statOnlyThenReadableStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	if atomic.AddInt32(&s.getCalls, 1) == 1 {
+		return nil, nil, daramjwee.ErrNotFound
+	}
+	return &closeTrackingReadCloser{
+		Reader: bytes.NewReader(s.data),
+		onClose: func() {
+			atomic.AddInt32(&s.closed, 1)
+		},
+	}, s.meta, nil
+}
+
+func (s *statOnlyThenReadableStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return &discardSink{}, nil
+}
+
+func (s *statOnlyThenReadableStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s *statOnlyThenReadableStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	return s.meta, nil
+}
+
+func (s *statOnlyThenReadableStore) closeCount() int {
+	return int(atomic.LoadInt32(&s.closed))
+}
 
 type blockingReadCloser struct {
 	first     []byte
