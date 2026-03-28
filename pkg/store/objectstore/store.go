@@ -20,6 +20,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/blockcache"
 	internalcatalog "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/catalog"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/pagecache"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/rangeio"
@@ -57,9 +58,11 @@ type Store struct {
 	packedThreshold int64
 	wholeThreshold  int64
 	pageSize        int64
+	blockCache      *blockcache.Cache
 	pageCache       *pagecache.Cache
 	catalog         *internalcatalog.Catalog
 	lockManager     *keyLockManager
+	blockLoads      singleflight.Group
 	pageLoads       singleflight.Group
 	versionSeq      atomic.Uint64
 	initErr         error
@@ -109,6 +112,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		packedThreshold: cfg.packedObjectThreshold,
 		wholeThreshold:  cfg.wholeThreshold,
 		pageSize:        cfg.pageSize,
+		blockCache:      blockcache.New(cfg.memoryBlockCacheBytes),
 		pageCache:       pagecache.New(cfg.memoryPageCacheBytes),
 		catalog:         cat,
 		lockManager:     newKeyLockManager(2048),

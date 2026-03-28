@@ -12,6 +12,7 @@ type config struct {
 	wholeThreshold        int64
 	pageSize              int64
 	memoryPageCacheBytes  int64
+	memoryBlockCacheBytes int64
 }
 
 // WithDataDir configures the local objectstore working directory used for
@@ -66,5 +67,13 @@ func WithPageSize(size int64) Option {
 func WithMemoryPageCache(capacityBytes int64) Option {
 	return func(cfg *config) {
 		cfg.memoryPageCacheBytes = capacityBytes
+	}
+}
+
+// WithMemoryBlockCache enables in-memory block caching with the provided byte capacity.
+// A non-positive capacity disables the block cache.
+func WithMemoryBlockCache(capacityBytes int64) Option {
+	return func(cfg *config) {
+		cfg.memoryBlockCacheBytes = capacityBytes
 	}
 }

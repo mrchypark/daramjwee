@@ -12,12 +12,12 @@ import (
 )
 
 func BenchmarkStore_ReadCold(b *testing.B) {
-	store := benchmarkStore(false)
+	store := benchmarkStore(b, false)
 	benchmarkReadAll(b, store, "bench-key")
 }
 
 func BenchmarkStore_ReadWarm(b *testing.B) {
-	store := benchmarkStore(true)
+	store := benchmarkStore(b, true)
 	stream, _, err := store.GetStream(context.Background(), "bench-key")
 	if err != nil {
 		b.Fatal(err)
@@ -32,16 +32,19 @@ func BenchmarkStore_ReadWarm(b *testing.B) {
 	benchmarkReadAll(b, store, "bench-key")
 }
 
-func benchmarkStore(enableCache bool) *Store {
+func benchmarkStore(b *testing.B, enableCache bool) *Store {
+	bucket := objstore.NewInMemBucket()
 	opts := []Option{
-		WithWholeObjectThreshold(32 << 10),
+		WithPackedObjectThreshold(1 << 20),
 		WithPageSize(32 << 10),
+		WithDataDir(b.TempDir()),
 	}
 	if enableCache {
-		opts = append(opts, WithMemoryPageCache(4<<20))
+		opts = append(opts, WithMemoryBlockCache(4<<20))
 	}
 
-	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), opts...)
+	store := New(bucket, log.NewNopLogger(), opts...)
+	store.autoFlush = false
 	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{ETag: "bench"})
 	if err != nil {
 		panic(err)
@@ -52,7 +55,21 @@ func benchmarkStore(enableCache bool) *Store {
 	if err := writer.Close(); err != nil {
 		panic(err)
 	}
-	return store
+	if err := store.flushPending(context.Background()); err != nil {
+		panic(err)
+	}
+
+	remoteOpts := []Option{
+		WithPackedObjectThreshold(1 << 20),
+		WithPageSize(32 << 10),
+		WithDataDir(b.TempDir()),
+	}
+	if enableCache {
+		remoteOpts = append(remoteOpts, WithMemoryBlockCache(4<<20))
+	}
+	remote := New(bucket, log.NewNopLogger(), remoteOpts...)
+	remote.autoFlush = false
+	return remote
 }
 
 func benchmarkReadAll(b *testing.B, store *Store, key string) {
