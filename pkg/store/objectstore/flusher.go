@@ -3,6 +3,7 @@ package objectstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"slices"
@@ -108,12 +109,17 @@ func (s *Store) requeueShards(shards []string) {
 
 func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	currentEntries := s.catalog.Entries()
+	baseEntries, err := s.loadCheckpointEntries(ctx, shardID)
+	if err != nil {
+		return err
+	}
 	records, err := s.pendingRecordsForShard(shardID, currentEntries)
 	if err != nil {
 		return err
 	}
+	mergedEntries := mergeCheckpointEntries(baseEntries, currentEntries, shardID)
 	if len(records) == 0 {
-		return s.publishCheckpoint(ctx, shardID, currentEntries)
+		return s.publishCheckpoint(ctx, shardID, mergedEntries)
 	}
 
 	segmentID := s.nextVersion()
@@ -141,7 +147,6 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	}
 
 	updates := make(map[string]localCatalogEntry, len(records))
-	mergedEntries := mapsClone(currentEntries)
 	for _, record := range records {
 		current, ok := currentEntries[record.key]
 		if !ok || current.Missing || current.SegmentPath != record.entry.SegmentPath {
@@ -150,7 +155,12 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 		current.RemotePath = remotePath
 		current.RemoteOffset = offsets[record.key]
 		updates[record.key] = current
-		mergedEntries[record.key] = current
+		mergedEntries[record.key] = checkpointEntry{
+			SegmentPath: current.RemotePath,
+			Offset:      current.RemoteOffset,
+			Length:      current.Length,
+			Metadata:    current.Metadata,
+		}
 	}
 
 	if err := s.publishCheckpoint(ctx, shardID, mergedEntries); err != nil {
@@ -182,21 +192,54 @@ func (s *Store) pendingRecordsForShard(shardID string, entries map[string]localC
 	return records, nil
 }
 
-func (s *Store) publishCheckpoint(ctx context.Context, shardID string, entries map[string]localCatalogEntry) error {
-	payload := checkpoint{
-		UpdatedAt: s.now(),
-		Entries:   make(map[string]checkpointEntry),
+func (s *Store) loadCheckpointEntries(ctx context.Context, shardID string) (map[string]checkpointEntry, error) {
+	cp, err := s.loadCheckpointSnapshot(ctx, shardID)
+	if err != nil {
+		if errors.Is(err, daramjwee.ErrNotFound) {
+			return make(map[string]checkpointEntry), nil
+		}
+		return nil, err
 	}
-	for key, entry := range entries {
-		if shardForKey(key) != shardID || entry.Missing || entry.RemotePath == "" {
+	entries := make(map[string]checkpointEntry, len(cp.Entries))
+	for key, entry := range cp.Entries {
+		entries[key] = entry
+	}
+	return entries, nil
+}
+
+func mergeCheckpointEntries(base map[string]checkpointEntry, locals map[string]localCatalogEntry, shardID string) map[string]checkpointEntry {
+	merged := make(map[string]checkpointEntry, len(base)+len(locals))
+	for key, entry := range base {
+		merged[key] = entry
+	}
+	for key, entry := range locals {
+		if shardForKey(key) != shardID {
 			continue
 		}
-		payload.Entries[key] = checkpointEntry{
+		if entry.Missing {
+			delete(merged, key)
+			continue
+		}
+		if entry.RemotePath == "" {
+			continue
+		}
+		merged[key] = checkpointEntry{
 			SegmentPath: entry.RemotePath,
 			Offset:      entry.RemoteOffset,
 			Length:      entry.Length,
 			Metadata:    entry.Metadata,
 		}
+	}
+	return merged
+}
+
+func (s *Store) publishCheckpoint(ctx context.Context, shardID string, entries map[string]checkpointEntry) error {
+	payload := checkpoint{
+		UpdatedAt: s.now(),
+		Entries:   make(map[string]checkpointEntry, len(entries)),
+	}
+	for key, entry := range entries {
+		payload.Entries[key] = entry
 	}
 
 	data, err := json.Marshal(payload)
@@ -204,12 +247,4 @@ func (s *Store) publishCheckpoint(ctx context.Context, shardID string, entries m
 		return err
 	}
 	return s.bucket.Upload(ctx, internalshard.CheckpointObjectPath(s.prefix, shardID), bytes.NewReader(data))
-}
-
-func mapsClone(entries map[string]localCatalogEntry) map[string]localCatalogEntry {
-	cloned := make(map[string]localCatalogEntry, len(entries))
-	for key, entry := range entries {
-		cloned[key] = entry
-	}
-	return cloned
 }

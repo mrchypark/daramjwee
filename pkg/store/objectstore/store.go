@@ -142,34 +142,44 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		return stream, cloneMetadata(&entry.Metadata), nil
 	}
 
-	m, err := s.loadManifest(ctx, key)
+	entry, err := s.loadRemoteEntry(ctx, key)
 	if err != nil {
-		return nil, nil, err
-	}
-
-	if m.Layout == layoutPaged {
-		pageSize := m.PageSize
-		if pageSize <= 0 {
-			pageSize = s.pageSize
+		if !errors.Is(err, daramjwee.ErrNotFound) {
+			return nil, nil, err
 		}
-		pagedCtx, cancel := context.WithCancel(ctx)
-		reader := rangeio.New(m.Size, pageSize, func(pageIndex int64) ([]byte, error) {
-			return s.loadPage(pagedCtx, m, pageIndex)
-		}, func() error {
-			cancel()
-			return nil
-		})
+		m, manifestErr := s.loadManifest(ctx, key)
+		if manifestErr != nil {
+			return nil, nil, manifestErr
+		}
+		if m.Layout == layoutPaged {
+			pageSize := m.PageSize
+			if pageSize <= 0 {
+				pageSize = s.pageSize
+			}
+			pagedCtx, cancel := context.WithCancel(ctx)
+			reader := rangeio.New(m.Size, pageSize, func(pageIndex int64) ([]byte, error) {
+				return s.loadPage(pagedCtx, m, pageIndex)
+			}, func() error {
+				cancel()
+				return nil
+			})
+			return reader, cloneMetadata(&m.Metadata), nil
+		}
+
+		reader, manifestErr := s.bucket.Get(ctx, m.BlobPath)
+		if manifestErr != nil {
+			if s.bucket.IsObjNotFoundErr(manifestErr) {
+				return nil, nil, fmt.Errorf("objectstore: manifest for %q points to missing blob %q: %w", key, m.BlobPath, manifestErr)
+			}
+			return nil, nil, manifestErr
+		}
 		return reader, cloneMetadata(&m.Metadata), nil
 	}
-
-	reader, err := s.bucket.Get(ctx, m.BlobPath)
+	reader, err := s.openRemoteEntry(ctx, *entry)
 	if err != nil {
-		if s.bucket.IsObjNotFoundErr(err) {
-			return nil, nil, fmt.Errorf("objectstore: manifest for %q points to missing blob %q: %w", key, m.BlobPath, err)
-		}
 		return nil, nil, err
 	}
-	return reader, cloneMetadata(&m.Metadata), nil
+	return reader, cloneMetadata(&entry.Metadata), nil
 }
 
 // BeginSet starts a staged write for a new immutable generation.
@@ -206,15 +216,20 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	s.lockManager.Lock(key)
 	defer s.lockManager.Unlock(key)
 
-	prev, _, err := s.loadLocalEntry(key)
+	prev, ok, err := s.loadLocalEntry(key)
 	if err != nil {
 		return err
 	}
-	if err := s.deleteLocalEntry(key); err != nil {
+	tombstone := localCatalogEntry{Missing: true}
+	if ok {
+		tombstone.Metadata = prev.Metadata
+	}
+	if err := s.publishLocalEntry(key, tombstone); err != nil {
 		return err
 	}
-	if prev.RemotePath != "" || prev.Missing {
-		s.enqueueFlush(key)
+	s.enqueueFlush(key)
+	if err := s.flushPending(ctx); err != nil {
+		return err
 	}
 
 	err = s.bucket.Delete(ctx, s.manifestPath(key))
@@ -239,11 +254,18 @@ func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, erro
 		return cloneMetadata(&entry.Metadata), nil
 	}
 
-	m, err := s.loadManifest(ctx, key)
+	entry, err := s.loadRemoteEntry(ctx, key)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, daramjwee.ErrNotFound) {
+			return nil, err
+		}
+		m, manifestErr := s.loadManifest(ctx, key)
+		if manifestErr != nil {
+			return nil, manifestErr
+		}
+		return cloneMetadata(&m.Metadata), nil
 	}
-	return cloneMetadata(&m.Metadata), nil
+	return cloneMetadata(&entry.Metadata), nil
 }
 
 func (s *Store) ensureReady() error {
