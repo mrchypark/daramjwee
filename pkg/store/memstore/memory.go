@@ -10,13 +10,6 @@ import (
 )
 
 var (
-	writerPool = sync.Pool{
-		New: func() any {
-			return &memStoreSink{
-				buf: bytes.NewBuffer(make([]byte, 0, 1024)), // Pre-allocate buffer
-			}
-		},
-	}
 	bufferPool = sync.Pool{
 		New: func() any {
 			return new(bytes.Buffer)
@@ -75,11 +68,14 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 // BeginSet returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
 func (ms *MemStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
-	w := writerPool.Get().(*memStoreSink)
-	w.ms = ms
-	w.key = key
-	w.metadata = metadata
-	w.done = false
+	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	w := &memStoreSink{
+		ms:       ms,
+		key:      key,
+		metadata: metadata,
+		buf:      buf,
+	}
 	return w, nil
 }
 
@@ -207,10 +203,14 @@ func (w *memStoreSink) Abort() error {
 }
 
 func (w *memStoreSink) release() {
+	if w.buf != nil {
+		w.buf.Reset()
+		bufferPool.Put(w.buf)
+		w.buf = nil
+	}
 	w.ms = nil
 	w.key = ""
 	w.metadata = nil
-	writerPool.Put(w)
 }
 
 func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {

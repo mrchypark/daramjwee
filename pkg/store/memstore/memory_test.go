@@ -517,6 +517,35 @@ func TestMemStore_NormalizesNilMetadataToEmptyMetadata(t *testing.T) {
 	assert.True(t, statMeta.CachedAt.IsZero())
 }
 
+func TestMemStore_OldSinkTerminalCallsDoNotAffectNewWrite(t *testing.T) {
+	ctx := context.Background()
+	store := New(0, nil)
+
+	first, err := store.BeginSet(ctx, "first", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte("first-value"))
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	second, err := store.BeginSet(ctx, "second", &daramjwee.Metadata{ETag: "v2"})
+	require.NoError(t, err)
+	_, err = second.Write([]byte("second-value"))
+	require.NoError(t, err)
+
+	require.NoError(t, first.Abort())
+	require.NoError(t, second.Close())
+
+	reader, meta, err := store.GetStream(ctx, "second")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, "second-value", string(body))
+	require.NotNil(t, meta)
+	require.Equal(t, "v2", meta.ETag)
+}
+
 func TestMemStore_ReturnsMetadataCopies(t *testing.T) {
 	ctx := context.Background()
 	store := New(0, nil)
