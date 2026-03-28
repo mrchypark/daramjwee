@@ -49,25 +49,26 @@ type manifest struct {
 // Store is a first-party object storage backend.
 // It currently publishes immutable blob versions via internal manifest pointers.
 type Store struct {
-	bucket         objstore.Bucket
-	logger         log.Logger
-	dataDir        string
-	prefix         string
-	defaultGCGrace time.Duration
-	wholeThreshold int64
-	pageSize       int64
-	pageCache      *pagecache.Cache
-	catalog        *internalcatalog.Catalog
-	lockManager    *keyLockManager
-	pageLoads      singleflight.Group
-	versionSeq     atomic.Uint64
-	initErr        error
-	flushMu        sync.Mutex
-	flushRunMu     sync.Mutex
-	pendingShards  map[string]struct{}
-	flushTimer     *time.Timer
-	autoFlush      bool
-	now            func() time.Time
+	bucket          objstore.Bucket
+	logger          log.Logger
+	dataDir         string
+	prefix          string
+	defaultGCGrace  time.Duration
+	packedThreshold int64
+	wholeThreshold  int64
+	pageSize        int64
+	pageCache       *pagecache.Cache
+	catalog         *internalcatalog.Catalog
+	lockManager     *keyLockManager
+	pageLoads       singleflight.Group
+	versionSeq      atomic.Uint64
+	initErr         error
+	flushMu         sync.Mutex
+	flushRunMu      sync.Mutex
+	pendingShards   map[string]struct{}
+	flushTimer      *time.Timer
+	autoFlush       bool
+	now             func() time.Time
 }
 
 var _ daramjwee.Store = (*Store)(nil)
@@ -100,20 +101,21 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		cat, initErr = internalcatalog.Open(filepath.Join(dataDir, "catalog"))
 	}
 	store := &Store{
-		bucket:         bucket,
-		logger:         logger,
-		dataDir:        dataDir,
-		prefix:         trimSlashes(cfg.prefix),
-		defaultGCGrace: cfg.defaultGCGrace,
-		wholeThreshold: cfg.wholeThreshold,
-		pageSize:       cfg.pageSize,
-		pageCache:      pagecache.New(cfg.memoryPageCacheBytes),
-		catalog:        cat,
-		lockManager:    newKeyLockManager(2048),
-		initErr:        initErr,
-		pendingShards:  make(map[string]struct{}),
-		autoFlush:      true,
-		now:            time.Now,
+		bucket:          bucket,
+		logger:          logger,
+		dataDir:         dataDir,
+		prefix:          trimSlashes(cfg.prefix),
+		defaultGCGrace:  cfg.defaultGCGrace,
+		packedThreshold: cfg.packedObjectThreshold,
+		wholeThreshold:  cfg.wholeThreshold,
+		pageSize:        cfg.pageSize,
+		pageCache:       pagecache.New(cfg.memoryPageCacheBytes),
+		catalog:         cat,
+		lockManager:     newKeyLockManager(2048),
+		initErr:         initErr,
+		pendingShards:   make(map[string]struct{}),
+		autoFlush:       true,
+		now:             time.Now,
 	}
 	if store.initErr == nil {
 		if err := store.sweepOrphanedLocalSegments(); err != nil {

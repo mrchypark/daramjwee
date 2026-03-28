@@ -122,44 +122,21 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 		return s.publishCheckpoint(ctx, shardID, mergedEntries)
 	}
 
-	segmentID := s.nextVersion()
-	remotePath := internalshard.SegmentObjectPath(s.prefix, shardID, segmentID)
-
-	payload := bytes.NewBuffer(nil)
-	offsets := make(map[string]int64, len(records))
-	for _, record := range records {
-		offsets[record.key] = int64(payload.Len())
-		file, err := os.Open(record.entry.SegmentPath)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(payload, io.NewSectionReader(file, record.entry.Offset, record.entry.Length)); err != nil {
-			_ = file.Close()
-			return err
-		}
-		if err := file.Close(); err != nil {
-			return err
-		}
-	}
-
-	if err := s.bucket.Upload(ctx, remotePath, bytes.NewReader(payload.Bytes())); err != nil {
-		return err
-	}
-
 	updates := make(map[string]localCatalogEntry, len(records))
+	packedRecords := make([]pendingFlushRecord, 0, len(records))
 	for _, record := range records {
-		current, ok := currentEntries[record.key]
-		if !ok || current.Missing || current.SegmentPath != record.entry.SegmentPath {
+		if s.shouldUploadDirect(record.entry) {
+			if err := s.flushDirectRecord(ctx, record, currentEntries, updates, mergedEntries); err != nil {
+				return err
+			}
 			continue
 		}
-		current.RemotePath = remotePath
-		current.RemoteOffset = offsets[record.key]
-		updates[record.key] = current
-		mergedEntries[record.key] = checkpointEntry{
-			SegmentPath: current.RemotePath,
-			Offset:      current.RemoteOffset,
-			Length:      current.Length,
-			Metadata:    current.Metadata,
+		packedRecords = append(packedRecords, record)
+	}
+
+	if len(packedRecords) > 0 {
+		if err := s.flushPackedRecords(ctx, shardID, packedRecords, currentEntries, updates, mergedEntries); err != nil {
+			return err
 		}
 	}
 
@@ -190,6 +167,95 @@ func (s *Store) pendingRecordsForShard(shardID string, entries map[string]localC
 		return strings.Compare(a.key, b.key)
 	})
 	return records, nil
+}
+
+func (s *Store) shouldUploadDirect(entry localCatalogEntry) bool {
+	return s.packedThreshold > 0 && entry.Length > s.packedThreshold
+}
+
+func (s *Store) flushPackedRecords(
+	ctx context.Context,
+	shardID string,
+	records []pendingFlushRecord,
+	currentEntries map[string]localCatalogEntry,
+	updates map[string]localCatalogEntry,
+	mergedEntries map[string]checkpointEntry,
+) error {
+	segmentID := s.nextVersion()
+	remotePath := internalshard.SegmentObjectPath(s.prefix, shardID, segmentID)
+
+	payload := bytes.NewBuffer(nil)
+	offsets := make(map[string]int64, len(records))
+	for _, record := range records {
+		offsets[record.key] = int64(payload.Len())
+		file, err := os.Open(record.entry.SegmentPath)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(payload, io.NewSectionReader(file, record.entry.Offset, record.entry.Length)); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+
+	if err := s.bucket.Upload(ctx, remotePath, bytes.NewReader(payload.Bytes())); err != nil {
+		return err
+	}
+
+	for _, record := range records {
+		current, ok := currentEntries[record.key]
+		if !ok || current.Missing || current.SegmentPath != record.entry.SegmentPath {
+			continue
+		}
+		current.RemotePath = remotePath
+		current.RemoteOffset = offsets[record.key]
+		updates[record.key] = current
+		mergedEntries[record.key] = checkpointEntry{
+			SegmentPath: current.RemotePath,
+			Offset:      current.RemoteOffset,
+			Length:      current.Length,
+			Metadata:    current.Metadata,
+		}
+	}
+	return nil
+}
+
+func (s *Store) flushDirectRecord(
+	ctx context.Context,
+	record pendingFlushRecord,
+	currentEntries map[string]localCatalogEntry,
+	updates map[string]localCatalogEntry,
+	mergedEntries map[string]checkpointEntry,
+) error {
+	current, ok := currentEntries[record.key]
+	if !ok || current.Missing || current.SegmentPath != record.entry.SegmentPath {
+		return nil
+	}
+
+	remotePath := s.blobPath(record.key, s.nextVersion())
+	file, err := os.Open(record.entry.SegmentPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if err := s.bucket.Upload(ctx, remotePath, io.NewSectionReader(file, record.entry.Offset, record.entry.Length)); err != nil {
+		return err
+	}
+
+	current.RemotePath = remotePath
+	current.RemoteOffset = 0
+	updates[record.key] = current
+	mergedEntries[record.key] = checkpointEntry{
+		SegmentPath: current.RemotePath,
+		Offset:      0,
+		Length:      current.Length,
+		Metadata:    current.Metadata,
+	}
+	return nil
 }
 
 func (s *Store) loadCheckpointEntries(ctx context.Context, shardID string) (map[string]checkpointEntry, error) {
