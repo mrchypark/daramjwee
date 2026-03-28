@@ -36,6 +36,17 @@ type FileStore struct {
 
 var _ daramjwee.TierValidator = (*FileStore)(nil)
 
+type dataPathCandidate struct {
+	path      string
+	isLegacy  bool
+	ambiguous bool
+}
+
+type storedMetadata struct {
+	daramjwee.Metadata
+	StoredKey string `json:"__stored_key,omitempty"`
+}
+
 // Option configures the FileStore.
 type Option func(*FileStore)
 
@@ -108,28 +119,33 @@ func (fs *FileStore) ValidateTier(index int) error {
 // GetStream reads an object from the store.
 // It returns an io.ReadCloser, the object's metadata, and an error if any.
 func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	for _, path := range fs.dataPathCandidates(key) {
-		fs.lockManager.RLock(path)
+	for _, candidate := range fs.dataPathCandidates(key) {
+		fs.lockManager.RLock(candidate.path)
 
-		file, err := os.Open(path)
+		file, err := os.Open(candidate.path)
 		if err != nil {
-			fs.lockManager.RUnlock(path)
+			fs.lockManager.RUnlock(candidate.path)
 			if os.IsNotExist(err) {
 				continue
 			}
 			return nil, nil, err
 		}
 
-		meta, dataOffset, err := readMetadata(file)
+		meta, storedKey, dataOffset, err := readStoredMetadata(file)
 		if err != nil {
 			file.Close()
-			fs.lockManager.RUnlock(path)
+			fs.lockManager.RUnlock(candidate.path)
 			return nil, nil, err
+		}
+		if !fs.candidateMatchesKey(candidate, key, storedKey) {
+			file.Close()
+			fs.lockManager.RUnlock(candidate.path)
+			continue
 		}
 
 		if _, err := file.Seek(dataOffset, io.SeekStart); err != nil {
 			file.Close()
-			fs.lockManager.RUnlock(path)
+			fs.lockManager.RUnlock(candidate.path)
 			return nil, nil, fmt.Errorf("failed to seek to data section: %w", err)
 		}
 
@@ -138,7 +154,7 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 		fs.policy.Touch(key)
 		fs.mu.Unlock()
 
-		return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
+		return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(candidate.path) }), meta, nil
 	}
 	return nil, nil, daramjwee.ErrNotFound
 }
@@ -163,7 +179,7 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 	}
 
 	// Write metadata to the temporary file first.
-	if err := writeMetadata(tmpFile, metadata); err != nil {
+	if err := writeStoredMetadata(tmpFile, key, metadata); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
 		fs.lockManager.Unlock(path)
@@ -228,11 +244,16 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 
 // Delete removes an object from the store.
 func (fs *FileStore) Delete(ctx context.Context, key string) error {
-	paths := fs.dataPathCandidates(key)
+	candidates := fs.dataPathCandidates(key)
+	paths := candidatePaths(candidates)
 	locked := fs.lockPaths(paths, nil)
 	defer fs.unlockPaths(locked)
 
-	if err := removeFiles(paths); err != nil {
+	removablePaths, err := fs.deletablePaths(candidates, key)
+	if err != nil {
+		return err
+	}
+	if err := removeFiles(removablePaths); err != nil {
 		return err
 	}
 
@@ -249,26 +270,29 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 
 // Stat reads the metadata of an object without reading the data.
 func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	for _, path := range fs.dataPathCandidates(key) {
-		fs.lockManager.RLock(path)
+	for _, candidate := range fs.dataPathCandidates(key) {
+		fs.lockManager.RLock(candidate.path)
 
-		file, err := os.Open(path)
+		file, err := os.Open(candidate.path)
 		if err != nil {
-			fs.lockManager.RUnlock(path)
+			fs.lockManager.RUnlock(candidate.path)
 			if os.IsNotExist(err) {
 				continue
 			}
 			return nil, err
 		}
 
-		meta, _, err := readMetadata(file)
+		meta, storedKey, _, err := readStoredMetadata(file)
 		closeErr := file.Close()
-		fs.lockManager.RUnlock(path)
+		fs.lockManager.RUnlock(candidate.path)
 		if err != nil {
 			return nil, err
 		}
 		if closeErr != nil {
 			return nil, closeErr
+		}
+		if !fs.candidateMatchesKey(candidate, key, storedKey) {
+			continue
 		}
 
 		// Access via Stat should also be considered a "touch"
@@ -329,20 +353,74 @@ func (fs *FileStore) legacyDataPath(key string) string {
 	return fullPath
 }
 
-func (fs *FileStore) dataPathCandidates(key string) []string {
+func (fs *FileStore) dataPathCandidates(key string) []dataPathCandidate {
 	encodedPath := fs.toDataPath(key)
 	legacyPath := fs.legacyDataPath(key)
 	if legacyPath == encodedPath {
-		return []string{encodedPath}
+		return []dataPathCandidate{{path: encodedPath}}
 	}
-	if fs.isAmbiguousLegacyPath(legacyPath) {
-		return []string{encodedPath}
+	return []dataPathCandidate{
+		{path: encodedPath},
+		{path: legacyPath, isLegacy: true, ambiguous: fs.isAmbiguousLegacyPath(legacyPath)},
 	}
-	return []string{encodedPath, legacyPath}
 }
 
 func (fs *FileStore) isAmbiguousLegacyPath(path string) bool {
 	return filepath.Dir(path) == fs.baseDir && strings.HasPrefix(filepath.Base(path), "b64_")
+}
+
+func candidatePaths(candidates []dataPathCandidate) []string {
+	paths := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		paths = append(paths, candidate.path)
+	}
+	return paths
+}
+
+func (fs *FileStore) candidateMatchesKey(candidate dataPathCandidate, key, storedKey string) bool {
+	if !candidate.isLegacy || !candidate.ambiguous {
+		return true
+	}
+	if storedKey == "" {
+		return true
+	}
+	return storedKey == key
+}
+
+func (fs *FileStore) deletablePaths(candidates []dataPathCandidate, key string) ([]string, error) {
+	removable := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if !candidate.isLegacy || !candidate.ambiguous {
+			removable = append(removable, candidate.path)
+			continue
+		}
+
+		storedKey, err := fs.readStoredKeyForCandidate(candidate.path)
+		if err != nil {
+			return nil, err
+		}
+		if fs.candidateMatchesKey(candidate, key, storedKey) {
+			removable = append(removable, candidate.path)
+		}
+	}
+	return removable, nil
+}
+
+func (fs *FileStore) readStoredKeyForCandidate(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer file.Close()
+
+	_, storedKey, _, err := readStoredMetadata(file)
+	if err != nil {
+		return "", err
+	}
+	return storedKey, nil
 }
 
 func (fs *FileStore) lockPaths(paths []string, heldSlots map[uint64]struct{}) []string {
@@ -398,6 +476,17 @@ func removeFiles(paths []string) error {
 
 // writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
 func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
+	return writeStoredMetadataEnvelope(w, storedMetadata{Metadata: derefMetadata(meta)})
+}
+
+func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata) error {
+	return writeStoredMetadataEnvelope(w, storedMetadata{
+		Metadata:  derefMetadata(meta),
+		StoredKey: key,
+	})
+}
+
+func writeStoredMetadataEnvelope(w io.Writer, meta storedMetadata) error {
 	metaBytes, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
@@ -415,36 +504,48 @@ func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 	return nil
 }
 
+func derefMetadata(meta *daramjwee.Metadata) daramjwee.Metadata {
+	if meta == nil {
+		return daramjwee.Metadata{}
+	}
+	return *meta
+}
+
 // readMetadata reads metadata from a reader.
 // It expects the metadata length as a uint32 prefix, followed by the JSON-encoded metadata.
 // It returns the metadata, the offset where the data begins, and an error if any.
 func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
+	meta, _, dataOffset, err := readStoredMetadata(r)
+	return meta, dataOffset, err
+}
+
+func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, int64, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(r, lenBuf); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
+			return nil, "", 0, daramjwee.ErrNotFound // Treat empty/short files as not found
 		}
-		return nil, 0, fmt.Errorf("failed to read metadata length: %w", err)
+		return nil, "", 0, fmt.Errorf("failed to read metadata length: %w", err)
 	}
 
 	metaLen := binary.BigEndian.Uint32(lenBuf)
 	// Add a sanity check for metaLen to avoid allocating huge buffers
 	if metaLen > 10*1024*1024 { // 10MB limit for metadata
-		return nil, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
+		return nil, "", 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
 	}
 
 	metaBytes := make([]byte, metaLen)
 	if _, err := io.ReadFull(r, metaBytes); err != nil {
-		return nil, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
+		return nil, "", 0, fmt.Errorf("failed to read metadata bytes: %w", err)
 	}
 
-	var meta daramjwee.Metadata
+	var meta storedMetadata
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		return nil, "", 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
 	dataOffset := int64(4 + metaLen)
-	return &meta, dataOffset, nil
+	return &meta.Metadata, meta.StoredKey, dataOffset, nil
 }
 
 // copyFile copies a file from src to dst.
@@ -576,9 +677,9 @@ func (fs *FileStore) initializeCurrentSize() error {
 			return err
 		}
 
-		key, ok := decodeStoredKey(filepath.ToSlash(relPath))
-		if !ok {
-			key = filepath.ToSlash(relPath)
+		key, err := fs.storedKeyForPath(path, filepath.ToSlash(relPath))
+		if err != nil {
+			return err
 		}
 		size := info.Size()
 
@@ -588,6 +689,24 @@ func (fs *FileStore) initializeCurrentSize() error {
 
 		return nil
 	})
+}
+
+func (fs *FileStore) storedKeyForPath(path, relPath string) (string, error) {
+	if fs.isAmbiguousLegacyPath(path) {
+		storedKey, err := fs.readStoredKeyForCandidate(path)
+		if err != nil {
+			return "", err
+		}
+		if storedKey != "" {
+			return storedKey, nil
+		}
+		return relPath, nil
+	}
+
+	if key, ok := decodeStoredKey(relPath); ok {
+		return key, nil
+	}
+	return relPath, nil
 }
 
 // updateAfterSet updates the policy and size tracking after a successful file write.
@@ -674,11 +793,16 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 }
 
 func (fs *FileStore) evictKey(key string, heldSlots map[uint64]struct{}) error {
-	paths := fs.dataPathCandidates(key)
+	candidates := fs.dataPathCandidates(key)
+	paths := candidatePaths(candidates)
 	locked := fs.lockPaths(paths, heldSlots)
 	defer fs.unlockPaths(locked)
 
-	if err := removeFiles(paths); err != nil {
+	removablePaths, err := fs.deletablePaths(candidates, key)
+	if err != nil {
+		return err
+	}
+	if err := removeFiles(removablePaths); err != nil {
 		return fmt.Errorf("failed to remove file during eviction: %w", err)
 	}
 
@@ -696,14 +820,30 @@ func (fs *FileStore) evictKey(key string, heldSlots map[uint64]struct{}) error {
 func (fs *FileStore) removeLegacyPathOnly(key string, heldSlots map[uint64]struct{}) error {
 	legacyPath := fs.legacyDataPath(key)
 	currentPath := fs.toDataPath(key)
-	if legacyPath == currentPath || fs.isAmbiguousLegacyPath(legacyPath) {
+	if legacyPath == currentPath {
 		return nil
 	}
 
-	locked := fs.lockPaths([]string{legacyPath}, heldSlots)
+	candidate := dataPathCandidate{
+		path:      legacyPath,
+		isLegacy:  true,
+		ambiguous: fs.isAmbiguousLegacyPath(legacyPath),
+	}
+
+	locked := fs.lockPaths([]string{candidate.path}, heldSlots)
 	defer fs.unlockPaths(locked)
 
-	err := os.Remove(legacyPath)
+	if candidate.ambiguous {
+		storedKey, err := fs.readStoredKeyForCandidate(candidate.path)
+		if err != nil {
+			return err
+		}
+		if !fs.candidateMatchesKey(candidate, key, storedKey) {
+			return nil
+		}
+	}
+
+	err := os.Remove(candidate.path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove legacy file: %w", err)
 	}

@@ -176,7 +176,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 
 	seen := make([]Store, 0, len(cfg.Tiers))
 	for idx, tier := range cfg.Tiers {
-		if tier == nil {
+		if isNilStore(tier) {
 			return nil, &ConfigError{"tier cannot be nil"}
 		}
 		if containsSameStore(seen, tier) {
@@ -220,8 +220,8 @@ func containsSameStore(stores []Store, candidate Store) bool {
 }
 
 func sameStoreInstance(a, b Store) bool {
-	if a == nil || b == nil {
-		return a == b
+	if isNilStore(a) || isNilStore(b) {
+		return isNilStore(a) == isNilStore(b)
 	}
 
 	ta := reflect.TypeOf(a)
@@ -235,6 +235,20 @@ func sameStoreInstance(a, b Store) bool {
 	switch va.Kind() {
 	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:
 		return va.Pointer() == vb.Pointer()
+	default:
+		return false
+	}
+}
+
+func isNilStore(store Store) bool {
+	if store == nil {
+		return true
+	}
+
+	v := reflect.ValueOf(store)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+		return v.IsNil()
 	default:
 		return false
 	}

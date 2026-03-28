@@ -684,6 +684,64 @@ func TestFileStore_LegacyFallbackDoesNotAliasEncodedNamespaceKeys(t *testing.T) 
 	assert.Equal(t, "foo-data", string(body))
 }
 
+func TestFileStore_LegacyB64PrefixedKeyRemainsReachable(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(fs.baseDir, key)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-b64"}))
+	_, err = f.Write([]byte("legacy-b64-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	reader, meta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, "legacy-b64", meta.ETag)
+	assert.Equal(t, "legacy-b64-data", string(body))
+
+	statMeta, err := fs.Stat(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-b64", statMeta.ETag)
+
+	require.NoError(t, fs.Delete(ctx, key))
+	_, statErr := os.Stat(legacyPath)
+	assert.True(t, os.IsNotExist(statErr), "legacy b64-prefixed file should still be deletable after upgrade")
+}
+
+func TestFileStore_ReopenPreservesLegacyB64PrefixedKeyTracking(t *testing.T) {
+	dir := t.TempDir()
+	logger := log.NewNopLogger()
+	ctx := context.Background()
+	key := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(dir, key)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-b64"}))
+	_, err = f.Write([]byte("legacy-b64-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	fs, err := New(dir, logger)
+	require.NoError(t, err)
+
+	meta, err := fs.Stat(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-b64", meta.ETag)
+
+	require.NoError(t, fs.Delete(ctx, key))
+	_, statErr := os.Stat(legacyPath)
+	assert.True(t, os.IsNotExist(statErr), "reopened store should still track and delete legacy b64-prefixed files")
+}
+
 func TestLockedWriteCloser_DoesNotCommitWhenFileCloseFails(t *testing.T) {
 	var committed bool
 	var aborted bool

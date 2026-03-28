@@ -207,13 +207,13 @@ func (c *DaramjweeCache) isCachedStale(oldMeta *Metadata, positive, negative tim
 	if oldMeta == nil {
 		return true
 	}
-	if oldMeta.CachedAt.IsZero() {
-		return false
-	}
 
 	freshnessLifetime := positive
 	if oldMeta.IsNegative {
 		freshnessLifetime = negative
+	}
+	if oldMeta.CachedAt.IsZero() {
+		return freshnessLifetime > 0
 	}
 
 	return time.Now().After(oldMeta.CachedAt.Add(freshnessLifetime))
