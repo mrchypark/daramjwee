@@ -37,6 +37,7 @@ type FileStore struct {
 var _ daramjwee.TierValidator = (*FileStore)(nil)
 
 const encodedKeyPrefix = "b64_"
+const encodedKeyDir = "__encoded__"
 
 type dataPathCandidate struct {
 	path      string
@@ -311,7 +312,7 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 // toDataPath converts a key into a safe file path within the base directory.
 // It prevents path traversal by cleaning the path and ensuring it stays within baseDir.
 func (fs *FileStore) toDataPath(key string) string {
-	return filepath.Join(fs.baseDir, encodeKey(key))
+	return filepath.Join(fs.baseDir, encodedKeyDir, encodeKey(key))
 }
 
 func (fs *FileStore) legacyDataPath(key string) string {
@@ -866,10 +867,14 @@ func encodeKey(key string) string {
 }
 
 func decodeStoredKey(relPath string) (string, bool) {
-	if !strings.HasPrefix(relPath, encodedKeyPrefix) {
+	if dir := filepath.Dir(relPath); dir != "." && dir != encodedKeyDir {
 		return "", false
 	}
-	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(relPath, encodedKeyPrefix))
+	name := filepath.Base(relPath)
+	if !strings.HasPrefix(name, encodedKeyPrefix) {
+		return "", false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(name, encodedKeyPrefix))
 	if err != nil {
 		return "", false
 	}

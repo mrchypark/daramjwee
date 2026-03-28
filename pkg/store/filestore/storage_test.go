@@ -485,7 +485,9 @@ func TestFileStore_Set_ErrorOnFinalize_Rename(t *testing.T) {
 	dataPath := fs.toDataPath(key)
 
 	// Create a directory where the file should be, to cause os.Rename to fail.
-	err := os.Mkdir(dataPath, 0755)
+	err := os.MkdirAll(filepath.Dir(dataPath), 0755)
+	require.NoError(t, err)
+	err = os.Mkdir(dataPath, 0755)
 	require.NoError(t, err)
 
 	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
@@ -684,6 +686,50 @@ func TestFileStore_LegacyFallbackDoesNotAliasEncodedNamespaceKeys(t *testing.T) 
 	assert.Equal(t, "foo-data", string(body))
 }
 
+func TestFileStore_EncodedNamespaceDoesNotOverwriteLegacyB64PrefixedKey(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	legacyKey := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(fs.baseDir, legacyKey)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy"}))
+	_, err = f.Write([]byte("legacy-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	writer, err := fs.BeginSet(ctx, "foo", &daramjwee.Metadata{ETag: "foo"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("foo-data"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	_, err = os.Stat(fs.toDataPath("foo"))
+	require.NoError(t, err)
+	_, err = os.Stat(legacyPath)
+	require.NoError(t, err)
+	require.NotEqual(t, fs.toDataPath("foo"), legacyPath)
+
+	legacyReader, legacyMeta, err := fs.GetStream(ctx, legacyKey)
+	require.NoError(t, err)
+	defer legacyReader.Close()
+	legacyBody, err := io.ReadAll(legacyReader)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy", legacyMeta.ETag)
+	assert.Equal(t, "legacy-data", string(legacyBody))
+
+	reader, meta, err := fs.GetStream(ctx, "foo")
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "foo", meta.ETag)
+	assert.Equal(t, "foo-data", string(body))
+}
+
 func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFile(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
@@ -816,7 +862,7 @@ func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t
 	logger := log.NewNopLogger()
 	key := "foo"
 	legacyPath := legacyDataPathForTest(dir, key)
-	encodedPath := filepath.Join(dir, "b64_Zm9v")
+	encodedPath := filepath.Join(dir, encodedKeyDir, encodeKey(key))
 
 	writeStoreFile := func(path, storedKey, etag, body string) {
 		t.Helper()
@@ -837,6 +883,7 @@ func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t
 	writeStoreFile(encodedPath, key, "encoded", "encoded-data")
 
 	fs, err := New(dir, logger)
+	require.NoError(t, err)
 	require.NoError(t, err)
 
 	fs.mu.RLock()
