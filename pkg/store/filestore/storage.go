@@ -690,6 +690,10 @@ func (fs *FileStore) initializeCurrentSize() error {
 		}
 		size := info.Size()
 
+		if oldSize, exists := fs.fileSizes[key]; exists {
+			fs.currentSize -= oldSize
+			fs.policy.Remove(key)
+		}
 		fs.fileSizes[key] = size
 		fs.currentSize += size
 		fs.policy.Add(key, size)

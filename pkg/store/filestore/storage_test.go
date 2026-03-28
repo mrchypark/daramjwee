@@ -811,6 +811,48 @@ func TestFileStore_ReopenPreservesLegacyB64PrefixedKeyTracking(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "reopened store should still track and delete legacy b64-prefixed files")
 }
 
+func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t *testing.T) {
+	dir := t.TempDir()
+	logger := log.NewNopLogger()
+	key := "foo"
+	legacyPath := legacyDataPathForTest(dir, key)
+	encodedPath := filepath.Join(dir, "b64_Zm9v")
+
+	writeStoreFile := func(path, storedKey, etag, body string) {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		f, err := os.Create(path)
+		require.NoError(t, err)
+		if storedKey != "" {
+			require.NoError(t, writeStoredMetadata(f, storedKey, &daramjwee.Metadata{ETag: etag}))
+		} else {
+			require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: etag}))
+		}
+		_, err = f.Write([]byte(body))
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+
+	writeStoreFile(legacyPath, "", "legacy", "legacy-data")
+	writeStoreFile(encodedPath, key, "encoded", "encoded-data")
+
+	fs, err := New(dir, logger)
+	require.NoError(t, err)
+
+	fs.mu.RLock()
+	currentSize := fs.currentSize
+	trackedSize := fs.fileSizes[key]
+	fs.mu.RUnlock()
+
+	legacyInfo, err := os.Stat(legacyPath)
+	require.NoError(t, err)
+	encodedInfo, err := os.Stat(encodedPath)
+	require.NoError(t, err)
+	assert.Equal(t, trackedSize, currentSize)
+	assert.Contains(t, []int64{legacyInfo.Size(), encodedInfo.Size()}, trackedSize)
+	assert.NotEqual(t, legacyInfo.Size()+encodedInfo.Size(), currentSize)
+}
+
 func TestLockedWriteCloser_DoesNotCommitWhenFileCloseFails(t *testing.T) {
 	var committed bool
 	var aborted bool

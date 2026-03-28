@@ -78,3 +78,21 @@ func TestObjstoreAdapter_DeleteRemovesLegacyObjects(t *testing.T) {
 	_, _, err = store.GetStream(ctx, "legacy-delete")
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
+
+func TestObjstoreAdapter_DeleteDoesNotRemoveRawNamesWithoutLegacyMetadata(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	key := "checkpoints/example/latest.json"
+	require.NoError(t, bucket.Upload(ctx, key, strings.NewReader("internal object body")))
+
+	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDataDir(t.TempDir()))
+	require.NoError(t, store.Delete(ctx, key))
+
+	reader, err := bucket.Get(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "internal object body", string(body))
+}

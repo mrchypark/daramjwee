@@ -60,8 +60,12 @@ func (a *objstoreAdapter) BeginSet(ctx context.Context, key string, metadata *da
 }
 
 func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
+	legacyExists := a.hasVerifiedLegacyRecord(ctx, key)
 	if err := a.modern.Delete(ctx, key); err != nil {
 		return err
+	}
+	if !legacyExists {
+		return nil
 	}
 	for _, name := range []string{key, legacyMetaPath(key)} {
 		err := a.bucket.Delete(ctx, name)
@@ -104,6 +108,11 @@ func (a *objstoreAdapter) legacyStat(ctx context.Context, key string) (*daramjwe
 		return nil, fmt.Errorf("failed to decode legacy metadata for key %q: %w", key, err)
 	}
 	return &meta, nil
+}
+
+func (a *objstoreAdapter) hasVerifiedLegacyRecord(ctx context.Context, key string) bool {
+	_, err := a.legacyStat(ctx, key)
+	return err == nil
 }
 
 func legacyMetaPath(key string) string {
