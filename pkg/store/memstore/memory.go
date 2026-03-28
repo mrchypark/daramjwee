@@ -215,7 +215,7 @@ func (w *memStoreSink) release() {
 
 func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
 	if meta == nil {
-		return nil
+		return &daramjwee.Metadata{}
 	}
 	cloned := *meta
 	return &cloned

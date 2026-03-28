@@ -355,23 +355,23 @@ func TestMemStore_Parallel(t *testing.T) {
 				r.Close()
 			}
 		})
-			t.Run("Stat", func(t *testing.T) {
-				t.Parallel()
-				_, err := store.Stat(ctx, "keyB")
-				assert.NoError(t, err)
-			})
-			t.Run("Delete", func(t *testing.T) {
-				t.Parallel()
-				err := store.Delete(ctx, "keyC")
-				assert.NoError(t, err)
-			})
-			t.Run("Set-New", func(t *testing.T) {
-				t.Parallel()
-				writer, _ := store.BeginSet(ctx, "keyE", &daramjwee.Metadata{ETag: "v_new"})
-				writer.Write([]byte("new key"))
-				writer.Close()
-			})
+		t.Run("Stat", func(t *testing.T) {
+			t.Parallel()
+			_, err := store.Stat(ctx, "keyB")
+			assert.NoError(t, err)
 		})
+		t.Run("Delete", func(t *testing.T) {
+			t.Parallel()
+			err := store.Delete(ctx, "keyC")
+			assert.NoError(t, err)
+		})
+		t.Run("Set-New", func(t *testing.T) {
+			t.Parallel()
+			writer, _ := store.BeginSet(ctx, "keyE", &daramjwee.Metadata{ETag: "v_new"})
+			writer.Write([]byte("new key"))
+			writer.Close()
+		})
+	})
 
 	// Final state verification
 	store.mu.RLock()
@@ -490,6 +490,33 @@ func TestMemStore_MetadataFields(t *testing.T) {
 	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
 
+func TestMemStore_NormalizesNilMetadataToEmptyMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := New(0, nil)
+	key := "nil-metadata-key"
+
+	writer, err := store.BeginSet(ctx, key, nil)
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("value"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	reader, meta, err := store.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+	require.NotNil(t, meta)
+	assert.Empty(t, meta.ETag)
+	assert.False(t, meta.IsNegative)
+	assert.True(t, meta.CachedAt.IsZero())
+
+	statMeta, err := store.Stat(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, statMeta)
+	assert.Empty(t, statMeta.ETag)
+	assert.False(t, statMeta.IsNegative)
+	assert.True(t, statMeta.CachedAt.IsZero())
+}
+
 func TestMemStore_ReturnsMetadataCopies(t *testing.T) {
 	ctx := context.Background()
 	store := New(0, nil)
@@ -536,13 +563,13 @@ type badPolicy struct {
 }
 
 // Touch does nothing.
-func (p *badPolicy) Touch(key string)           {}
+func (p *badPolicy) Touch(key string) {}
 
 // Add does nothing.
 func (p *badPolicy) Add(key string, size int64) {}
 
 // Remove does nothing.
-func (p *badPolicy) Remove(key string)          {}
+func (p *badPolicy) Remove(key string) {}
 
 // Evict returns a predefined list of keys, or non-existent keys by default.
 func (p *badPolicy) Evict() []string {
