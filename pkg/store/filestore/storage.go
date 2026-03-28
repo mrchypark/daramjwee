@@ -159,8 +159,15 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		return nil, err
 	}
 
+	pathLocked := true
+	unlockPath := func() {
+		if pathLocked {
+			fs.lockManager.Unlock(path)
+			pathLocked = false
+		}
+	}
+
 	cleanupTemp := func() error {
-		defer fs.lockManager.Unlock(path)
 		if err := os.Remove(tmpFile.Name()); err != nil && !os.IsNotExist(err) {
 			level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", err)
 			return err
@@ -168,8 +175,14 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		return nil
 	}
 
+	abortCleanup := func() error {
+		defer unlockPath()
+		return cleanupTemp()
+	}
+
 	onClose := func() (err error) {
 		defer func() {
+			unlockPath()
 			if cleanupErr := cleanupTemp(); cleanupErr != nil && err == nil {
 				err = cleanupErr
 			}
@@ -191,16 +204,15 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		if err := fs.updateAfterSet(key, path); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
 		}
-		if err := fs.removeLegacyPathOnly(key, map[uint64]struct{}{
-			fs.lockManager.getSlot(path): {},
-		}); err != nil {
+		unlockPath()
+		if err := fs.removeLegacyPathOnly(key, nil); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
 		}
 
 		return nil
 	}
 
-	return newLockedWriteCloser(tmpFile, onClose, cleanupTemp), nil
+	return newLockedWriteCloser(tmpFile, onClose, abortCleanup), nil
 }
 
 // Delete removes an object from the store.

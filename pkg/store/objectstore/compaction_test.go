@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
@@ -85,7 +86,31 @@ func TestStore_CompactPrunesStaleCheckpointObjects(t *testing.T) {
 	assert.Equal(t, joinPath(store.prefix, "checkpoints", shardID, "latest.json"), checkpoints[0])
 }
 
-func TestStore_ReclaimRequeuesPublishedUnflushedLocalEntriesAfterReopen(t *testing.T) {
+func TestStore_CompactKeepsLegacyManifestBackedBlobReachable(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+
+	blobPath := store.blobPath("legacy-compact", "legacy-v1")
+	require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader("legacy body")))
+	require.NoError(t, store.publishManifest(ctx, "legacy-compact", blobPath, int64(len("legacy body")), &daramjwee.Metadata{ETag: "legacy"}))
+
+	stats, err := store.Compact(ctx, 0)
+	require.NoError(t, err)
+	assert.Zero(t, stats.Deleted)
+
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	stream, meta, err := remoteOnly.GetStream(ctx, "legacy-compact")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy body", string(body))
+	assert.Equal(t, "legacy", meta.ETag)
+}
+
+func TestStore_ReclaimAutomaticallySchedulesFlushForPublishedUnflushedLocalEntriesAfterReopen(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
 	dataDir := t.TempDir()
@@ -100,16 +125,21 @@ func TestStore_ReclaimRequeuesPublishedUnflushedLocalEntriesAfterReopen(t *testi
 	require.NoError(t, writer.Close())
 
 	reopened := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
-	reopened.autoFlush = false
-	require.NoError(t, reopened.flushPending(ctx))
 
 	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
-	stream, meta, err := remoteOnly.GetStream(ctx, "requeue-key")
-	require.NoError(t, err)
-	defer stream.Close()
+	require.Eventually(t, func() bool {
+		stream, meta, err := remoteOnly.GetStream(ctx, "requeue-key")
+		if err != nil {
+			return false
+		}
+		defer stream.Close()
 
-	body, err := io.ReadAll(stream)
-	require.NoError(t, err)
-	assert.Equal(t, "requeue-body", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+		body, readErr := io.ReadAll(stream)
+		return readErr == nil && string(body) == "requeue-body" && meta.ETag == "v1"
+	}, time.Second, 20*time.Millisecond)
+
+	reopened.flushMu.Lock()
+	pending := len(reopened.pendingShards)
+	reopened.flushMu.Unlock()
+	assert.Zero(t, pending)
 }

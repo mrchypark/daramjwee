@@ -2,7 +2,6 @@
 package daramjwee
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -289,11 +288,13 @@ func (c *DaramjweeCache) handleLowerTierHit(ctx context.Context, key string, tie
 		}
 
 		_ = src.Close()
-		closeErr := c.publishEmptyThrough(writer, cancel, func() {
+		closeErr := writer.Close()
+		if closeErr == nil {
 			if destinations := c.regularFanoutDestinations(tierIndex); len(destinations) > 0 {
 				c.schedulePersistFromTop(context.Background(), key, destinations...)
 			}
-		})
+		}
+		cancel()
 		if closeErr != nil {
 			c.warnLog("msg", "failed to publish negative entry to top tier", "key", key, "err", closeErr)
 		}
@@ -388,7 +389,7 @@ func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (i
 	if err != nil {
 		c.warnLog("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
 	} else {
-		if closeErr := c.publishEmptyThrough(writer, nil, nil); closeErr != nil {
+		if closeErr := writer.Close(); closeErr != nil {
 			c.warnLog("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
 		}
 	}
@@ -528,12 +529,6 @@ func (c *DaramjweeCache) schedulePersistFromTop(_ context.Context, key string, d
 			c.warnLog("msg", "background set rejected", "key", key, "dest_index", destIndex)
 		}
 	}
-}
-
-func (c *DaramjweeCache) publishEmptyThrough(sink WriteSink, cancel func(), onPublish func()) error {
-	stream := streamThrough(io.NopCloser(bytes.NewReader(nil)), sink, cancel, onPublish)
-	_, err := io.Copy(io.Discard, stream)
-	return errors.Join(err, stream.Close())
 }
 
 // cancelWriteCloser cancels the context when the WriteCloser is closed.

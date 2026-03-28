@@ -124,6 +124,12 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	if store.initErr == nil {
 		if err := store.recoverLocalState(); err != nil {
 			level.Warn(store.logger).Log("msg", "failed to recover local objectstore state", "dir", store.dataDir, "err", err)
+		} else if store.autoFlush {
+			store.flushMu.Lock()
+			if len(store.pendingShards) > 0 {
+				store.scheduleFlushLocked()
+			}
+			store.flushMu.Unlock()
 		}
 	}
 	return store

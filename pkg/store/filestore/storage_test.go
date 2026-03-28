@@ -239,6 +239,60 @@ func TestFileStore_EvictionDoesNotDropTrackingBeforeFileRemoval(t *testing.T) {
 	assert.True(t, triggerExists)
 }
 
+func TestFileStore_CloseReleasesEncodedLockBeforeLegacyCleanup(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := ""
+	for i := 0; i < 64; i++ {
+		candidate := fmt.Sprintf("legacy-cleanup-%d", i)
+		if fs.lockManager.getSlot(fs.toDataPath(candidate)) != fs.lockManager.getSlot(fs.legacyDataPath(candidate)) {
+			key = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, key)
+
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("payload"))
+	require.NoError(t, err)
+
+	legacyPath := fs.legacyDataPath(key)
+	encodedPath := fs.toDataPath(key)
+	fs.lockManager.Lock(legacyPath)
+	legacyLocked := true
+	defer func() {
+		if legacyLocked {
+			fs.lockManager.Unlock(legacyPath)
+		}
+	}()
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- writer.Close()
+	}()
+
+	encodedAcquired := make(chan struct{}, 1)
+	go func() {
+		fs.lockManager.Lock(encodedPath)
+		fs.lockManager.Unlock(encodedPath)
+		encodedAcquired <- struct{}{}
+	}()
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-encodedAcquired:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	fs.lockManager.Unlock(legacyPath)
+	legacyLocked = false
+	require.NoError(t, <-closeDone)
+}
+
 // TestFileStore_Overwrite tests overwriting an existing object.
 func TestFileStore_Overwrite(t *testing.T) {
 	fs := setupTestStore(t)

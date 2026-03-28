@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log/level"
+	"github.com/goccy/go-json"
 	"github.com/thanos-io/objstore"
 )
 
@@ -50,7 +51,37 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 		}
 	}
 
-	err := s.bucket.Iter(ctx, ensureDir(joinPath(s.prefix, "checkpoints")), func(name string) error {
+	err := s.bucket.Iter(ctx, ensureDir(joinPath(s.prefix, "manifests")), func(name string) error {
+		if strings.HasSuffix(name, "/") {
+			return nil
+		}
+		stats.Scanned++
+		reader, err := s.bucket.Get(ctx, name)
+		if err != nil {
+			if s.bucket.IsObjNotFoundErr(err) {
+				return nil
+			}
+			return err
+		}
+		defer reader.Close()
+
+		var m manifest
+		if err := json.NewDecoder(reader).Decode(&m); err != nil {
+			level.Warn(s.logger).Log("msg", "failed to decode manifest during compaction", "manifest", name, "err", err)
+			return nil
+		}
+		if m.BlobPath == "" {
+			return nil
+		}
+		reachable[m.BlobPath] = struct{}{}
+		stats.Reachable++
+		return nil
+	}, objstore.WithRecursiveIter())
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.bucket.Iter(ctx, ensureDir(joinPath(s.prefix, "checkpoints")), func(name string) error {
 		if path.Base(name) != "latest.json" {
 			return nil
 		}
