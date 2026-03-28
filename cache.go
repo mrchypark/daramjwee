@@ -485,37 +485,42 @@ func (c *DaramjweeCache) topWriteStore() Store {
 	return c.Tiers[0]
 }
 
-func (c *DaramjweeCache) persistDestinationsAfterTop() []Store {
+type tierDestination struct {
+	tierIndex int
+	store     Store
+}
+
+func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {
 	if len(c.Tiers) <= 1 {
 		return nil
 	}
 
-	dests := make([]Store, 0, len(c.Tiers)-1)
-	for _, tier := range c.Tiers[1:] {
+	dests := make([]tierDestination, 0, len(c.Tiers)-1)
+	for idx, tier := range c.Tiers[1:] {
 		if hasRealStore(tier) {
-			dests = append(dests, tier)
+			dests = append(dests, tierDestination{tierIndex: idx + 1, store: tier})
 		}
 	}
 	return dests
 }
 
-func (c *DaramjweeCache) regularFanoutDestinations(sourceIndex int) []Store {
+func (c *DaramjweeCache) regularFanoutDestinations(sourceIndex int) []tierDestination {
 	if sourceIndex <= 1 {
 		return nil
 	}
 
-	dests := make([]Store, 0, sourceIndex-1)
-	for _, tier := range c.Tiers[1:sourceIndex] {
+	dests := make([]tierDestination, 0, sourceIndex-1)
+	for idx, tier := range c.Tiers[1:sourceIndex] {
 		if hasRealStore(tier) {
-			dests = append(dests, tier)
+			dests = append(dests, tierDestination{tierIndex: idx + 1, store: tier})
 		}
 	}
 	return dests
 }
 
-func (c *DaramjweeCache) schedulePersistFromTop(_ context.Context, key string, destStores ...Store) {
+func (c *DaramjweeCache) schedulePersistFromTop(_ context.Context, key string, destinations ...tierDestination) {
 	srcStore := c.topWriteStore()
-	if !hasRealStore(srcStore) || len(destStores) == 0 {
+	if !hasRealStore(srcStore) || len(destinations) == 0 {
 		return
 	}
 	if c.Worker == nil {
@@ -523,15 +528,16 @@ func (c *DaramjweeCache) schedulePersistFromTop(_ context.Context, key string, d
 		return
 	}
 
-	for idx, destStore := range destStores {
+	for _, destination := range destinations {
+		destStore := destination.store
 		if !hasRealStore(destStore) || sameStoreInstance(destStore, srcStore) {
 			continue
 		}
 
-		destIndex := idx
+		destTierIndex := destination.tierIndex
 		dest := destStore
 		job := func(jobCtx context.Context) {
-			c.infoLog("msg", "starting background set", "key", key, "dest_index", destIndex)
+			c.infoLog("msg", "starting background set", "key", key, "dest_tier", destTierIndex)
 
 			srcStream, meta, err := c.getStreamFromStore(jobCtx, srcStore, key)
 			if err != nil {
@@ -542,7 +548,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(_ context.Context, key string, d
 
 			destWriter, err := c.setStreamToStore(jobCtx, dest, key, meta)
 			if err != nil {
-				c.errorLog("msg", "failed to get writer for destination store", "key", key, "err", err)
+				c.errorLog("msg", "failed to get writer for destination store", "key", key, "dest_tier", destTierIndex, "err", err)
 				return
 			}
 
@@ -555,14 +561,14 @@ func (c *DaramjweeCache) schedulePersistFromTop(_ context.Context, key string, d
 			}
 
 			if copyErr != nil || closeErr != nil {
-				c.errorLog("msg", "failed background set", "key", key, "dest_index", destIndex, "copyErr", copyErr, "closeErr", closeErr)
+				c.errorLog("msg", "failed background set", "key", key, "dest_tier", destTierIndex, "copyErr", copyErr, "closeErr", closeErr)
 				return
 			}
-			c.infoLog("msg", "background set successful", "key", key, "dest_index", destIndex)
+			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
 		}
 
 		if !c.Worker.Submit(job) {
-			c.warnLog("msg", "background set rejected", "key", key, "dest_index", destIndex)
+			c.warnLog("msg", "background set rejected", "key", key, "dest_tier", destTierIndex)
 		}
 	}
 }
