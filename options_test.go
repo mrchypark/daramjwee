@@ -50,6 +50,26 @@ func (s nonComparableStore) Stat(ctx context.Context, key string) (*Metadata, er
 	return nil, ErrNotFound
 }
 
+type comparableValueStore struct {
+	id int
+}
+
+func (s comparableValueStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
+}
+
+func (s comparableValueStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
+	return &nullWriteSink{}, nil
+}
+
+func (s comparableValueStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s comparableValueStore) Stat(ctx context.Context, key string) (*Metadata, error) {
+	return nil, ErrNotFound
+}
+
 func TestNew_OptionValidation(t *testing.T) {
 	regularA := &optionsTestMockStore{id: 1}
 	regularB := &optionsTestMockStore{id: 2}
@@ -97,6 +117,11 @@ func TestNew_OptionValidation(t *testing.T) {
 		{
 			name:      "success with non comparable tier store",
 			options:   []Option{WithTiers(nonComparableStore{data: []byte("x")})},
+			expectErr: false,
+		},
+		{
+			name:      "success with equal comparable value stores in separate tiers",
+			options:   []Option{WithTiers(comparableValueStore{id: 1}, comparableValueStore{id: 1})},
 			expectErr: false,
 		},
 		{

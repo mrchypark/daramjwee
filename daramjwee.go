@@ -230,10 +230,6 @@ func sameStoreInstance(a, b Store) bool {
 		return false
 	}
 
-	if ta.Comparable() {
-		return a == b
-	}
-
 	va := reflect.ValueOf(a)
 	vb := reflect.ValueOf(b)
 	switch va.Kind() {
