@@ -3,6 +3,7 @@ package daramjwee
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"time"
@@ -106,6 +107,12 @@ type BeginSetUsesContext interface {
 	BeginSetUsesContext() bool
 }
 
+// TierValidator is an optional Store extension for stores that restrict which
+// positions they can safely occupy in the ordered tier chain.
+type TierValidator interface {
+	ValidateTier(index int) error
+}
+
 // EvictionPolicy defines the contract for a cache eviction strategy.
 type EvictionPolicy interface {
 	// Touch is called when an item is accessed.
@@ -168,12 +175,17 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	seen := make([]Store, 0, len(cfg.Tiers))
-	for _, tier := range cfg.Tiers {
+	for idx, tier := range cfg.Tiers {
 		if tier == nil {
 			return nil, &ConfigError{"tier cannot be nil"}
 		}
 		if containsSameStore(seen, tier) {
 			return nil, &ConfigError{"duplicate tier store instance"}
+		}
+		if validator, ok := tier.(TierValidator); ok {
+			if err := validator.ValidateTier(idx); err != nil {
+				return nil, &ConfigError{fmt.Sprintf("tier %d %s", idx, err.Error())}
+			}
 		}
 		seen = append(seen, tier)
 	}

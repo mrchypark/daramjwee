@@ -34,6 +34,8 @@ type FileStore struct {
 	fileSizes   map[string]int64 // Track file sizes for eviction
 }
 
+var _ daramjwee.TierValidator = (*FileStore)(nil)
+
 // Option configures the FileStore.
 type Option func(*FileStore)
 
@@ -92,6 +94,15 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 	}
 
 	return fs, nil
+}
+
+// ValidateTier rejects tier positions that would weaken the stream-through
+// publish contract expected from the ordered tier chain.
+func (fs *FileStore) ValidateTier(index int) error {
+	if index == 0 && fs.useCopyAndTruncate {
+		return errors.New("does not support stream-through publish semantics")
+	}
+	return nil
 }
 
 // GetStream reads an object from the store.

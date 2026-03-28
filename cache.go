@@ -517,7 +517,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(_ context.Context, key string, d
 	}
 
 	for idx, destStore := range destStores {
-		if !hasRealStore(destStore) || destStore == srcStore {
+		if !hasRealStore(destStore) || sameStoreInstance(destStore, srcStore) {
 			continue
 		}
 

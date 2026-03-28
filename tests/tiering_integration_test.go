@@ -11,6 +11,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type nonComparableTierStore struct {
+	inner *mockStore
+	tag   []byte
+}
+
+func newNonComparableTierStore() nonComparableTierStore {
+	return nonComparableTierStore{
+		inner: newMockStore(),
+		tag:   []byte("tier"),
+	}
+}
+
+func (s nonComparableTierStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	return s.inner.GetStream(ctx, key)
+}
+
+func (s nonComparableTierStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return s.inner.BeginSet(ctx, key, metadata)
+}
+
+func (s nonComparableTierStore) Delete(ctx context.Context, key string) error {
+	return s.inner.Delete(ctx, key)
+}
+
+func (s nonComparableTierStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	return s.inner.Stat(ctx, key)
+}
+
 func TestCache_LowerTierHitSynchronouslyFillsTopAndAsyncBackfillsIntermediate(t *testing.T) {
 	top := newMockStore()
 	mid := newSlowSetStore(150 * time.Millisecond)
@@ -322,6 +350,41 @@ func TestCache_MissSynchronouslyFillsTopAndAsyncBackfillsRemainingTiers(t *testi
 
 	require.Eventually(t, func() bool {
 		reader, _, err := lowest.GetStream(context.Background(), "miss-fanout-key")
+		if err != nil {
+			return false
+		}
+		_ = reader.Close()
+		return true
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestCache_FanoutHandlesNonComparableTierStores(t *testing.T) {
+	top := newNonComparableTierStore()
+	mid := newNonComparableTierStore()
+	lower := newMockStore()
+	lower.setData("fanout-noncomparable", "value", &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, mid, lower),
+		daramjwee.WithTierFreshness(time.Hour, time.Hour),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	require.NotPanics(t, func() {
+		stream, err := cache.Get(context.Background(), "fanout-noncomparable", &mockFetcher{})
+		require.NoError(t, err)
+
+		body, err := io.ReadAll(stream)
+		require.NoError(t, err)
+		require.Equal(t, "value", string(body))
+		require.NoError(t, stream.Close())
+	})
+
+	require.Eventually(t, func() bool {
+		reader, _, err := mid.GetStream(context.Background(), "fanout-noncomparable")
 		if err != nil {
 			return false
 		}
