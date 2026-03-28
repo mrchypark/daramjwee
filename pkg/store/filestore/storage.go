@@ -36,6 +36,8 @@ type FileStore struct {
 
 var _ daramjwee.TierValidator = (*FileStore)(nil)
 
+const encodedKeyPrefix = "b64_"
+
 type dataPathCandidate struct {
 	path      string
 	isLegacy  bool
@@ -44,7 +46,7 @@ type dataPathCandidate struct {
 
 type storedMetadata struct {
 	daramjwee.Metadata
-	StoredKey string `json:"__stored_key,omitempty"`
+	StoredKey *string `json:"__stored_key,omitempty"`
 }
 
 // Option configures the FileStore.
@@ -111,7 +113,7 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 // publish contract expected from the ordered tier chain.
 func (fs *FileStore) ValidateTier(index int) error {
 	if index == 0 && fs.useCopyAndTruncate {
-		return errors.New("does not support stream-through publish semantics")
+		return errors.New("filestore: WithCopyAndTruncate mode does not support stream-through publish semantics and cannot be used as tier 0")
 	}
 	return nil
 }
@@ -131,13 +133,13 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 			return nil, nil, err
 		}
 
-		meta, storedKey, dataOffset, err := readStoredMetadata(file)
+		meta, storedKey, storedKeyPresent, dataOffset, err := readStoredMetadata(file)
 		if err != nil {
 			file.Close()
 			fs.lockManager.RUnlock(candidate.path)
 			return nil, nil, err
 		}
-		if !fs.candidateMatchesKey(candidate, key, storedKey) {
+		if !fs.candidateMatchesKey(candidate, key, storedKey, storedKeyPresent) {
 			file.Close()
 			fs.lockManager.RUnlock(candidate.path)
 			continue
@@ -282,7 +284,7 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 			return nil, err
 		}
 
-		meta, storedKey, _, err := readStoredMetadata(file)
+		meta, storedKey, storedKeyPresent, _, err := readStoredMetadata(file)
 		closeErr := file.Close()
 		fs.lockManager.RUnlock(candidate.path)
 		if err != nil {
@@ -291,7 +293,7 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 		if closeErr != nil {
 			return nil, closeErr
 		}
-		if !fs.candidateMatchesKey(candidate, key, storedKey) {
+		if !fs.candidateMatchesKey(candidate, key, storedKey, storedKeyPresent) {
 			continue
 		}
 
@@ -357,16 +359,16 @@ func (fs *FileStore) dataPathCandidates(key string) []dataPathCandidate {
 	encodedPath := fs.toDataPath(key)
 	legacyPath := fs.legacyDataPath(key)
 	if legacyPath == encodedPath {
-		return []dataPathCandidate{{path: encodedPath}}
+		return []dataPathCandidate{{path: encodedPath, ambiguous: fs.isAmbiguousLegacyPath(encodedPath)}}
 	}
 	return []dataPathCandidate{
-		{path: encodedPath},
+		{path: encodedPath, ambiguous: fs.isAmbiguousLegacyPath(encodedPath)},
 		{path: legacyPath, isLegacy: true, ambiguous: fs.isAmbiguousLegacyPath(legacyPath)},
 	}
 }
 
 func (fs *FileStore) isAmbiguousLegacyPath(path string) bool {
-	return filepath.Dir(path) == fs.baseDir && strings.HasPrefix(filepath.Base(path), "b64_")
+	return filepath.Dir(path) == fs.baseDir && strings.HasPrefix(filepath.Base(path), encodedKeyPrefix)
 }
 
 func candidatePaths(candidates []dataPathCandidate) []string {
@@ -377,12 +379,12 @@ func candidatePaths(candidates []dataPathCandidate) []string {
 	return paths
 }
 
-func (fs *FileStore) candidateMatchesKey(candidate dataPathCandidate, key, storedKey string) bool {
-	if !candidate.isLegacy || !candidate.ambiguous {
+func (fs *FileStore) candidateMatchesKey(candidate dataPathCandidate, key, storedKey string, storedKeyPresent bool) bool {
+	if !candidate.ambiguous {
 		return true
 	}
-	if storedKey == "" {
-		return true
+	if !storedKeyPresent {
+		return candidate.isLegacy
 	}
 	return storedKey == key
 }
@@ -390,37 +392,37 @@ func (fs *FileStore) candidateMatchesKey(candidate dataPathCandidate, key, store
 func (fs *FileStore) deletablePaths(candidates []dataPathCandidate, key string) ([]string, error) {
 	removable := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		if !candidate.isLegacy || !candidate.ambiguous {
+		if !candidate.ambiguous {
 			removable = append(removable, candidate.path)
 			continue
 		}
 
-		storedKey, err := fs.readStoredKeyForCandidate(candidate.path)
+		storedKey, storedKeyPresent, err := fs.readStoredKeyForCandidate(candidate.path)
 		if err != nil {
 			return nil, err
 		}
-		if fs.candidateMatchesKey(candidate, key, storedKey) {
+		if fs.candidateMatchesKey(candidate, key, storedKey, storedKeyPresent) {
 			removable = append(removable, candidate.path)
 		}
 	}
 	return removable, nil
 }
 
-func (fs *FileStore) readStoredKeyForCandidate(path string) (string, error) {
+func (fs *FileStore) readStoredKeyForCandidate(path string) (string, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil
+			return "", false, nil
 		}
-		return "", err
+		return "", false, err
 	}
 	defer file.Close()
 
-	_, storedKey, _, err := readStoredMetadata(file)
+	_, storedKey, storedKeyPresent, _, err := readStoredMetadata(file)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return storedKey, nil
+	return storedKey, storedKeyPresent, nil
 }
 
 func (fs *FileStore) lockPaths(paths []string, heldSlots map[uint64]struct{}) []string {
@@ -480,9 +482,10 @@ func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 }
 
 func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata) error {
+	storedKey := key
 	return writeStoredMetadataEnvelope(w, storedMetadata{
 		Metadata:  derefMetadata(meta),
-		StoredKey: key,
+		StoredKey: &storedKey,
 	})
 }
 
@@ -515,37 +518,40 @@ func derefMetadata(meta *daramjwee.Metadata) daramjwee.Metadata {
 // It expects the metadata length as a uint32 prefix, followed by the JSON-encoded metadata.
 // It returns the metadata, the offset where the data begins, and an error if any.
 func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
-	meta, _, dataOffset, err := readStoredMetadata(r)
+	meta, _, _, dataOffset, err := readStoredMetadata(r)
 	return meta, dataOffset, err
 }
 
-func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, int64, error) {
+func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, int64, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(r, lenBuf); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil, "", 0, daramjwee.ErrNotFound // Treat empty/short files as not found
+			return nil, "", false, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
 		}
-		return nil, "", 0, fmt.Errorf("failed to read metadata length: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to read metadata length: %w", err)
 	}
 
 	metaLen := binary.BigEndian.Uint32(lenBuf)
 	// Add a sanity check for metaLen to avoid allocating huge buffers
 	if metaLen > 10*1024*1024 { // 10MB limit for metadata
-		return nil, "", 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
+		return nil, "", false, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
 	}
 
 	metaBytes := make([]byte, metaLen)
 	if _, err := io.ReadFull(r, metaBytes); err != nil {
-		return nil, "", 0, fmt.Errorf("failed to read metadata bytes: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
 	}
 
 	var meta storedMetadata
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, "", 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
 	dataOffset := int64(4 + metaLen)
-	return &meta.Metadata, meta.StoredKey, dataOffset, nil
+	if meta.StoredKey == nil {
+		return &meta.Metadata, "", false, dataOffset, nil
+	}
+	return &meta.Metadata, *meta.StoredKey, true, dataOffset, nil
 }
 
 // copyFile copies a file from src to dst.
@@ -693,11 +699,11 @@ func (fs *FileStore) initializeCurrentSize() error {
 
 func (fs *FileStore) storedKeyForPath(path, relPath string) (string, error) {
 	if fs.isAmbiguousLegacyPath(path) {
-		storedKey, err := fs.readStoredKeyForCandidate(path)
+		storedKey, storedKeyPresent, err := fs.readStoredKeyForCandidate(path)
 		if err != nil {
 			return "", err
 		}
-		if storedKey != "" {
+		if storedKeyPresent {
 			return storedKey, nil
 		}
 		return relPath, nil
@@ -834,11 +840,11 @@ func (fs *FileStore) removeLegacyPathOnly(key string, heldSlots map[uint64]struc
 	defer fs.unlockPaths(locked)
 
 	if candidate.ambiguous {
-		storedKey, err := fs.readStoredKeyForCandidate(candidate.path)
+		storedKey, storedKeyPresent, err := fs.readStoredKeyForCandidate(candidate.path)
 		if err != nil {
 			return err
 		}
-		if !fs.candidateMatchesKey(candidate, key, storedKey) {
+		if !fs.candidateMatchesKey(candidate, key, storedKey, storedKeyPresent) {
 			return nil
 		}
 	}
@@ -851,14 +857,14 @@ func (fs *FileStore) removeLegacyPathOnly(key string, heldSlots map[uint64]struc
 }
 
 func encodeKey(key string) string {
-	return "b64_" + base64.RawURLEncoding.EncodeToString([]byte(key))
+	return encodedKeyPrefix + base64.RawURLEncoding.EncodeToString([]byte(key))
 }
 
 func decodeStoredKey(relPath string) (string, bool) {
-	if !strings.HasPrefix(relPath, "b64_") {
+	if !strings.HasPrefix(relPath, encodedKeyPrefix) {
 		return "", false
 	}
-	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(relPath, "b64_"))
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(relPath, encodedKeyPrefix))
 	if err != nil {
 		return "", false
 	}

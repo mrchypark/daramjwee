@@ -271,6 +271,20 @@ func TestCache_MissStreamIgnoresDefaultTimeoutAfterFetchReturns(t *testing.T) {
 	assert.Equal(t, "v1", meta.ETag)
 }
 
+func TestCache_MissUsesDefaultTimeoutForFetchSetup(t *testing.T) {
+	hot := newMockStore()
+	fetcher := &mockFetcher{content: "timeout-safe-miss", etag: "v1", fetchDelay: 100 * time.Millisecond}
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(20*time.Millisecond))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "miss-timeout-setup-key", fetcher)
+	require.Error(t, err)
+	require.Nil(t, stream)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 func TestCache_LowerTierStreamIgnoresDefaultTimeoutAfterGetReturns(t *testing.T) {
 	hot := newContextBoundStore()
 	lower := newContextBoundStore()
@@ -339,6 +353,8 @@ type contextBoundFetcher struct {
 	body     []byte
 	metadata *daramjwee.Metadata
 }
+
+func (f *contextBoundFetcher) FetchUsesContext() bool { return true }
 
 func (f *contextBoundFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	return &daramjwee.FetchResult{

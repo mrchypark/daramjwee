@@ -684,6 +684,40 @@ func TestFileStore_LegacyFallbackDoesNotAliasEncodedNamespaceKeys(t *testing.T) 
 	assert.Equal(t, "foo-data", string(body))
 }
 
+func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFile(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	legacyKey := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(fs.baseDir, legacyKey)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-ambiguous"}))
+	_, err = f.Write([]byte("legacy-ambiguous-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, _, err = fs.GetStream(ctx, "foo")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	_, statErr := fs.Stat(ctx, "foo")
+	assert.ErrorIs(t, statErr, daramjwee.ErrNotFound)
+
+	require.NoError(t, fs.Delete(ctx, "foo"))
+	_, statErr = os.Stat(legacyPath)
+	require.NoError(t, statErr, "delete for encoded owner must not remove ambiguous legacy file")
+
+	reader, meta, err := fs.GetStream(ctx, legacyKey)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-ambiguous", meta.ETag)
+	assert.Equal(t, "legacy-ambiguous-data", string(body))
+}
+
 func TestFileStore_LegacyB64PrefixedKeyRemainsReachable(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()

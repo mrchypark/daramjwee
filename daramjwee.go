@@ -75,6 +75,12 @@ type Fetcher interface {
 	Fetch(ctx context.Context, oldMetadata *Metadata) (*FetchResult, error)
 }
 
+// FetchUsesContext is an optional Fetcher extension for fetchers whose returned
+// body continues using the provided context after Fetch returns.
+type FetchUsesContext interface {
+	FetchUsesContext() bool
+}
+
 // WriteSink is the terminal write contract for cache stores.
 // Close publishes the staged write, and Abort discards it.
 type WriteSink interface {

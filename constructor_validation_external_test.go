@@ -27,6 +27,6 @@ func TestNew_RejectsCopyAndTruncateFilestoreAsTierZero(t *testing.T) {
 
 	cache, err := daramjwee.New(nil, daramjwee.WithTiers(tier))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "tier 0 does not support stream-through publish semantics")
+	require.Contains(t, err.Error(), "WithCopyAndTruncate mode does not support stream-through publish semantics")
 	require.Nil(t, cache)
 }

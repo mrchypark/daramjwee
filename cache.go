@@ -200,7 +200,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 			c.errorLog("msg", "failed background set", "key", key, "copyErr", copyErr, "closeErr", closeErr)
 		} else {
 			c.infoLog("msg", "background set successful", "key", key)
-			c.schedulePersistFromTop(jobCtx, key, c.persistDestinationsAfterTop()...)
+			c.schedulePersistFromTop(key, c.persistDestinationsAfterTop()...)
 		}
 	}
 
@@ -298,7 +298,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 		closeErr := writer.Close()
 		if closeErr == nil {
 			if destinations := c.regularFanoutDestinations(tierIndex); len(destinations) > 0 {
-				c.schedulePersistFromTop(context.Background(), key, destinations...)
+				c.schedulePersistFromTop(key, destinations...)
 			}
 		}
 		cancel()
@@ -318,7 +318,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 	destinations := c.regularFanoutDestinations(tierIndex)
 	if len(destinations) > 0 {
 		onPublish = func() {
-			c.schedulePersistFromTop(context.Background(), key, destinations...)
+			c.schedulePersistFromTop(key, destinations...)
 		}
 	}
 	return streamThrough(src, writer, cancel, onPublish), nil
@@ -342,7 +342,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 		oldMetadata = meta
 	}
 
-	result, err := c.fetchFromOrigin(requestCtx, fetcher, oldMetadata)
+	result, err := c.fetchFromOrigin(c.fetchContextForFetcher(requestCtx, setupCtx, fetcher), fetcher, oldMetadata)
 	if err != nil {
 		if errors.Is(err, ErrCacheableNotFound) {
 			return c.handleNegativeCache(requestCtx, setupCtx, key)
@@ -378,7 +378,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 	}
 
 	return streamThrough(result.Body, writer, cancel, func() {
-		c.schedulePersistFromTop(context.Background(), key, c.persistDestinationsAfterTop()...)
+		c.schedulePersistFromTop(key, c.persistDestinationsAfterTop()...)
 	}), nil
 }
 
@@ -420,6 +420,11 @@ func usesContextAfterBeginSet(store Store) bool {
 	return ok && sensitive.BeginSetUsesContext()
 }
 
+func usesContextAfterFetch(fetcher Fetcher) bool {
+	sensitive, ok := fetcher.(FetchUsesContext)
+	return ok && sensitive.FetchUsesContext()
+}
+
 func (c *DaramjweeCache) getStreamContextForStore(requestCtx, setupCtx context.Context, store Store) context.Context {
 	if usesContextAfterGetStream(store) {
 		return requestCtx
@@ -429,6 +434,13 @@ func (c *DaramjweeCache) getStreamContextForStore(requestCtx, setupCtx context.C
 
 func (c *DaramjweeCache) beginSetContextForStore(requestCtx, setupCtx context.Context, store Store) context.Context {
 	if usesContextAfterBeginSet(store) {
+		return requestCtx
+	}
+	return setupCtx
+}
+
+func (c *DaramjweeCache) fetchContextForFetcher(requestCtx, setupCtx context.Context, fetcher Fetcher) context.Context {
+	if usesContextAfterFetch(fetcher) {
 		return requestCtx
 	}
 	return setupCtx
@@ -518,7 +530,7 @@ func (c *DaramjweeCache) regularFanoutDestinations(sourceIndex int) []tierDestin
 	return dests
 }
 
-func (c *DaramjweeCache) schedulePersistFromTop(_ context.Context, key string, destinations ...tierDestination) {
+func (c *DaramjweeCache) schedulePersistFromTop(key string, destinations ...tierDestination) {
 	srcStore := c.topWriteStore()
 	if !hasRealStore(srcStore) || len(destinations) == 0 {
 		return
