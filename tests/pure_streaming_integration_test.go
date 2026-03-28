@@ -241,9 +241,103 @@ func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
 	assert.Equal(t, 1, hot.closeCount(), "explicit close should close the underlying hot stream exactly once")
 }
 
+func TestCache_MissStreamIgnoresDefaultTimeoutAfterFetchReturns(t *testing.T) {
+	hot := newContextBoundStore()
+	fetcher := &contextBoundFetcher{body: []byte("timeout-safe-miss"), metadata: &daramjwee.Metadata{ETag: "v1"}}
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(20*time.Millisecond))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "miss-timeout-key", fetcher)
+	require.NoError(t, err)
+	defer stream.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "timeout-safe-miss", string(body))
+	require.NoError(t, stream.Close())
+
+	reader, meta, err := hot.GetStream(context.Background(), "miss-timeout-key")
+	require.NoError(t, err)
+	defer reader.Close()
+	persisted, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "timeout-safe-miss", string(persisted))
+	assert.Equal(t, "v1", meta.ETag)
+}
+
+func TestCache_LowerTierStreamIgnoresDefaultTimeoutAfterGetReturns(t *testing.T) {
+	hot := newContextBoundStore()
+	lower := newContextBoundStore()
+	lower.set("lower-timeout-key", []byte("lower-timeout-value"), &daramjwee.Metadata{ETag: "v1"})
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot, lower), daramjwee.WithDefaultTimeout(20*time.Millisecond))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "lower-timeout-key", &mockFetcher{})
+	require.NoError(t, err)
+	defer stream.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "lower-timeout-value", string(body))
+	require.NoError(t, stream.Close())
+
+	reader, meta, err := hot.GetStream(context.Background(), "lower-timeout-key")
+	require.NoError(t, err)
+	defer reader.Close()
+	persisted, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "lower-timeout-value", string(persisted))
+	assert.Equal(t, "v1", meta.ETag)
+}
+
+func TestCache_SetSinkIgnoresDefaultTimeoutAfterBeginSetReturns(t *testing.T) {
+	hot := newContextBoundStore()
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(20*time.Millisecond))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	writer, err := cache.Set(context.Background(), "set-timeout-key", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, err = writer.Write([]byte("timeout-safe-set"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	reader, meta, err := hot.GetStream(context.Background(), "set-timeout-key")
+	require.NoError(t, err)
+	defer reader.Close()
+	persisted, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "timeout-safe-set", string(persisted))
+	assert.Equal(t, "v1", meta.ETag)
+}
+
 type getResult struct {
 	stream io.ReadCloser
 	err    error
+}
+
+type contextBoundFetcher struct {
+	body     []byte
+	metadata *daramjwee.Metadata
+}
+
+func (f *contextBoundFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	return &daramjwee.FetchResult{
+		Body:     &contextBoundReadCloser{ctx: ctx, Reader: bytes.NewReader(bytes.Clone(f.body))},
+		Metadata: f.metadata,
+	}, nil
 }
 
 type blockingSourceFetcher struct {
@@ -284,6 +378,130 @@ type discardSink struct{}
 func (s *discardSink) Write(p []byte) (int, error) { return len(p), nil }
 func (s *discardSink) Close() error                { return nil }
 func (s *discardSink) Abort() error                { return nil }
+
+type contextBoundReadCloser struct {
+	ctx context.Context
+	*bytes.Reader
+}
+
+func (r *contextBoundReadCloser) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+	}
+	return r.Reader.Read(p)
+}
+
+func (r *contextBoundReadCloser) Close() error {
+	return nil
+}
+
+type contextBoundStore struct {
+	mu   sync.Mutex
+	data map[string][]byte
+	meta map[string]*daramjwee.Metadata
+}
+
+func newContextBoundStore() *contextBoundStore {
+	return &contextBoundStore{
+		data: make(map[string][]byte),
+		meta: make(map[string]*daramjwee.Metadata),
+	}
+}
+
+func (s *contextBoundStore) GetStreamUsesContext() bool { return true }
+
+func (s *contextBoundStore) BeginSetUsesContext() bool { return true }
+
+func (s *contextBoundStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	body, ok := s.data[key]
+	if !ok {
+		return nil, nil, daramjwee.ErrNotFound
+	}
+	meta := *s.meta[key]
+	return &contextBoundReadCloser{ctx: ctx, Reader: bytes.NewReader(bytes.Clone(body))}, &meta, nil
+}
+
+func (s *contextBoundStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	metaCopy := &daramjwee.Metadata{}
+	if metadata != nil {
+		*metaCopy = *metadata
+	}
+	return &contextBoundSink{ctx: ctx, store: s, key: key, meta: metaCopy}, nil
+}
+
+func (s *contextBoundStore) Delete(ctx context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data, key)
+	delete(s.meta, key)
+	return nil
+}
+
+func (s *contextBoundStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	meta, ok := s.meta[key]
+	if !ok {
+		return nil, daramjwee.ErrNotFound
+	}
+	metaCopy := *meta
+	return &metaCopy, nil
+}
+
+func (s *contextBoundStore) set(key string, body []byte, meta *daramjwee.Metadata) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[key] = bytes.Clone(body)
+	metaCopy := &daramjwee.Metadata{}
+	if meta != nil {
+		*metaCopy = *meta
+	}
+	s.meta[key] = metaCopy
+}
+
+type contextBoundSink struct {
+	ctx   context.Context
+	store *contextBoundStore
+	key   string
+	meta  *daramjwee.Metadata
+	buf   bytes.Buffer
+	done  atomic.Bool
+}
+
+func (s *contextBoundSink) Write(p []byte) (int, error) {
+	if s.done.Load() {
+		return 0, io.ErrClosedPipe
+	}
+	select {
+	case <-s.ctx.Done():
+		return 0, s.ctx.Err()
+	default:
+	}
+	return s.buf.Write(p)
+}
+
+func (s *contextBoundSink) Close() error {
+	if !s.done.CompareAndSwap(false, true) {
+		return nil
+	}
+	select {
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	default:
+	}
+	s.store.set(s.key, s.buf.Bytes(), s.meta)
+	return nil
+}
+
+func (s *contextBoundSink) Abort() error {
+	s.done.Store(true)
+	return nil
+}
 
 type errFetcher struct {
 	err error

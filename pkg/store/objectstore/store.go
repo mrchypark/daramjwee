@@ -74,6 +74,8 @@ type Store struct {
 	now             func() time.Time
 }
 
+func (s *Store) GetStreamUsesContext() bool { return true }
+
 var _ daramjwee.Store = (*Store)(nil)
 
 // New creates a new object storage backend.

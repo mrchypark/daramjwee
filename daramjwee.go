@@ -94,6 +94,18 @@ type Store interface {
 	Stat(ctx context.Context, key string) (*Metadata, error)
 }
 
+// GetStreamUsesContext is an optional Store extension for backends whose
+// returned readers continue using the provided context after GetStream returns.
+type GetStreamUsesContext interface {
+	GetStreamUsesContext() bool
+}
+
+// BeginSetUsesContext is an optional Store extension for backends whose
+// returned sinks continue using the provided context after BeginSet returns.
+type BeginSetUsesContext interface {
+	BeginSetUsesContext() bool
+}
+
 // EvictionPolicy defines the contract for a cache eviction strategy.
 type EvictionPolicy interface {
 	// Touch is called when an item is accessed.

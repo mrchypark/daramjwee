@@ -41,20 +41,20 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	if fetcher == nil {
 		return nil, ErrNilFetcher
 	}
-	ctx, cancel := c.newCtxWithTimeout(ctx)
+	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 
 	for i, tier := range c.Tiers {
-		tierStream, tierMeta, err := c.getStreamFromStore(ctx, tier, key)
+		tierStream, tierMeta, err := c.getStreamFromStore(c.getStreamContextForStore(ctx, setupCtx, tier), tier, key)
 		if err == nil {
 			if i == 0 {
-				stream, streamErr := c.handleTopTierHit(ctx, key, fetcher, tierStream, tierMeta, cancel)
+				stream, streamErr := c.handleTopTierHit(setupCtx, key, fetcher, tierStream, tierMeta, cancel)
 				if streamErr != nil {
 					cancel()
 					return nil, streamErr
 				}
 				return stream, nil
 			}
-			stream, streamErr := c.handleLowerTierHit(ctx, key, i, fetcher, tierStream, tierMeta, cancel)
+			stream, streamErr := c.handleLowerTierHit(ctx, setupCtx, key, i, fetcher, tierStream, tierMeta, cancel)
 			if streamErr != nil {
 				cancel()
 				return nil, streamErr
@@ -71,7 +71,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	}
 
 	// 3. Fetch from Origin
-	stream, streamErr := c.handleMiss(ctx, key, fetcher, cancel)
+	stream, streamErr := c.handleMiss(ctx, setupCtx, key, fetcher, cancel)
 	if streamErr != nil {
 		cancel()
 		return nil, streamErr
@@ -89,14 +89,14 @@ func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata
 	if !hasRealStore(target) {
 		return nil, &ConfigError{"no writable tier is configured"}
 	}
-	ctx, cancel := c.newCtxWithTimeout(ctx)
+	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 
 	if metadata == nil {
 		metadata = &Metadata{}
 	}
 	metadata.CachedAt = time.Now()
 
-	wc, err := c.setStreamToStore(ctx, target, key, metadata)
+	wc, err := c.setStreamToStore(c.beginSetContextForStore(ctx, setupCtx, target), target, key, metadata)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -159,7 +159,7 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		if err != nil {
 			if errors.Is(err, ErrCacheableNotFound) {
 				c.debugLog("msg", "re-caching as negative entry during background refresh", "key", key)
-				c.handleNegativeCache(jobCtx, key)
+				c.handleNegativeCache(jobCtx, jobCtx, key)
 			} else if errors.Is(err, ErrNotModified) {
 				c.debugLog("msg", "background refresh: object not modified", "key", key)
 			} else {
@@ -260,7 +260,7 @@ func (c *DaramjweeCache) handleTopTierHit(_ context.Context, key string, fetcher
 }
 
 // handleLowerTierHit processes the logic when an object is found in a lower tier.
-func (c *DaramjweeCache) handleLowerTierHit(ctx context.Context, key string, tierIndex int, fetcher Fetcher, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc) (io.ReadCloser, error) {
+func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, fetcher Fetcher, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc) (io.ReadCloser, error) {
 	c.debugLog("msg", "lower tier hit, promoting to top tier", "key", key, "tier_index", tierIndex)
 
 	metaToPromote := &Metadata{}
@@ -279,7 +279,7 @@ func (c *DaramjweeCache) handleLowerTierHit(ctx context.Context, key string, tie
 	}
 
 	if meta.IsNegative {
-		writer, err := c.setStreamToStore(ctx, c.Tiers[0], key, metaToPromote)
+		writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, c.Tiers[0]), c.Tiers[0], key, metaToPromote)
 		if err != nil {
 			c.warnLog("msg", "failed to acquire top-tier sink for negative promotion", "key", key, "err", err)
 			_ = src.Close()
@@ -301,7 +301,7 @@ func (c *DaramjweeCache) handleLowerTierHit(ctx context.Context, key string, tie
 		return nil, ErrNotFound
 	}
 
-	writer, err := c.setStreamToStore(ctx, c.Tiers[0], key, metaToPromote)
+	writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, c.Tiers[0]), c.Tiers[0], key, metaToPromote)
 	if err != nil {
 		c.warnLog("msg", "failed to acquire top-tier sink for promotion", "key", key, "err", err)
 		return newCancelOnCloseReadCloser(src, cancel), nil
@@ -327,22 +327,22 @@ func (c *DaramjweeCache) refreshOnCloseCallback(key string, fetcher Fetcher, can
 }
 
 // handleMiss processes the logic when an object is not found in any tier.
-func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc) (io.ReadCloser, error) {
+func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc) (io.ReadCloser, error) {
 	c.debugLog("msg", "full cache miss, fetching from origin", "key", key)
 
 	var oldMetadata *Metadata
-	if meta, err := c.statFromStore(ctx, c.topWriteStore(), key); err == nil {
+	if meta, err := c.statFromStore(setupCtx, c.topWriteStore(), key); err == nil {
 		oldMetadata = meta
 	}
 
-	result, err := fetcher.Fetch(ctx, oldMetadata)
+	result, err := c.fetchFromOrigin(requestCtx, fetcher, oldMetadata)
 	if err != nil {
 		if errors.Is(err, ErrCacheableNotFound) {
-			return c.handleNegativeCache(ctx, key)
+			return c.handleNegativeCache(requestCtx, setupCtx, key)
 		}
 		if errors.Is(err, ErrNotModified) {
 			c.debugLog("msg", "object not modified, serving from hot cache again", "key", key)
-			stream, meta, err := c.getStreamFromStore(ctx, c.topWriteStore(), key)
+			stream, meta, err := c.getStreamFromStore(c.getStreamContextForStore(requestCtx, setupCtx, c.topWriteStore()), c.topWriteStore(), key)
 			if err != nil {
 				if errors.Is(err, ErrNilMetadata) {
 					return nil, err
@@ -358,14 +358,13 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 		}
 		return nil, err
 	}
-
 	if result.Metadata == nil {
 		result.Metadata = &Metadata{}
 	}
 	result.Metadata.CachedAt = time.Now()
 
 	target := c.topWriteStore()
-	writer, err := c.setStreamToStore(ctx, target, key, result.Metadata)
+	writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, target), target, key, result.Metadata)
 	if err != nil {
 		c.warnLog("msg", "failed to acquire top sink on miss", "key", key, "err", err)
 		return newCancelOnCloseReadCloser(result.Body, cancel), nil
@@ -377,7 +376,7 @@ func (c *DaramjweeCache) handleMiss(ctx context.Context, key string, fetcher Fet
 }
 
 // handleNegativeCache processes the logic for storing a negative cache entry.
-func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (io.ReadCloser, error) {
+func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Context, key string) (io.ReadCloser, error) {
 	c.debugLog("msg", "caching as negative entry", "key", key, "negative_fresh_for", c.TierNegativeFreshFor)
 
 	meta := &Metadata{
@@ -385,7 +384,7 @@ func (c *DaramjweeCache) handleNegativeCache(ctx context.Context, key string) (i
 		CachedAt:   time.Now(),
 	}
 
-	writer, err := c.setStreamToStore(ctx, c.topWriteStore(), key, meta)
+	writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, c.topWriteStore()), c.topWriteStore(), key, meta)
 	if err != nil {
 		c.warnLog("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
 	} else {
@@ -402,6 +401,30 @@ func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, c.DefaultTimeout)
+}
+
+func usesContextAfterGetStream(store Store) bool {
+	sensitive, ok := store.(GetStreamUsesContext)
+	return ok && sensitive.GetStreamUsesContext()
+}
+
+func usesContextAfterBeginSet(store Store) bool {
+	sensitive, ok := store.(BeginSetUsesContext)
+	return ok && sensitive.BeginSetUsesContext()
+}
+
+func (c *DaramjweeCache) getStreamContextForStore(requestCtx, setupCtx context.Context, store Store) context.Context {
+	if usesContextAfterGetStream(store) {
+		return requestCtx
+	}
+	return setupCtx
+}
+
+func (c *DaramjweeCache) beginSetContextForStore(requestCtx, setupCtx context.Context, store Store) context.Context {
+	if usesContextAfterBeginSet(store) {
+		return requestCtx
+	}
+	return setupCtx
 }
 
 // getStreamFromStore is a wrapper that calls the Store interface's GetStream method.
@@ -431,7 +454,13 @@ func (c *DaramjweeCache) deleteFromStore(ctx context.Context, store Store, key s
 
 // statFromStore is a wrapper that calls the Store interface's Stat method.
 func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key string) (*Metadata, error) {
-	return store.Stat(ctx, key)
+	opCtx, cancel := c.newCtxWithTimeout(ctx)
+	defer cancel()
+	return store.Stat(opCtx, key)
+}
+
+func (c *DaramjweeCache) fetchFromOrigin(ctx context.Context, fetcher Fetcher, oldMetadata *Metadata) (*FetchResult, error) {
+	return fetcher.Fetch(ctx, oldMetadata)
 }
 
 func hasRealStore(store Store) bool {

@@ -324,7 +324,14 @@ func (fs *FileStore) dataPathCandidates(key string) []string {
 	if legacyPath == encodedPath {
 		return []string{encodedPath}
 	}
+	if fs.isAmbiguousLegacyPath(legacyPath) {
+		return []string{encodedPath}
+	}
 	return []string{encodedPath, legacyPath}
+}
+
+func (fs *FileStore) isAmbiguousLegacyPath(path string) bool {
+	return filepath.Dir(path) == fs.baseDir && strings.HasPrefix(filepath.Base(path), "b64_")
 }
 
 func (fs *FileStore) lockPaths(paths []string, heldSlots map[uint64]struct{}) []string {
@@ -678,7 +685,7 @@ func (fs *FileStore) evictKey(key string, heldSlots map[uint64]struct{}) error {
 func (fs *FileStore) removeLegacyPathOnly(key string, heldSlots map[uint64]struct{}) error {
 	legacyPath := fs.legacyDataPath(key)
 	currentPath := fs.toDataPath(key)
-	if legacyPath == currentPath {
+	if legacyPath == currentPath || fs.isAmbiguousLegacyPath(legacyPath) {
 		return nil
 	}
 

@@ -33,6 +33,10 @@ type RedisStore struct {
 	logger log.Logger
 }
 
+func (rs *RedisStore) GetStreamUsesContext() bool { return true }
+
+func (rs *RedisStore) BeginSetUsesContext() bool { return true }
+
 // New creates a new RedisStore.
 func New(client redis.UniversalClient, logger log.Logger) daramjwee.Store {
 	return &RedisStore{

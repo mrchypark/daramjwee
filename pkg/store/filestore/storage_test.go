@@ -657,6 +657,33 @@ func TestFileStore_OverwriteLegacyPathRemovesLegacyFile(t *testing.T) {
 	assert.Equal(t, "new-data", string(body))
 }
 
+func TestFileStore_LegacyFallbackDoesNotAliasEncodedNamespaceKeys(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	writer, err := fs.BeginSet(ctx, "foo", &daramjwee.Metadata{ETag: "foo"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("foo-data"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	_, _, err = fs.GetStream(ctx, "b64_Zm9v")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	_, statErr := fs.Stat(ctx, "b64_Zm9v")
+	assert.ErrorIs(t, statErr, daramjwee.ErrNotFound)
+
+	require.NoError(t, fs.Delete(ctx, "b64_Zm9v"))
+
+	reader, meta, err := fs.GetStream(ctx, "foo")
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "foo", meta.ETag)
+	assert.Equal(t, "foo-data", string(body))
+}
+
 func TestLockedWriteCloser_DoesNotCommitWhenFileCloseFails(t *testing.T) {
 	var committed bool
 	var aborted bool
