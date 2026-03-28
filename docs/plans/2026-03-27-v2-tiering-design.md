@@ -77,17 +77,19 @@ func WithDurableTier(store Store) Option
 
 compatibility layer:
 
-- `WithHotStore(x)` -> `WithTiers(x)`
-- `WithColdStore(y)` -> v2에서 제거 또는 deprecated compatibility shim
+- v2에서는 `WithHotStore` / `WithColdStore`를 제거한다.
+- repo 내부 call site는 같은 브랜치에서 `WithTiers` / `WithDurableTier`로 일괄 이행한다.
 
 ## Invariants
 
 ### Regular Tiers
 
 - regular tier는 `Store` contract를 따르는 whole-object cache tier다.
-- hit 시 더 위 tier들로 promotion할 수 있다.
+- hit 시 top tier로 backfill할 수 있다.
 - miss 시 더 아래 tier 또는 durable tier에서 fill할 수 있다.
 - partial read/source error/cancel 시 publish되면 안 된다.
+- v2 initial policy에서 synchronous fill target은 항상 하나다: `Tier[0]`.
+- top tier 이외의 regular tier backfill은 publish 이후 background fan-out으로만 수행한다.
 
 ### Durable Tier
 
@@ -96,6 +98,8 @@ compatibility layer:
 - durable tier 아래에 또 다른 regular tier를 둘 수 없다.
 - durable tier는 optional이다.
 - durable tier hit는 상위 regular tiers로 backfill할 수 있다.
+- `tiers=[]` + `durable!=nil` 구성은 허용한다.
+- durable-only 구성에서는 durable tier가 read backing과 direct `Set` target을 모두 담당한다.
 
 ### Objectstore
 
@@ -103,6 +107,28 @@ compatibility layer:
 - current product policy로는 `WithDurableTier(objectstore.New(...))`만 공식 지원한다.
 - `WithTiers(objectstore.New(...))`는 초기 v2에서는 config error다.
 - 다만 구현은 future hot-tier 가능성을 막지 않게 한다.
+
+## Freshness Model
+
+v2 initial freshness model은 단순하게 유지한다.
+
+- 모든 regular tiers는 하나의 positive/negative freshness policy를 공유한다.
+- durable tier는 별도의 positive/negative freshness policy를 가진다.
+- per-tier freshness override는 initial v2 범위 밖이다.
+
+초안:
+
+```go
+func WithRegularTierFreshness(positive, negative time.Duration) Option
+func WithDurableTierFreshness(positive, negative time.Duration) Option
+```
+
+의미:
+
+- regular tier freshness는 top-tier hit, lower-tier promotion, refresh scheduling에 공통 적용된다.
+- durable tier freshness는 durable hit/backfill 판단에만 적용된다.
+- 기존 `WithCache`, `WithNegativeCache`는 regular tier freshness로 이행한다.
+- 기존 cold-store-specific freshness 옵션은 `WithDurableTierFreshness`로 대체한다.
 
 ## Objectstore Backend Design
 
@@ -163,6 +189,13 @@ delete rule:
 - delete manifest first
 - blob cleanup is best-effort / GC
 
+GC rule:
+
+- inline delete/abort cleanup은 best-effort다.
+- correctness는 manifest visibility로 정의하고, blob reclamation은 background GC가 책임진다.
+- background GC는 manifest에 더 이상 참조되지 않고 grace period를 지난 blob만 sweep한다.
+- old generation blob은 open reader safety를 위해 즉시 삭제하지 않는다.
+
 ### Layout Strategy
 
 `objectstore`는 dual layout를 가진다.
@@ -193,6 +226,12 @@ delete rule:
    - page cache lookup
    - same-page request coalescing
    - miss 시 remote range fetch 후 page fill
+
+paged read correctness invariant:
+
+- page cache key는 최소 `version + page_index`를 포함해야 한다.
+- same-page coalescing key도 최소 `version + page_index`를 포함해야 한다.
+- logical key만으로 page cache/coalescing을 하면 overwrite 후 서로 다른 generation의 page가 섞일 수 있으므로 금지한다.
 
 ### Write Path
 
@@ -232,15 +271,18 @@ delete rule:
 1. `Tier[0]`부터 순차 조회
 2. first hit 발견 시:
    - caller에게 stream 반환
-   - hit tier보다 위쪽 tiers에 promotion
+   - synchronous fill은 `Tier[0]`에만 수행
+   - 필요하면 publish 후 background fan-out으로 나머지 상위 regular tiers를 채움
 3. regular tier 모두 miss면 `DurableTier` 조회
-4. durable hit면 상위 tiers에 fill
+4. durable hit면 synchronous fill은 top tier에만 수행하고, 나머지 regular tiers는 필요하면 background backfill
 5. durable도 miss면 origin fetch
 
 쓰기:
 
-- direct `Set`은 `Tier[0]`에만 write
-- miss/origin fetch 성공 시 `Tier[0]` pure streaming fill
+- direct `Set`은 `Tier[0]`이 있으면 거기에 write하고, regular tier가 없으면 durable tier에 직접 write한다.
+- miss/origin fetch 성공 시 synchronous pure streaming fill target은 하나다:
+  - regular tier가 있으면 `Tier[0]`
+  - regular tier가 없고 durable tier만 있으면 durable tier
 - publish 후 lower regular tiers / durable tier로 async persist 가능
 
 삭제:
@@ -252,9 +294,9 @@ delete rule:
 
 v2 initial policy:
 
-- read hit on lower regular tier -> promote to all higher tiers
-- durable hit -> fill higher regular tiers
-- origin miss fill -> write top tier first, then async fan-out downward
+- read hit on non-top regular tier -> synchronously fill only top tier, then optionally async backfill intermediate tiers
+- durable hit -> synchronously fill top tier if present, then optionally async backfill remaining regular tiers
+- origin miss fill -> write single top target first, then async fan-out downward
 
 이 정책은 conservative하고 이해하기 쉽다.
 
@@ -264,7 +306,7 @@ v2 initial policy:
 
 config validation:
 
-- `len(Tiers) >= 1`
+- at least one of `Tiers` or `DurableTier` must be configured
 - no nil tier
 - no duplicate store instance
 - `DurableTier` must not also appear in `Tiers`
@@ -285,16 +327,18 @@ recommended mapping:
 - old hot -> first tier
 - old cold objectstore -> durable tier
 - old cold non-objectstore -> second regular tier if still desired
+- old cold-store-specific freshness -> durable-tier freshness
 
 ## Testing Requirements
 
 ### Cache Core
 
 - n-tier lookup order
-- lower-tier promotion
+- lower-tier hit synchronously fills only top tier
 - durable-tier backfill
 - origin miss fill semantics
 - partial read abort semantics still hold
+- durable-only direct `Set` semantics
 
 ### Objectstore
 
@@ -304,8 +348,10 @@ recommended mapping:
 - delete removes manifest visibility
 - negative layout
 - paged layout reads
+- paged cache/coalescing key is version-aware
 - page cache hit/miss
 - same-page coalescing
+- GC sweep deletes only unreachable blobs past grace period
 
 ### Benchmarks
 
