@@ -154,6 +154,38 @@ func TestScheduleRefresh_WithoutColdStoreDoesNotPanicWorker(t *testing.T) {
 	assert.NotContains(t, logBuf.String(), "starting background set")
 }
 
+func TestScheduleRefresh_ContinuesAfterCallerContextCancel(t *testing.T) {
+	hot := newMockStore()
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithWorker("pool", 1, 4, 2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	fetcher := &mockFetcher{content: "refreshed-after-cancel", etag: "v1", fetchDelay: 50 * time.Millisecond}
+
+	require.NoError(t, cache.ScheduleRefresh(ctx, "refresh-after-cancel", fetcher))
+	cancel()
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := hot.GetStream(context.Background(), "refresh-after-cancel")
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(body) == "refreshed-after-cancel" && meta.ETag == "v1" && fetcher.getFetchCount() > 0
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
 type blockingFetcher struct {
 	started chan struct{}
 	blocker chan struct{}

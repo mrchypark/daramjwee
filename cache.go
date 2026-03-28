@@ -149,9 +149,6 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 	}
 
 	job := func(jobCtx context.Context) {
-		jobCtx, cancel := mergeContexts(jobCtx, ctx)
-		defer cancel()
-
 		c.infoLog("msg", "starting background refresh", "key", key)
 
 		var oldMetadata *Metadata
@@ -656,16 +653,4 @@ func ReadAll(rc io.ReadCloser) ([]byte, error) {
 		return sc.ReadAll()
 	}
 	return io.ReadAll(rc)
-}
-
-func mergeContexts(primary, secondary context.Context) (context.Context, context.CancelFunc) {
-	if secondary == nil || secondary.Done() == nil {
-		return primary, func() {}
-	}
-	ctx, cancel := context.WithCancel(primary)
-	stop := context.AfterFunc(secondary, cancel)
-	return ctx, func() {
-		stop()
-		cancel()
-	}
 }
