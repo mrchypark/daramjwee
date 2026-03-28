@@ -6,7 +6,7 @@ import (
 )
 
 // nullStore is a Null Object implementation of the Store interface.
-// It performs no operations and is used when a ColdStore is not configured,
+// It performs no operations and is used when an optional tier is not configured,
 // avoiding nil checks.
 type nullStore struct{}
 
@@ -33,10 +33,6 @@ func (ns *nullStore) Delete(ctx context.Context, key string) error {
 // Stat always returns ErrNotFound.
 func (ns *nullStore) Stat(ctx context.Context, key string) (*Metadata, error) {
 	return nil, ErrNotFound
-}
-
-func (ns *nullStore) ValidateHotStore() error {
-	return &ConfigError{"unsupported hot store"}
 }
 
 // nullWriteSink is a WriteSink implementation that discards all written data.

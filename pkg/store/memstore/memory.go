@@ -116,10 +116,6 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 	return cloneMetadata(e.metadata), nil
 }
 
-func (ms *MemStore) ValidateHotStore() error {
-	return nil
-}
-
 // memStoreSink is a helper type that satisfies the daramjwee.WriteSink interface.
 type memStoreSink struct {
 	ms       *MemStore
@@ -177,14 +173,14 @@ func (w *memStoreSink) Close() error {
 			}
 
 			var actuallyEvicted bool
-				for _, keyToEvict := range keysToEvict {
-					if entryToEvict, ok := w.ms.data[keyToEvict]; ok {
-						w.ms.currentSize -= int64(len(entryToEvict.value))
-						delete(w.ms.data, keyToEvict)
-						w.ms.policy.Remove(keyToEvict)
-						actuallyEvicted = true
-					}
+			for _, keyToEvict := range keysToEvict {
+				if entryToEvict, ok := w.ms.data[keyToEvict]; ok {
+					w.ms.currentSize -= int64(len(entryToEvict.value))
+					delete(w.ms.data, keyToEvict)
+					w.ms.policy.Remove(keyToEvict)
+					actuallyEvicted = true
 				}
+			}
 
 			if !actuallyEvicted {
 				// If the policy keeps returning non-existent keys, break to prevent infinite loop.

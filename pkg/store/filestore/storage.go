@@ -200,13 +200,6 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 	return newLockedWriteCloser(tmpFile, onClose, cleanupTemp), nil
 }
 
-func (fs *FileStore) ValidateHotStore() error {
-	if fs.useCopyAndTruncate {
-		return &daramjwee.ConfigError{Message: "unsupported hot store: filestore copy-and-truncate mode"}
-	}
-	return nil
-}
-
 // Delete removes an object from the store.
 func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	// Get file size before deletion for policy update

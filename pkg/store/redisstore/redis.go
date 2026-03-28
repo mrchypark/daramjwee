@@ -139,10 +139,6 @@ func (rs *RedisStore) BeginSet(ctx context.Context, key string, metadata *daramj
 	return w, nil
 }
 
-func (rs *RedisStore) ValidateHotStore() error {
-	return nil
-}
-
 // Delete removes an object and its metadata from Redis.
 func (rs *RedisStore) Delete(ctx context.Context, key string) error {
 	select {

@@ -17,7 +17,7 @@ func TestCache_MissReturnsStreamBeforeSourceEOF(t *testing.T) {
 	source := newBlockingReadCloser([]byte("hello"), []byte(" world"))
 	fetcher := &blockingSourceFetcher{source: source, metadata: &daramjwee.Metadata{ETag: "v1"}}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithDefaultTimeout(2*time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(2*time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -71,8 +71,7 @@ func TestCache_ColdHitReturnsStreamBeforeSourceEOF(t *testing.T) {
 
 	cache, err := daramjwee.New(
 		nil,
-		daramjwee.WithHotStore(hot),
-		daramjwee.WithColdStore(cold),
+		daramjwee.WithTiers(hot, cold),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
@@ -123,7 +122,7 @@ func TestCache_MissBeginSetFailureFallsBackToPassthrough(t *testing.T) {
 	hot.forceSetError = true
 	fetcher := &mockFetcher{content: "passthrough", etag: "v1"}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithDefaultTimeout(2*time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(2*time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -143,7 +142,7 @@ func TestCache_PartialMissReadCloseDoesNotPublishToHot(t *testing.T) {
 	hot := newMockStore()
 	fetcher := &mockFetcher{content: "partial-value", etag: "v1"}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithDefaultTimeout(2*time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(2*time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -167,8 +166,7 @@ func TestCache_PartialColdHitReadCloseDoesNotPublishToHot(t *testing.T) {
 
 	cache, err := daramjwee.New(
 		nil,
-		daramjwee.WithHotStore(hot),
-		daramjwee.WithColdStore(cold),
+		daramjwee.WithTiers(hot, cold),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
@@ -194,8 +192,7 @@ func TestCache_PublishFailureDoesNotScheduleColdPersist(t *testing.T) {
 
 	cache, err := daramjwee.New(
 		nil,
-		daramjwee.WithHotStore(hot),
-		daramjwee.WithColdStore(cold),
+		daramjwee.WithTiers(hot, cold),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 	)
 	require.NoError(t, err)

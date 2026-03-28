@@ -85,7 +85,7 @@ func (s *mockStore) BeginSet(ctx context.Context, key string, metadata *daramjwe
 			return nil
 		},
 		onAbort: func() error { return nil },
-		buf: &buf,
+		buf:     &buf,
 	}, nil
 }
 
@@ -216,7 +216,7 @@ func TestCache_WithSlowColdStore(t *testing.T) {
 	hot := newMockStore()
 	slowCold := newSlowMockStore(100 * time.Millisecond)
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithColdStore(slowCold), daramjwee.WithDefaultTimeout(1*time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot, slowCold), daramjwee.WithDefaultTimeout(1*time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
