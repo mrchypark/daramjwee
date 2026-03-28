@@ -170,6 +170,74 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 	require.ErrorIs(t, reopenErr, daramjwee.ErrNotFound)
 }
 
+func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	bucket := objstore.NewInMemBucket()
+	store := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDataDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "missing-segment-remote-live", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "remote-current")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	entry, ok := store.catalog.Get("missing-segment-remote-live")
+	require.True(t, ok)
+
+	remotePath := store.blobPath("missing-segment-remote-live", "remote-v1")
+	require.NoError(t, bucket.Upload(ctx, remotePath, strings.NewReader("remote-current")))
+	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("missing-segment-remote-live"), map[string]checkpointEntry{
+		"missing-segment-remote-live": {
+			SegmentPath: remotePath,
+			Offset:      0,
+			Length:      int64(len("remote-current")),
+			Metadata:    entry.Metadata,
+		},
+	}))
+	require.NoError(t, store.updateLocalEntry("missing-segment-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		require.True(t, exists)
+		current.RemotePath = remotePath
+		current.RemoteOffset = 0
+		return current, true
+	}))
+
+	segments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
+	require.NoError(t, err)
+	require.Len(t, segments, 1)
+	require.NoError(t, os.Remove(segments[0]))
+
+	stream, meta, err := store.GetStream(ctx, "missing-segment-remote-live")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "remote-current", string(body))
+	assert.Equal(t, "v1", meta.ETag)
+
+	reopened := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDataDir(dataDir),
+	)
+	reopened.autoFlush = false
+
+	reopenedStream, reopenedMeta, err := reopened.GetStream(ctx, "missing-segment-remote-live")
+	require.NoError(t, err)
+	defer reopenedStream.Close()
+
+	reopenedBody, err := io.ReadAll(reopenedStream)
+	require.NoError(t, err)
+	assert.Equal(t, "remote-current", string(reopenedBody))
+	assert.Equal(t, "v1", reopenedMeta.ETag)
+}
+
 func TestStore_OverwriteRemovesPreviousPublishedLocalSegment(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

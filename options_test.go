@@ -146,6 +146,51 @@ func TestNew_OptionValidation(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		{
+			name: "failure with empty worker strategy",
+			options: []Option{
+				WithTiers(regularA),
+				WithWorker("", 10, 100, 5*time.Second),
+			},
+			expectErr:   true,
+			expectedMsg: "worker strategy type cannot be empty",
+		},
+		{
+			name: "failure with non-positive worker pool size",
+			options: []Option{
+				WithTiers(regularA),
+				WithWorker("pool", 0, 100, 5*time.Second),
+			},
+			expectErr:   true,
+			expectedMsg: "worker pool size must be positive",
+		},
+		{
+			name: "failure with non-positive worker timeout",
+			options: []Option{
+				WithTiers(regularA),
+				WithWorker("pool", 1, 100, 0),
+			},
+			expectErr:   true,
+			expectedMsg: "worker job timeout must be positive",
+		},
+		{
+			name: "failure with non-positive default timeout",
+			options: []Option{
+				WithTiers(regularA),
+				WithDefaultTimeout(0),
+			},
+			expectErr:   true,
+			expectedMsg: "default timeout must be positive",
+		},
+		{
+			name: "failure with non-positive shutdown timeout",
+			options: []Option{
+				WithTiers(regularA),
+				WithShutdownTimeout(0),
+			},
+			expectErr:   true,
+			expectedMsg: "Shutdown timeout must be positive",
+		},
 	}
 
 	for _, tc := range testCases {

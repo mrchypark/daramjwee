@@ -23,10 +23,7 @@ func (s *Store) recoverLocalState() error {
 			return err
 		}
 
-		if err := s.publishLocalEntry(key, localCatalogEntry{
-			Missing:  true,
-			Metadata: entry.Metadata,
-		}); err != nil {
+		if err := s.publishLocalEntry(key, repairedEntryWithoutLocalSegment(entry)); err != nil {
 			return err
 		}
 	}

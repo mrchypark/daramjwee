@@ -28,6 +28,9 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 	if entry.Missing {
 		return localCatalogEntry{}, false, errMissingLocalEntry
 	}
+	if entry.SegmentPath == "" {
+		return localCatalogEntry{}, false, nil
+	}
 	if _, statErr := os.Stat(entry.SegmentPath); statErr == nil {
 		return entry, true, nil
 	} else if !os.IsNotExist(statErr) {
@@ -42,15 +45,26 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 		return localCatalogEntry{}, false, err
 	}
 	if latest.SegmentPath == entry.SegmentPath {
-		if err := s.publishLocalEntry(key, localCatalogEntry{
-			Missing:  true,
-			Metadata: latest.Metadata,
-		}); err != nil {
+		repaired := repairedEntryWithoutLocalSegment(latest)
+		if err := s.publishLocalEntry(key, repaired); err != nil {
 			return localCatalogEntry{}, false, err
 		}
-		return localCatalogEntry{}, false, errMissingLocalEntry
+		if repaired.Missing {
+			return localCatalogEntry{}, false, errMissingLocalEntry
+		}
+		return localCatalogEntry{}, false, nil
 	}
 	return localCatalogEntry{}, false, nil
+}
+
+func repairedEntryWithoutLocalSegment(entry localCatalogEntry) localCatalogEntry {
+	entry.SegmentPath = ""
+	entry.Offset = 0
+	if entry.RemotePath != "" {
+		return entry
+	}
+	entry.Missing = true
+	return entry
 }
 
 func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) error {
