@@ -197,6 +197,54 @@ func TestStore_OverwriteRemovesPreviousPublishedLocalSegment(t *testing.T) {
 	require.Len(t, segments, 1)
 }
 
+func TestStore_FlushUpdateSkipsKeyWhenNewerLocalEntryWasPublished(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDataDir(dataDir),
+	)
+	store.autoFlush = false
+
+	write := func(key, etag, body string) {
+		t.Helper()
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, body)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+	}
+
+	write("flush-stale-key", "v1", "old")
+	expectedEntries := store.catalog.Entries()
+	expected := expectedEntries["flush-stale-key"]
+
+	write("flush-stale-key", "v2", "new")
+
+	staleUpdate := expected
+	staleUpdate.RemotePath = "remote/old.seg"
+	staleUpdate.RemoteOffset = 0
+
+	require.NoError(t, store.commitFlushUpdates(expectedEntries, map[string]localCatalogEntry{
+		"flush-stale-key": staleUpdate,
+	}))
+
+	current, ok := store.catalog.Get("flush-stale-key")
+	require.True(t, ok)
+	assert.Equal(t, "v2", current.Metadata.ETag)
+	assert.Empty(t, current.RemotePath)
+
+	stream, meta, err := store.GetStream(ctx, "flush-stale-key")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(body))
+	assert.Equal(t, "v2", meta.ETag)
+}
+
 func TestStore_DeleteRemovesPublishedLocalSegment(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

@@ -146,7 +146,7 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	if len(updates) == 0 {
 		return nil
 	}
-	return s.updateLocalEntries(updates)
+	return s.commitFlushUpdates(currentEntries, updates)
 }
 
 func (s *Store) pendingRecordsForShard(shardID string, entries map[string]localCatalogEntry) ([]pendingFlushRecord, error) {

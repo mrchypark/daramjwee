@@ -81,6 +81,27 @@ func (s *Store) updateLocalEntries(entries map[string]localCatalogEntry) error {
 	return s.catalog.UpdateMany(entries)
 }
 
+func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCatalogEntry) error {
+	if s.catalog == nil || len(updates) == 0 {
+		return nil
+	}
+	for key, next := range updates {
+		expected, ok := expectedEntries[key]
+		if !ok {
+			continue
+		}
+		if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			if !exists || current != expected {
+				return current, exists
+			}
+			return next, true
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) deleteLocalEntry(key string) error {
 	if s.catalog == nil {
 		return nil

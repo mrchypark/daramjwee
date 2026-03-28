@@ -81,6 +81,7 @@ func WithEvictionPolicy(policy daramjwee.EvictionPolicy) Option {
 // New creates a new FileStore.
 // It ensures the base directory exists and initializes the file locking mechanism.
 func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
+	dir = filepath.Clean(dir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
 	}

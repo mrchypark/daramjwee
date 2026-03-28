@@ -718,6 +718,41 @@ func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFile(t *testing.T)
 	assert.Equal(t, "legacy-ambiguous-data", string(body))
 }
 
+func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFileWithTrailingSlashBaseDir(t *testing.T) {
+	dir := t.TempDir()
+	logger := log.NewNopLogger()
+	ctx := context.Background()
+
+	fs, err := New(dir+string(os.PathSeparator), logger)
+	require.NoError(t, err)
+
+	legacyKey := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(dir, legacyKey)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-trailing"}))
+	_, err = f.Write([]byte("legacy-trailing-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, _, err = fs.GetStream(ctx, "foo")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	require.NoError(t, fs.Delete(ctx, "foo"))
+	_, statErr := os.Stat(legacyPath)
+	require.NoError(t, statErr)
+
+	reader, meta, err := fs.GetStream(ctx, legacyKey)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-trailing", meta.ETag)
+	assert.Equal(t, "legacy-trailing-data", string(body))
+}
+
 func TestFileStore_LegacyB64PrefixedKeyRemainsReachable(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
