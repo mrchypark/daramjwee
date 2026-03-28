@@ -96,7 +96,7 @@ func ExampleOriginFetcher_Fetch() {
 	// [Origin] Fetching key: hello, (old ETag: 'v1')Data not modified as expected.
 }
 
-// main sets up and runs a daramjwee cache example with a file-based hot store
+// main sets up and runs a daramjwee cache example with a file-based tier-0 store
 // and a simulated origin server, exposing cached content via an HTTP server.
 func main() {
 	logger := log.NewLogfmtLogger(os.Stderr)
@@ -114,7 +114,7 @@ func main() {
 
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(hotStore),
+		daramjwee.WithTiers(hotStore),
 		daramjwee.WithDefaultTimeout(5*time.Second),
 	)
 	if err != nil {

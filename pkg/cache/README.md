@@ -8,7 +8,7 @@ Because JSON unmarshaling needs the full payload, `GenericCache.Get` drains the 
 
 - **Type Safety**: Compile-time type checking for cached values
 - **Automatic Serialization**: JSON marshaling/unmarshaling handled automatically
-- **Hot/Cold Store Integration**: Seamlessly works with daramjwee's multi-tier caching
+- **Tier Integration**: Seamlessly works with daramjwee's ordered-tier caching model
 - **Convenience Methods**: Must*, GetOrSet, GetWithDefault patterns
 - **Zero Configuration**: Works with any existing daramjwee.Cache instance
 
@@ -28,7 +28,7 @@ import (
 memStore := memstore.New(1*1024*1024, policy.NewLRU())
 baseCache, err := daramjwee.New(
     logger,
-    daramjwee.WithHotStore(memStore),
+    daramjwee.WithTiers(memStore),
 )
 
 // Create type-safe cache for your struct
@@ -157,12 +157,12 @@ if errors.Is(err, daramjwee.ErrNotFound) {
 - For large binary data, consider using the raw daramjwee.Cache interface
 - The generic cache is optimized for developer productivity over raw performance
 
-## Integration with Hot/Cold Stores
+## Integration with Ordered Tiers
 
-The generic cache automatically works with daramjwee's multi-tier architecture:
+The generic cache automatically works with daramjwee's ordered-tier architecture:
 
 ```go
-// Setup with both memory (hot) and file (cold) stores
+// Setup with both memory (tier 0) and file (tier 1) stores
 memStore := memstore.New(1*1024*1024, policy.NewLRU())
 fileStore, err := filestore.New("/tmp/cache", logger)
 if err != nil {
@@ -171,8 +171,7 @@ if err != nil {
 
 baseCache, err := daramjwee.New(
     logger,
-    daramjwee.WithHotStore(memStore),   // Fast memory cache
-    daramjwee.WithColdStore(fileStore), // Persistent file cache
+    daramjwee.WithTiers(memStore, fileStore),
 )
 if err != nil {
     // handle error
@@ -181,7 +180,7 @@ if err != nil {
 // Generic cache automatically uses both tiers
 userCache := cache.NewGeneric[User](baseCache)
 
-// Data flows: Memory -> File -> Origin (via fetcher)
+// Data flows: Tier 0 -> Tier 1 -> Origin (via fetcher)
 user, err := userCache.Get(ctx, "user:1", fetcher)
 ```
 
@@ -190,7 +189,7 @@ user, err := userCache.Get(ctx, "user:1", fetcher)
 See `examples/generic_cache/main.go` for a complete working example demonstrating:
 
 - Multiple data types (User, Config, Product, string)
-- Hot/cold store integration
+- Ordered-tier integration
 - All convenience methods
 - Error handling patterns
 - Background operations

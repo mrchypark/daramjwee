@@ -23,6 +23,7 @@ func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "local-key", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -52,6 +53,7 @@ func TestStore_AbortLeavesNoVisibleLocalEntry(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "abort-local", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -73,6 +75,7 @@ func TestStore_ReopenRecoversPublishedLocalEntries(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "recover-key", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -85,6 +88,7 @@ func TestStore_ReopenRecoversPublishedLocalEntries(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	reopened.autoFlush = false
 
 	stream, meta, err := reopened.GetStream(ctx, "recover-key")
 	require.NoError(t, err)
@@ -104,6 +108,7 @@ func TestStore_MissingLocalSegmentDoesNotRemainVisible(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "missing-segment", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -132,6 +137,7 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	oldBlobPath := store.blobPath("missing-segment-remote-fallback", "remote-v1")
 	require.NoError(t, bucket.Upload(ctx, oldBlobPath, strings.NewReader("remote-old")))
@@ -159,6 +165,7 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	reopened.autoFlush = false
 	_, reopenErr := reopened.Stat(ctx, "missing-segment-remote-fallback")
 	require.ErrorIs(t, reopenErr, daramjwee.ErrNotFound)
 }
@@ -171,6 +178,7 @@ func TestStore_OverwriteRemovesPreviousPublishedLocalSegment(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	write := func(key, etag, body string) {
 		t.Helper()
@@ -197,6 +205,7 @@ func TestStore_DeleteRemovesPublishedLocalSegment(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "delete-local-segment", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -220,6 +229,7 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "live-key", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -236,6 +246,7 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	reopened.autoFlush = false
 	require.NoError(t, reopened.ensureReady())
 
 	_, err = os.Stat(orphanPath)
@@ -259,6 +270,7 @@ func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 		log.NewNopLogger(),
 		WithDataDir(dataDir),
 	)
+	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "close-failure", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)

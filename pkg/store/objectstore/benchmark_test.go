@@ -11,13 +11,18 @@ import (
 	"github.com/thanos-io/objstore"
 )
 
-func BenchmarkStore_ReadCold(b *testing.B) {
-	store := benchmarkStore(b, false)
+func BenchmarkStore_ReadLocalPublished(b *testing.B) {
+	store := benchmarkLocalPublishedStore(b)
 	benchmarkReadAll(b, store, "bench-key")
 }
 
-func BenchmarkStore_ReadWarm(b *testing.B) {
-	store := benchmarkStore(b, true)
+func BenchmarkStore_ReadRemotePackedCold(b *testing.B) {
+	store := benchmarkRemotePackedStore(b, false)
+	benchmarkReadAll(b, store, "bench-key")
+}
+
+func BenchmarkStore_ReadRemotePackedWarm(b *testing.B) {
+	store := benchmarkRemotePackedStore(b, true)
 	stream, _, err := store.GetStream(context.Background(), "bench-key")
 	if err != nil {
 		b.Fatal(err)
@@ -32,7 +37,27 @@ func BenchmarkStore_ReadWarm(b *testing.B) {
 	benchmarkReadAll(b, store, "bench-key")
 }
 
-func benchmarkStore(b *testing.B, enableCache bool) *Store {
+func benchmarkLocalPublishedStore(b *testing.B) *Store {
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(),
+		WithPackedObjectThreshold(1<<20),
+		WithPageSize(32<<10),
+		WithDataDir(b.TempDir()),
+	)
+	store.autoFlush = false
+	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{ETag: "bench"})
+	if err != nil {
+		panic(err)
+	}
+	if _, err := writer.Write(bytes.Repeat([]byte("0123456789abcdef"), 1<<16)); err != nil {
+		panic(err)
+	}
+	if err := writer.Close(); err != nil {
+		panic(err)
+	}
+	return store
+}
+
+func benchmarkRemotePackedStore(b *testing.B, enableCache bool) *Store {
 	bucket := objstore.NewInMemBucket()
 	opts := []Option{
 		WithPackedObjectThreshold(1 << 20),
