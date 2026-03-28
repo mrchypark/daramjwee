@@ -186,6 +186,16 @@ func (f *mockFetcher) getFetchCount() int {
 	return f.fetchCount
 }
 
+func (f *mockFetcher) getLastOldMetadata() *daramjwee.Metadata {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lastOldMetadata == nil {
+		return nil
+	}
+	copied := *f.lastOldMetadata
+	return &copied
+}
+
 // slowMockStore simulates a slow storage by adding an intentional delay.
 type slowMockStore struct {
 	mockStore
@@ -216,13 +226,18 @@ func TestCache_WithSlowColdStore(t *testing.T) {
 	hot := newMockStore()
 	slowCold := newSlowMockStore(100 * time.Millisecond)
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot, slowCold), daramjwee.WithDefaultTimeout(1*time.Second))
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot, slowCold),
+		daramjwee.WithTierFreshness(time.Hour, time.Hour),
+		daramjwee.WithDefaultTimeout(1*time.Second),
+	)
 	require.NoError(t, err)
 	defer cache.Close()
 
 	key := "slow-item"
 	content := "content from slow store"
-	slowCold.setData(key, content, &daramjwee.Metadata{ETag: "v-slow"})
+	slowCold.setData(key, content, &daramjwee.Metadata{ETag: "v-slow", CachedAt: time.Now()})
 
 	stream, err := cache.Get(context.Background(), key, &mockFetcher{})
 	require.NoError(t, err)

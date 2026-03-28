@@ -128,6 +128,10 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 
 // ScheduleRefresh submits a background cache refresh job to the worker.
 func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetcher Fetcher) error {
+	return c.scheduleRefreshWithMetadata(ctx, key, fetcher, nil)
+}
+
+func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key string, fetcher Fetcher, fallbackMetadata *Metadata) error {
 	if c.isClosed.Load() {
 		return ErrCacheClosed
 	}
@@ -153,6 +157,9 @@ func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetche
 		var oldMetadata *Metadata
 		if meta, err := c.statFromStore(jobCtx, c.topWriteStore(), key); err == nil && meta != nil {
 			oldMetadata = meta
+		} else if fallbackMetadata != nil {
+			copied := *fallbackMetadata
+			oldMetadata = &copied
 		}
 
 		result, err := fetcher.Fetch(jobCtx, oldMetadata)
@@ -213,7 +220,7 @@ func (c *DaramjweeCache) isCachedStale(oldMeta *Metadata, positive, negative tim
 		freshnessLifetime = negative
 	}
 	if oldMeta.CachedAt.IsZero() {
-		return freshnessLifetime > 0
+		return true
 	}
 
 	return time.Now().After(oldMeta.CachedAt.Add(freshnessLifetime))
@@ -247,7 +254,7 @@ func (c *DaramjweeCache) handleTopTierHit(_ context.Context, key string, fetcher
 	}
 	if isStale {
 		c.debugLog("msg", "top tier is stale, scheduling refresh", "key", key)
-		callback = c.refreshOnCloseCallback(key, fetcher, cancel)
+		callback = c.refreshOnCloseCallback(key, fetcher, cancel, meta)
 	}
 	streamCloser := newSafeCloser(stream, callback)
 
@@ -270,7 +277,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 
 	if c.isCachedStale(meta, c.TierPositiveFreshFor, c.TierNegativeFreshFor) {
 		c.debugLog("msg", "lower tier is stale, serving stale and scheduling refresh", "key", key, "tier_index", tierIndex)
-		streamCloser := newSafeCloser(src, c.refreshOnCloseCallback(key, fetcher, cancel))
+		streamCloser := newSafeCloser(src, c.refreshOnCloseCallback(key, fetcher, cancel, meta))
 		if meta.IsNegative {
 			streamCloser.Close()
 			return nil, ErrNotFound
@@ -317,10 +324,10 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 	return streamThrough(src, writer, cancel, onPublish), nil
 }
 
-func (c *DaramjweeCache) refreshOnCloseCallback(key string, fetcher Fetcher, cancel context.CancelFunc) func() {
+func (c *DaramjweeCache) refreshOnCloseCallback(key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata) func() {
 	return func() {
 		defer cancel()
-		if err := c.ScheduleRefresh(context.Background(), key, fetcher); err != nil {
+		if err := c.scheduleRefreshWithMetadata(context.Background(), key, fetcher, oldMetadata); err != nil {
 			c.warnLog("msg", "failed to schedule stale refresh", "key", key, "err", err)
 		}
 	}

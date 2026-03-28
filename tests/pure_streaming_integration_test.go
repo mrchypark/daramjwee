@@ -68,12 +68,13 @@ func TestCache_ColdHitReturnsStreamBeforeSourceEOF(t *testing.T) {
 	source := newBlockingReadCloser([]byte("cold"), []byte(" value"))
 	cold := &blockingColdStore{
 		streamFactory: func() io.ReadCloser { return source },
-		metadata:      &daramjwee.Metadata{ETag: "v1"},
+		metadata:      &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()},
 	}
 
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, cold),
+		daramjwee.WithTierFreshness(time.Hour, time.Hour),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
@@ -164,11 +165,12 @@ func TestCache_PartialMissReadCloseDoesNotPublishToHot(t *testing.T) {
 func TestCache_PartialColdHitReadCloseDoesNotPublishToHot(t *testing.T) {
 	hot := newMockStore()
 	cold := newMockStore()
-	cold.setData("partial-cold-key", "partial-value", &daramjwee.Metadata{ETag: "v1"})
+	cold.setData("partial-cold-key", "partial-value", &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
 
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, cold),
+		daramjwee.WithTierFreshness(time.Hour, time.Hour),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
@@ -272,9 +274,14 @@ func TestCache_MissStreamIgnoresDefaultTimeoutAfterFetchReturns(t *testing.T) {
 func TestCache_LowerTierStreamIgnoresDefaultTimeoutAfterGetReturns(t *testing.T) {
 	hot := newContextBoundStore()
 	lower := newContextBoundStore()
-	lower.set("lower-timeout-key", []byte("lower-timeout-value"), &daramjwee.Metadata{ETag: "v1"})
+	lower.set("lower-timeout-key", []byte("lower-timeout-value"), &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot, lower), daramjwee.WithDefaultTimeout(20*time.Millisecond))
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot, lower),
+		daramjwee.WithTierFreshness(time.Hour, time.Hour),
+		daramjwee.WithDefaultTimeout(20*time.Millisecond),
+	)
 	require.NoError(t, err)
 	defer cache.Close()
 

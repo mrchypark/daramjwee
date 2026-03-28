@@ -161,6 +161,10 @@ func TestCache_LowerTierStaleHitServesStaleWithoutPromotingAndSchedulesRefresh(t
 		}
 		return string(readBody) == "fresh-value" && meta.ETag == "new" && fetcher.getFetchCount() > 0
 	}, 2*time.Second, 10*time.Millisecond)
+
+	lastOldMetadata := fetcher.getLastOldMetadata()
+	require.NotNil(t, lastOldMetadata)
+	assert.Equal(t, "old", lastOldMetadata.ETag)
 }
 
 func TestCache_LowerTierHitWithZeroCachedAtSchedulesRefresh(t *testing.T) {
@@ -325,7 +329,8 @@ func TestCache_MissSynchronouslyFillsTopAndAsyncBackfillsRemainingTiers(t *testi
 
 	cache, err := daramjwee.New(
 		nil,
-		daramjwee.WithTiers(top, mid.mockStore, lowest.mockStore),
+		daramjwee.WithTiers(top, mid, lowest),
+		daramjwee.WithTierFreshness(time.Hour, time.Hour),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
@@ -494,6 +499,42 @@ func TestCache_SingleTierZeroCachedAtHitRefreshesOnlyTier(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		reader, meta, err := tier.GetStream(context.Background(), "single-tier-legacy")
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+
+		readBody, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(readBody) == "new-value" && meta.ETag == "new" && fetcher.getFetchCount() > 0
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestCache_SingleTierZeroCachedAtIsStaleWhenFreshnessIsZero(t *testing.T) {
+	tier := newMockStore()
+	tier.setData("single-tier-immediate-stale", "old-value", &daramjwee.Metadata{ETag: "old"})
+	fetcher := &mockFetcher{content: "new-value", etag: "new"}
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(tier),
+		daramjwee.WithTierFreshness(0, 0),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "single-tier-immediate-stale", fetcher)
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, "old-value", string(body))
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := tier.GetStream(context.Background(), "single-tier-immediate-stale")
 		if err != nil {
 			return false
 		}
