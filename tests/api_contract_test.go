@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thanos-io/objstore"
 )
 
 type nilMetadataStore struct{}
@@ -72,6 +76,42 @@ func TestCache_SetDiscardsOnAbort(t *testing.T) {
 	_, _, err = hot.GetStream(context.Background(), "set-abort-key")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func TestCache_ObjectStoreTierZeroPublishesOnClose(t *testing.T) {
+	dataDir, err := os.MkdirTemp("", "daramjwee-objectstore-tier-zero-*")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = os.RemoveAll(dataDir)
+	})
+
+	store := objectstore.New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		objectstore.WithDataDir(dataDir),
+	)
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(store), daramjwee.WithDefaultTimeout(time.Second))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	writer, err := cache.Set(context.Background(), "objectstore-tier-zero", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+
+	_, err = writer.Write([]byte("hello objectstore"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	fetcher := &mockFetcher{content: "origin-value", etag: "origin-v1"}
+	reader, err := cache.Get(context.Background(), "objectstore-tier-zero", fetcher)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("hello objectstore"), body)
+	assert.Equal(t, 0, fetcher.getFetchCount())
 }
 
 func TestCache_GetRejectsNilFetcher(t *testing.T) {

@@ -310,6 +310,45 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	assert.Equal(t, "v1", meta.ETag)
 }
 
+func TestStore_ReopenFailsWhenRecoveryCannotPersistCatalogRepair(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	bucket := objstore.NewInMemBucket()
+	store := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDataDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "recover-failure", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	segments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
+	require.NoError(t, err)
+	require.Len(t, segments, 1)
+	require.NoError(t, os.Remove(segments[0]))
+
+	catalogDir := filepath.Join(dataDir, "catalog")
+	require.NoError(t, os.Chmod(catalogDir, 0o555))
+	t.Cleanup(func() {
+		_ = os.Chmod(catalogDir, 0o755)
+	})
+
+	reopened := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDataDir(dataDir),
+	)
+
+	_, err = reopened.Stat(ctx, "recover-failure")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to recover local objectstore state")
+}
+
 func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
