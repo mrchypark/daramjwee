@@ -131,7 +131,7 @@ func TestCache_LowerTierStaleHitServesStaleWithoutPromotingAndSchedulesRefresh(t
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, lower),
-		daramjwee.WithTierFreshness(time.Second, 0),
+		daramjwee.WithTierFreshness(time.Second, time.Second),
 		daramjwee.WithDefaultTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
@@ -165,6 +165,101 @@ func TestCache_LowerTierStaleHitServesStaleWithoutPromotingAndSchedulesRefresh(t
 	lastOldMetadata := fetcher.getLastOldMetadata()
 	require.NotNil(t, lastOldMetadata)
 	assert.Equal(t, "old", lastOldMetadata.ETag)
+}
+
+func TestCache_LowerTierStaleHitNotModifiedPromotesToTopAndStopsRevalidation(t *testing.T) {
+	top := newMockStore()
+	lower := newMockStore()
+	oldCachedAt := time.Now().Add(-time.Hour)
+	lower.setData("stale-lower-304-key", "stale-value", &daramjwee.Metadata{
+		ETag:     "old",
+		CachedAt: oldCachedAt,
+	})
+	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithTierFreshness(time.Second, time.Second),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "stale-lower-304-key", fetcher)
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, "stale-value", string(body))
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := top.GetStream(context.Background(), "stale-lower-304-key")
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+
+		persisted, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(persisted) == "stale-value" && meta.ETag == "old" && meta.CachedAt.After(oldCachedAt)
+	}, 2*time.Second, 10*time.Millisecond)
+
+	lastOldMetadata := fetcher.getLastOldMetadata()
+	require.NotNil(t, lastOldMetadata)
+	assert.Equal(t, "old", lastOldMetadata.ETag)
+
+	fetchCount := fetcher.getFetchCount()
+	stream, err = cache.Get(context.Background(), "stale-lower-304-key", fetcher)
+	require.NoError(t, err)
+	body, err = io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, "stale-value", string(body))
+
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, fetchCount, fetcher.getFetchCount())
+}
+
+func TestCache_LowerTierNegativeStaleHitNotModifiedPromotesNegativeToTop(t *testing.T) {
+	top := newMockStore()
+	lower := newMockStore()
+	oldCachedAt := time.Now().Add(-time.Hour)
+	lower.setData("stale-negative-304-key", "", &daramjwee.Metadata{
+		ETag:       "old-neg",
+		IsNegative: true,
+		CachedAt:   oldCachedAt,
+	})
+	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithTierFreshness(time.Second, time.Second),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	_, err = cache.Get(context.Background(), "stale-negative-304-key", fetcher)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	require.Eventually(t, func() bool {
+		meta, err := top.Stat(context.Background(), "stale-negative-304-key")
+		if err != nil {
+			return false
+		}
+		return meta.IsNegative && meta.ETag == "old-neg" && meta.CachedAt.After(oldCachedAt)
+	}, 2*time.Second, 10*time.Millisecond)
+
+	fetchCount := fetcher.getFetchCount()
+	_, err = cache.Get(context.Background(), "stale-negative-304-key", fetcher)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, fetchCount, fetcher.getFetchCount())
 }
 
 func TestCache_LowerTierHitWithZeroCachedAtSchedulesRefresh(t *testing.T) {
@@ -474,6 +569,51 @@ func TestCache_SingleTierStaleHitRefreshesOnlyTier(t *testing.T) {
 		}
 		return string(readBody) == "new-value" && meta.ETag == "new" && fetcher.getFetchCount() > 0
 	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestCache_SingleTierStaleNotModifiedRefreshesCachedAt(t *testing.T) {
+	tier := newMockStore()
+	oldCachedAt := time.Now().Add(-time.Hour)
+	tier.setData("single-tier-stale-304", "old-value", &daramjwee.Metadata{
+		ETag:     "old",
+		CachedAt: oldCachedAt,
+	})
+	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(tier),
+		daramjwee.WithTierFreshness(time.Second, 0),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "single-tier-stale-304", fetcher)
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, "old-value", string(body))
+
+	require.Eventually(t, func() bool {
+		meta, err := tier.Stat(context.Background(), "single-tier-stale-304")
+		if err != nil {
+			return false
+		}
+		return meta.ETag == "old" && meta.CachedAt.After(oldCachedAt)
+	}, 2*time.Second, 10*time.Millisecond)
+
+	fetchCount := fetcher.getFetchCount()
+	stream, err = cache.Get(context.Background(), "single-tier-stale-304", fetcher)
+	require.NoError(t, err)
+	body, err = io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, "old-value", string(body))
+
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, fetchCount, fetcher.getFetchCount())
 }
 
 func TestCache_SingleTierZeroCachedAtHitRefreshesOnlyTier(t *testing.T) {

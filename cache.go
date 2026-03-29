@@ -128,10 +128,10 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 
 // ScheduleRefresh submits a background cache refresh job to the worker.
 func (c *DaramjweeCache) ScheduleRefresh(ctx context.Context, key string, fetcher Fetcher) error {
-	return c.scheduleRefreshWithMetadata(ctx, key, fetcher, nil)
+	return c.scheduleRefreshWithMetadata(ctx, key, fetcher, nil, nil)
 }
 
-func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key string, fetcher Fetcher, fallbackMetadata *Metadata) error {
+func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key string, fetcher Fetcher, fallbackMetadata *Metadata, fallbackSource *tierDestination) error {
 	if c.isClosed.Load() {
 		return ErrCacheClosed
 	}
@@ -166,6 +166,13 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 				c.handleNegativeCache(jobCtx, jobCtx, key)
 			} else if errors.Is(err, ErrNotModified) {
 				c.debugLog("msg", "background refresh: object not modified", "key", key)
+				if fallbackSource != nil {
+					if promoteErr := c.promoteRefreshFallbackToTop(jobCtx, key, *fallbackSource, fallbackMetadata); promoteErr != nil {
+						c.warnLog("msg", "failed to promote fallback entry after not-modified refresh", "key", key, "source_tier", fallbackSource.tierIndex, "err", promoteErr)
+					}
+				} else if refreshErr := c.refreshTopEntryCachedAt(jobCtx, key, oldMetadata); refreshErr != nil {
+					c.warnLog("msg", "failed to refresh top-tier metadata after not-modified refresh", "key", key, "err", refreshErr)
+				}
 			} else {
 				c.errorLog("msg", "background fetch failed", "key", key, "err", err)
 			}
@@ -274,7 +281,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 
 	if c.isCachedStale(meta, c.TierPositiveFreshFor, c.TierNegativeFreshFor) {
 		c.debugLog("msg", "lower tier is stale, serving stale and scheduling refresh", "key", key, "tier_index", tierIndex)
-		streamCloser := newSafeCloser(src, c.refreshOnCloseCallback(key, fetcher, cancel, meta))
+		streamCloser := newSafeCloser(src, c.lowerTierRefreshOnCloseCallback(key, fetcher, cancel, meta, tierDestination{tierIndex: tierIndex, store: c.Tiers[tierIndex]}))
 		if meta.IsNegative {
 			streamCloser.Close()
 			return nil, ErrNotFound
@@ -324,10 +331,127 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 func (c *DaramjweeCache) refreshOnCloseCallback(key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata) func() {
 	return func() {
 		defer cancel()
-		if err := c.scheduleRefreshWithMetadata(context.Background(), key, fetcher, oldMetadata); err != nil {
+		if err := c.scheduleRefreshWithMetadata(context.Background(), key, fetcher, oldMetadata, nil); err != nil {
 			c.warnLog("msg", "failed to schedule stale refresh", "key", key, "err", err)
 		}
 	}
+}
+
+func (c *DaramjweeCache) lowerTierRefreshOnCloseCallback(key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata, source tierDestination) func() {
+	return func() {
+		defer cancel()
+		if err := c.scheduleRefreshWithMetadata(context.Background(), key, fetcher, oldMetadata, &source); err != nil {
+			c.warnLog("msg", "failed to schedule stale refresh", "key", key, "source_tier", source.tierIndex, "err", err)
+		}
+	}
+}
+
+func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key string, source tierDestination, fallbackMetadata *Metadata) error {
+	target := c.topWriteStore()
+	if !hasRealStore(target) || !hasRealStore(source.store) || sameStoreInstance(source.store, target) {
+		return nil
+	}
+	if _, err := c.statFromStore(ctx, target, key); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+
+	metaToPromote := &Metadata{}
+	if fallbackMetadata != nil {
+		*metaToPromote = *fallbackMetadata
+	}
+	metaToPromote.CachedAt = time.Now()
+
+	if metaToPromote.IsNegative {
+		writer, err := c.setStreamToStore(ctx, target, key, metaToPromote)
+		if err != nil {
+			return err
+		}
+		if err := writer.Close(); err != nil {
+			return err
+		}
+		if destinations := c.regularFanoutDestinations(source.tierIndex); len(destinations) > 0 {
+			c.schedulePersistFromTop(key, destinations...)
+		}
+		return nil
+	}
+
+	srcStream, _, err := c.getStreamFromStore(ctx, source.store, key)
+	if err != nil {
+		return err
+	}
+	defer srcStream.Close()
+
+	writer, err := c.setStreamToStore(ctx, target, key, metaToPromote)
+	if err != nil {
+		return err
+	}
+
+	if _, copyErr := io.Copy(writer, srcStream); copyErr != nil {
+		abortErr := writer.Abort()
+		return errors.Join(copyErr, abortErr)
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	if destinations := c.regularFanoutDestinations(source.tierIndex); len(destinations) > 0 {
+		c.schedulePersistFromTop(key, destinations...)
+	}
+	return nil
+}
+
+func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string, oldMetadata *Metadata) error {
+	target := c.topWriteStore()
+	if !hasRealStore(target) {
+		return nil
+	}
+
+	currentMeta, err := c.statFromStore(ctx, target, key)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if currentMeta == nil {
+		return ErrNilMetadata
+	}
+	if !c.isCachedStale(currentMeta, c.TierPositiveFreshFor, c.TierNegativeFreshFor) {
+		return nil
+	}
+	if oldMetadata != nil {
+		if currentMeta.ETag != oldMetadata.ETag || currentMeta.IsNegative != oldMetadata.IsNegative || !currentMeta.CachedAt.Equal(oldMetadata.CachedAt) {
+			return nil
+		}
+	}
+
+	metaToRefresh := *currentMeta
+	metaToRefresh.CachedAt = time.Now()
+
+	if metaToRefresh.IsNegative {
+		writer, err := c.setStreamToStore(ctx, target, key, &metaToRefresh)
+		if err != nil {
+			return err
+		}
+		return writer.Close()
+	}
+
+	srcStream, _, err := c.getStreamFromStore(ctx, target, key)
+	if err != nil {
+		return err
+	}
+	defer srcStream.Close()
+
+	writer, err := c.setStreamToStore(ctx, target, key, &metaToRefresh)
+	if err != nil {
+		return err
+	}
+	if _, copyErr := io.Copy(writer, srcStream); copyErr != nil {
+		abortErr := writer.Abort()
+		return errors.Join(copyErr, abortErr)
+	}
+	return writer.Close()
 }
 
 // handleMiss processes the logic when an object is not found in any tier.
