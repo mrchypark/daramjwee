@@ -166,10 +166,7 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 			return nil, nil, manifestErr
 		}
 		if m.Layout == layoutPaged {
-			pageSize := m.PageSize
-			if pageSize <= 0 {
-				pageSize = s.pageSize
-			}
+			pageSize := s.effectivePageSize(m)
 			pagedCtx, cancel := context.WithCancel(ctx)
 			reader := rangeio.New(m.Size, pageSize, func(pageIndex int64) ([]byte, error) {
 				return s.loadPage(pagedCtx, m, pageIndex)
@@ -348,8 +345,9 @@ func (s *Store) loadPage(ctx context.Context, m *manifest, pageIndex int64) ([]b
 		if page, ok := s.pageCache.Get(key); ok {
 			return page, nil
 		}
-		start := pageIndex * m.PageSize
-		length := m.PageSize
+		pageSize := s.effectivePageSize(m)
+		start := pageIndex * pageSize
+		length := pageSize
 		if remaining := m.Size - start; remaining < length {
 			length = remaining
 		}
@@ -370,6 +368,13 @@ func (s *Store) loadPage(ctx context.Context, m *manifest, pageIndex int64) ([]b
 		return nil, err
 	}
 	return value.([]byte), nil
+}
+
+func (s *Store) effectivePageSize(m *manifest) int64 {
+	if m != nil && m.PageSize > 0 {
+		return m.PageSize
+	}
+	return s.pageSize
 }
 
 func (s *Store) manifestPath(key string) string {

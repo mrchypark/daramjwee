@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-kit/log"
+	"github.com/goccy/go-json"
 	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -213,4 +214,36 @@ func TestStore_GetStream_FallsBackToLegacyManifestRemoteData(t *testing.T) {
 	stat, err := store.Stat(ctx, "legacy-remote")
 	require.NoError(t, err)
 	assert.Equal(t, "legacy", stat.ETag)
+}
+
+func TestStore_GetStream_FallsBackToDefaultPageSizeForLegacyPagedManifest(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	body := strings.Repeat("paged-manifest-body-", 64)
+	blobPath := joinPath(store.prefix, "segments", "legacy-paged.seg")
+	require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader(body)))
+
+	m := manifest{
+		Version:  "legacy-paged",
+		Layout:   layoutPaged,
+		BlobPath: blobPath,
+		Size:     int64(len(body)),
+		PageSize: 0,
+		Metadata: daramjwee.Metadata{ETag: "legacy-paged"},
+	}
+	encoded, err := json.Marshal(&m)
+	require.NoError(t, err)
+	require.NoError(t, bucket.Upload(ctx, store.manifestPath("legacy-paged"), strings.NewReader(string(encoded))))
+
+	reader, meta, err := store.GetStream(ctx, "legacy-paged")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(got))
+	assert.Equal(t, "legacy-paged", meta.ETag)
 }
