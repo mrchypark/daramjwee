@@ -61,13 +61,13 @@ func main() {
 
 	hotStoreDir, err := os.MkdirTemp("", "daramjwee-hot-cache-*")
 	if err != nil {
-		logger.Log("level", "error", "msg", "FATAL: failed to create temp dir for hot cache", "err", err)
+		logger.Log("level", "error", "msg", "FATAL: failed to create temp dir for tier 0 cache", "err", err)
 		os.Exit(1)
 	}
 	defer func() {
-		logger.Log("level", "info", "msg", "Cleaning up hot cache directory.", "path", hotStoreDir)
+		logger.Log("level", "info", "msg", "Cleaning up tier 0 cache directory.", "path", hotStoreDir)
 		if err := os.RemoveAll(hotStoreDir); err != nil {
-			logger.Log("level", "error", "msg", "Failed to remove hot cache directory during cleanup.", "path", hotStoreDir, "err", err)
+			logger.Log("level", "error", "msg", "Failed to remove tier 0 cache directory during cleanup.", "path", hotStoreDir, "err", err)
 		}
 	}()
 
@@ -94,17 +94,17 @@ func main() {
 		data: string(originData),
 	}
 
-	logger.Log("msg", "---> SCENARIO 1: First Get - Expecting full cache miss (hot and cold).")
+	logger.Log("msg", "---> SCENARIO 1: First Get - Expecting a miss in both tiers.")
 	getAndCompare(ctx, logger, cache, cacheKey, f, originData)
 
 	logger.Log("msg", "---> SCENARIO 2: Second Get - Expecting tier-0 hit.")
 	getAndCompare(ctx, logger, cache, cacheKey, f, originData)
 
-	logger.Log("msg", "---> SCENARIO 3: Third Get - Simulating node restart (deleting hot cache).")
-	logger.Log("msg", "EXEC: Deleting hot cache directory to simulate cache eviction or restart.", "path", hotStoreDir)
+	logger.Log("msg", "---> SCENARIO 3: Third Get - Simulating node restart (deleting tier 0 cache).")
+	logger.Log("msg", "EXEC: Deleting the tier 0 cache directory to simulate cache eviction or restart.", "path", hotStoreDir)
 
 	if err := os.RemoveAll(hotStoreDir); err != nil {
-		logger.Log("level", "error", "msg", "Failed to remove hot cache directory.", "path", hotStoreDir, "err", err)
+		logger.Log("level", "error", "msg", "Failed to remove tier 0 cache directory.", "path", hotStoreDir, "err", err)
 		os.Exit(1)
 	}
 

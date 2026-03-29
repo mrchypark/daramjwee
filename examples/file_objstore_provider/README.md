@@ -1,11 +1,11 @@
-# Daramjwee Azure Object Store Adapter Example
+# Daramjwee Azure Objectstore Example
 
-This example demonstrates how to configure `daramjwee` with a two-tier cache:
+This example demonstrates how to configure `daramjwee` with ordered tiers:
 
--   **Hot Tier**: `fileStore`, using the local filesystem for fast access.
--   **Cold Tier**: `objStore` adapter, using Azure Blob Storage as a persistent, large-scale backing store.
+-   **Tier 0**: `fileStore`, using the local filesystem for fast access.
+-   **Tier 1**: `objectstore`, using Azure Blob Storage as a larger backing tier.
 
-This setup is a practical, production-ready pattern. Frequently accessed data resides on a fast local disk, while less frequent data is cost-effectively stored in a durable object storage like Azure Blob Storage.
+This setup is a practical pattern for an ordered-tier cache. Frequently accessed data resides on fast local disk, while less frequent data can be served from Azure Blob Storage and promoted back into tier 0.
 
 ## Azure Configuration (`config.yaml`)
 

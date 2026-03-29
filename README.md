@@ -124,12 +124,11 @@ var fakeOrigin = map[string]struct {
 }
 
 func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-    // oldMetadata의 존재 여부를 먼저 확인합니다.
-    oldETagVal := "none"
-    if oldMetadata != nil {
-        oldETagVal = oldMetadata.ETag
-    }
-    fmt.Printf("[Origin] Fetching key: %s (Old ETag: %s)\n", f.key, oldETagVal)
+	oldETagVal := "none"
+	if oldMetadata != nil {
+		oldETagVal = oldMetadata.ETag
+	}
+	fmt.Printf("[Origin] Fetching key: %s (old ETag: %s)\n", f.key, oldETagVal)
 
 	// In a real application, this would be a DB query or an API call.
 	obj, ok := fakeOrigin[f.key]
@@ -138,7 +137,6 @@ func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 	}
 
 	// If the ETag matches, notify that the content has not been modified.
-    // oldMetadata nil 체크는 이미 위에서 수행되었거나, 이 로직에서 다시 확인됩니다.
 	if oldMetadata != nil && oldMetadata.ETag == obj.etag {
 		return nil, daramjwee.ErrNotModified
 	}
@@ -153,19 +151,18 @@ func main() {
 	logger := log.NewLogfmtLogger(os.Stderr)
 	logger = level.NewFilter(logger, level.AllowDebug())
 
-	// 2. Create a store for tier 0 (e.g., FileStore).
-	// The New function signature was updated.
-	hotStore, err := filestore.New("./daramjwee-cache", log.With(logger, "tier", "hot"))
+	// 2. Create the tier 0 store.
+	tier0Store, err := filestore.New("./daramjwee-cache", log.With(logger, "tier", "0"))
 	if err != nil {
 		panic(err)
 	}
 
-	// 3. Create a daramjwee cache instance with your configuration.
+	// 3. Create a daramjwee cache instance with ordered tiers.
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithTiers(hotStore),
+		daramjwee.WithTiers(tier0Store),
 		daramjwee.WithDefaultTimeout(5*time.Second),
-		// WithCache / WithNegativeCache configure regular-tier freshness.
+		// These configure freshness for the regular ordered tiers.
 		daramjwee.WithCache(1*time.Minute),
 		daramjwee.WithNegativeCache(30*time.Second),
 		daramjwee.WithShutdownTimeout(10*time.Second),
