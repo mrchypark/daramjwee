@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.0
+## v0.4.0
 
 ### ⚠️ Breaking Changes & API Updates
 
