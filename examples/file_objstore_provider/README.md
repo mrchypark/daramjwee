@@ -1,38 +1,31 @@
-# Daramjwee Azure Objectstore Example
+# Daramjwee Google Cloud Storage Objectstore Example
 
 This example demonstrates how to configure `daramjwee` with ordered tiers:
 
--   **Tier 0**: `fileStore`, using the local filesystem for fast access.
--   **Tier 1**: `objectstore`, using Azure Blob Storage as a larger backing tier.
+- **Tier 0**: `fileStore`, using the local filesystem for fast access.
+- **Tier 1**: `objectstore`, using Google Cloud Storage as a larger backing tier.
 
-This setup is a practical pattern for an ordered-tier cache. Frequently accessed data resides on fast local disk, while less frequent data can be served from Azure Blob Storage and promoted back into tier 0.
+This setup is a practical pattern for an ordered-tier cache. Frequently accessed data resides on fast local disk, while less frequent data can be served from Google Cloud Storage and promoted back into tier 0.
 
-## Azure Configuration (`config.yaml`)
+## GCS Configuration (`config.yaml`)
 
-The example uses a `config.yaml` file to configure the connection to Azure Blob Storage, following the standard format used by [Thanos](https://thanos.io/tip/thanos/storage.md/#azure).
+The example uses a `config.yaml` file to configure the connection to Google Cloud Storage, following the standard format used by [Thanos](https://thanos.io/tip/thanos/storage.md/#gcs-google-cloud-storage).
 
-**You must create this file and populate it with your own Azure Storage account details.**
+Run the example from this directory and replace the placeholder values with your own GCS bucket and service account JSON.
 
 ```yaml
-type: AZURE
-config:
-  # Your Azure Storage account name.
-  storage_account: "<YOUR_AZURE_STORAGE_ACCOUNT>"
-
-  # Choose ONE of the following authentication methods.
-  # 1. Using Storage Account Key (less recommended for production)
-  storage_account_key: "<YOUR_AZURE_STORAGE_KEY>"
-
-  # 2. Using a Connection String (more flexible, can use SAS tokens)
-  # storage_connection_string: "<YOUR_AZURE_CONNECTION_STRING>"
-
-  # 3. Using Managed Identity (recommended for Azure resources)
-  # user_assigned_id: "<YOUR_USER_ASSIGNED_MANAGED_IDENTITY_CLIENT_ID>"
-  # msi_resource: "https://<YOUR_AZURE_STORAGE_ACCOUNT>.blob.core.windows.net"
-
-  # The name of the blob container to use.
-  container: "<YOUR_BLOB_CONTAINER_NAME>"
-
-  # Optional: Create the container if it does not exist.
-  # Be cautious with this in production environments.
-  storage_create_container: true
+bucket: "<YOUR_GCS_BUCKET>"
+service_account: |-
+  {
+    "type": "service_account",
+    "project_id": "<YOUR_GCP_PROJECT>",
+    "private_key_id": "<YOUR_PRIVATE_KEY_ID>",
+    "private_key": "-----BEGIN PRIVATE KEY-----\\n<YOUR_PRIVATE_KEY>\\n-----END PRIVATE KEY-----\\n",
+    "client_email": "<YOUR_SERVICE_ACCOUNT_EMAIL>",
+    "client_id": "<YOUR_CLIENT_ID>",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": "<YOUR_CLIENT_CERT_URL>"
+  }
+```

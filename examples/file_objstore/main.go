@@ -31,8 +31,8 @@ func (f SimpleFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadat
 	}, nil
 }
 
-// main showcases an ordered tier chain: a local fileStore as tier 0 and an
-// Azure Blob Storage-backed objectstore as the next tier. This architecture
+// main showcases an ordered tier chain: a local fileStore as tier 0 and a
+// Google Cloud Storage-backed objectstore as the next tier. This architecture
 // provides fast local hits while keeping a larger backing store behind it.
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -47,17 +47,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	azureClient, err := client.NewBucket(logger, conf, "daramjwee", func(transport http.RoundTripper) http.RoundTripper {
+	gcsClient, err := client.NewBucket(logger, conf, "daramjwee", func(transport http.RoundTripper) http.RoundTripper {
 		return &loggingRoundTripper{
 			next: transport,
 		}
 	})
 	if err != nil {
-		logger.Log("level", "error", "msg", "FATAL: failed to create azure client", "err", err)
+		logger.Log("level", "error", "msg", "FATAL: failed to create GCS client", "err", err)
 		os.Exit(1)
 	}
-	coldStore := objectstore.New(azureClient, logger)
-	logger.Log("level", "info", "msg", "Tier 1 (Azure objectstore) initialized.")
+	tier1Store := objectstore.New(gcsClient, logger)
+	logger.Log("level", "info", "msg", "Tier 1 (GCS objectstore) initialized.")
 
 	hotStoreDir, err := os.MkdirTemp("", "daramjwee-hot-cache-*")
 	if err != nil {
@@ -78,17 +78,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	cache, err := daramjwee.New(
-		logger,
-		daramjwee.WithTiers(hotStore, coldStore),
-	)
+	cache, err := daramjwee.New(logger, daramjwee.WithTiers(hotStore, tier1Store))
 	if err != nil {
 		logger.Log("level", "error", "msg", "FATAL: failed to initialize daramjwee cache", "err", err)
 		os.Exit(1)
 	}
-	logger.Log("level", "info", "msg", "Daramjwee cache initialized with ordered tiers: fileStore tier 0 and Azure tier 1.")
+	logger.Log("level", "info", "msg", "Daramjwee cache initialized with ordered tiers: fileStore tier 0 and GCS tier 1.")
 
-	const cacheKey = "my-azure-object"
+	const cacheKey = "my-gcs-object"
 	originData := []byte("Hello from Origin!")
 	f := SimpleFetcher{
 		data: string(originData),
@@ -115,7 +112,7 @@ func main() {
 	}
 	cache, err = daramjwee.New(
 		logger,
-		daramjwee.WithTiers(hotStore, coldStore),
+		daramjwee.WithTiers(hotStore, tier1Store),
 	)
 	if err != nil {
 		logger.Log("level", "error", "msg", "FATAL: failed to re-initialize daramjwee cache", "err", err)
@@ -123,7 +120,7 @@ func main() {
 	}
 	logger.Log("level", "info", "msg", "Cache re-initialized with an empty tier 0.")
 
-	logger.Log("msg", "---> Expecting lower-tier hit from Azure and promotion to tier 0.")
+	logger.Log("msg", "---> Expecting lower-tier hit from GCS and promotion to tier 0.")
 	getAndCompare(ctx, logger, cache, cacheKey, f, originData)
 
 	logger.Log("msg", "✅ All scenarios completed successfully!")
@@ -167,16 +164,16 @@ func (l *loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	logger = log.With(logger, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
 
-	logger.Log("msg", "[AZURE REQUEST START]", "method", req.Method, "url", req.URL.Host+req.URL.Path)
+	logger.Log("msg", "[GCS REQUEST START]", "method", req.Method, "url", req.URL.Host+req.URL.Path)
 	start := time.Now()
 
 	resp, err := l.next.RoundTrip(req)
 
 	duration := time.Since(start)
 	if err != nil {
-		logger.Log("level", "error", "msg", "[AZURE REQUEST FAILED]", "err", err, "duration", duration)
+		logger.Log("level", "error", "msg", "[GCS REQUEST FAILED]", "err", err, "duration", duration)
 	} else {
-		logger.Log("msg", "[AZURE REQUEST COMPLETE]", "status", resp.Status, "duration", duration)
+		logger.Log("msg", "[GCS REQUEST COMPLETE]", "status", resp.Status, "duration", duration)
 	}
 
 	return resp, err
