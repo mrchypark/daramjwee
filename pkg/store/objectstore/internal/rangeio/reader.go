@@ -46,6 +46,12 @@ func (r *Reader) Read(p []byte) (int, error) {
 
 		pageOffset := r.offset % r.pageSize
 		copied := copy(p[total:], r.page[pageOffset:])
+		if copied == 0 {
+			if total > 0 {
+				return total, nil
+			}
+			return 0, io.ErrUnexpectedEOF
+		}
 		total += copied
 		r.offset += int64(copied)
 	}

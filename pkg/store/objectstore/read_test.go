@@ -96,6 +96,29 @@ func TestStore_GetStream_RemotePackedRecordReturnsExactLogicalObject(t *testing.
 	assert.Equal(t, "v2", meta.ETag)
 }
 
+func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	remotePath := joinPath(store.prefix, "segments", "packed-short.seg")
+	require.NoError(t, bucket.Upload(ctx, remotePath, strings.NewReader("abc")))
+
+	reader := &packedRemoteReader{
+		ctx:       ctx,
+		store:     store,
+		entry:     checkpointEntry{SegmentPath: remotePath, Offset: 4, Length: 2},
+		blockSize: store.pageSize,
+		blockIdx:  -1,
+	}
+
+	buf := make([]byte, 4)
+	n, err := reader.Read(buf)
+	require.Zero(t, n)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
 func TestStore_DeleteTombstoneHidesOlderPackedRecord(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()

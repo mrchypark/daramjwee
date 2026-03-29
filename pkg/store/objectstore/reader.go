@@ -146,10 +146,22 @@ func (r *packedRemoteReader) Read(p []byte) (int, error) {
 		blockOffset := absoluteOffset % r.blockSize
 		remaining := r.entry.Length - r.offset
 		available := int64(len(r.block)) - blockOffset
+		if available <= 0 {
+			if total > 0 {
+				return total, nil
+			}
+			return 0, io.ErrUnexpectedEOF
+		}
 		if available > remaining {
 			available = remaining
 		}
 		copied := copy(p[total:], r.block[blockOffset:blockOffset+available])
+		if copied == 0 {
+			if total > 0 {
+				return total, nil
+			}
+			return 0, io.ErrUnexpectedEOF
+		}
 		total += copied
 		r.offset += int64(copied)
 	}
