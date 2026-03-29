@@ -16,10 +16,8 @@ func (e *ConfigError) Error() string {
 }
 
 // Config holds all the configurable settings for the daramjwee cache.
-// Option functions modify fields within this struct.
 type Config struct {
-	HotStore  Store
-	ColdStore Store
+	Tiers []Store
 
 	WorkerStrategy   string
 	WorkerPoolSize   int
@@ -29,39 +27,23 @@ type Config struct {
 	DefaultTimeout  time.Duration
 	ShutdownTimeout time.Duration
 
-	PositiveFreshFor time.Duration
-	NegativeFreshFor time.Duration
-
-	ColdStorePositiveFreshFor time.Duration
-	ColdStoreNegativeFreshFor time.Duration
+	TierPositiveFreshFor time.Duration
+	TierNegativeFreshFor time.Duration
 }
 
 // Option is a function type that modifies the Config.
 type Option func(cfg *Config) error
 
-// WithHotStore sets the Store to be used as the Hot Tier.
-// This option is mandatory.
-func WithHotStore(store Store) Option {
+// WithTiers sets the regular cache tiers in top-to-bottom order.
+func WithTiers(stores ...Store) Option {
 	return func(cfg *Config) error {
-		if store == nil {
-			return &ConfigError{"hot store cannot be nil"}
-		}
-		cfg.HotStore = store
-		return nil
-	}
-}
-
-// WithColdStore sets the Store to be used as the Cold Tier.
-// This option is optional.
-func WithColdStore(store Store) Option {
-	return func(cfg *Config) error {
-		cfg.ColdStore = store
+		cfg.Tiers = append([]Store(nil), stores...)
 		return nil
 	}
 }
 
 // WithWorker specifies the worker strategy and detailed settings for background tasks.
-// If not set, reasonable defaults ("pool", size 10) are used.
+// If not set, the defaults are strategy "pool", size 1, queue size 500.
 func WithWorker(strategyType string, poolSize int, queueSize int, jobTimeout time.Duration) Option {
 	return func(cfg *Config) error {
 		if strategyType == "" {
@@ -103,46 +85,42 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithCache sets the freshness duration for positive cache entries.
-// If freshFor is 0, the cache entry is considered stale immediately and a background refresh will be triggered on access.
+// WithTierFreshness sets the freshness duration for positive and negative
+// cache entries across the whole ordered tier chain.
+func WithTierFreshness(positive, negative time.Duration) Option {
+	return func(cfg *Config) error {
+		if positive < 0 {
+			return &ConfigError{"tier positive cache TTL cannot be a negative value"}
+		}
+		if negative < 0 {
+			return &ConfigError{"tier negative cache TTL cannot be a negative value"}
+		}
+		cfg.TierPositiveFreshFor = positive
+		cfg.TierNegativeFreshFor = negative
+		return nil
+	}
+}
+
+// WithCache sets the positive freshness duration across the whole tier chain.
+// If freshFor is 0, the cache entry is considered stale immediately.
 func WithCache(freshFor time.Duration) Option {
 	return func(cfg *Config) error {
 		if freshFor < 0 {
 			return &ConfigError{"positive cache TTL cannot be a negative value"}
 		}
-		cfg.PositiveFreshFor = freshFor
+		cfg.TierPositiveFreshFor = freshFor
 		return nil
 	}
 }
 
-// WithNegativeCache sets the freshness duration for negative cache entries (e.g., for ErrNotFound).
-// If freshFor is 0, the negative cache entry is considered stale immediately and a background refresh will be triggered on access.
+// WithNegativeCache sets the negative freshness duration across the whole tier chain.
+// If freshFor is 0, the cache entry is considered stale immediately.
 func WithNegativeCache(freshFor time.Duration) Option {
 	return func(cfg *Config) error {
 		if freshFor < 0 {
 			return &ConfigError{"negative cache TTL cannot be a negative value"}
 		}
-		cfg.NegativeFreshFor = freshFor
-		return nil
-	}
-}
-
-func WithColdStorePositiveFreshFor(freshFor time.Duration) Option {
-	return func(cfg *Config) error {
-		if freshFor < 0 {
-			return &ConfigError{"cold store positive cache TTL cannot be a negative value"}
-		}
-		cfg.ColdStorePositiveFreshFor = freshFor
-		return nil
-	}
-}
-
-func WithColdStoreNegativeFreshFor(freshFor time.Duration) Option {
-	return func(cfg *Config) error {
-		if freshFor < 0 {
-			return &ConfigError{"cold store negative cache TTL cannot be a negative value"}
-		}
-		cfg.ColdStoreNegativeFreshFor = freshFor
+		cfg.TierNegativeFreshFor = freshFor
 		return nil
 	}
 }

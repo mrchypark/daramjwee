@@ -12,6 +12,8 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/policy"
+	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,6 +43,13 @@ func setupTestStore(t *testing.T, opts ...Option) *FileStore {
 	return fs
 }
 
+func TestFileStore_WriteSinkConformance(t *testing.T) {
+	storetest.RunWriteSinkConformance(t, func(t *testing.T) daramjwee.Store {
+		t.Helper()
+		return setupTestStore(t)
+	})
+}
+
 // TestFileStore_SetAndGet tests the basic Set and Get functionality.
 func TestFileStore_SetAndGet(t *testing.T) {
 	fs := setupTestStore(t)
@@ -49,7 +58,7 @@ func TestFileStore_SetAndGet(t *testing.T) {
 	etag := "v1.0.0"
 	content := "hello daramjwee"
 
-	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
 	require.NoError(t, err)
@@ -83,7 +92,7 @@ func TestFileStore_Stat(t *testing.T) {
 	key := "stat-key"
 	etag := "etag-for-stat"
 
-	writer, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: etag})
+	writer, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
 	require.NoError(t, writer.Close())
 
 	meta, err := fs.Stat(ctx, key)
@@ -100,7 +109,7 @@ func TestFileStore_Delete(t *testing.T) {
 	ctx := context.Background()
 	key := "delete-key"
 
-	writer, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, writer.Close())
 
 	err := fs.Delete(ctx, key)
@@ -114,6 +123,176 @@ func TestFileStore_Delete(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestFileStore_DeleteWaitsForPathLockBeforeUpdatingTracking(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "delete-blocked"
+
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("payload"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	path := fs.toDataPath(key)
+	fs.lockManager.Lock(path)
+	pathLocked := true
+	defer func() {
+		if pathLocked {
+			fs.lockManager.Unlock(path)
+		}
+	}()
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- fs.Delete(ctx, key)
+	}()
+
+	require.Eventually(t, func() bool {
+		fs.mu.RLock()
+		defer fs.mu.RUnlock()
+		_, exists := fs.fileSizes[key]
+		return exists && fs.currentSize > 0
+	}, time.Second, 10*time.Millisecond)
+
+	fs.lockManager.Unlock(path)
+	pathLocked = false
+	require.NoError(t, <-deleteDone)
+	fs.lockManager.Lock(path)
+	pathLocked = true
+
+	fs.mu.RLock()
+	_, exists := fs.fileSizes[key]
+	currentSize := fs.currentSize
+	fs.mu.RUnlock()
+	assert.False(t, exists)
+	assert.Zero(t, currentSize)
+}
+
+func TestFileStore_EvictionDoesNotDropTrackingBeforeFileRemoval(t *testing.T) {
+	fs := setupTestStore(t, WithEvictionPolicy(policy.NewLRU()))
+	ctx := context.Background()
+
+	keys := []string{"evict-victim", ""}
+	for i := 0; i < 32; i++ {
+		candidate := fmt.Sprintf("evict-trigger-%d", i)
+		if fs.lockManager.getSlot(fs.toDataPath(keys[0])) != fs.lockManager.getSlot(fs.toDataPath(candidate)) {
+			keys[1] = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, keys[1])
+	require.NotEqual(t, fs.lockManager.getSlot(fs.toDataPath(keys[0])), fs.lockManager.getSlot(fs.toDataPath(keys[1])))
+
+	first, err := fs.BeginSet(ctx, keys[0], &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte(strings.Repeat("a", 64)))
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	fs.mu.Lock()
+	fs.capacity = fs.currentSize + 1
+	fs.mu.Unlock()
+
+	victimPath := fs.toDataPath(keys[0])
+	fs.lockManager.Lock(victimPath)
+	victimLocked := true
+	defer func() {
+		if victimLocked {
+			fs.lockManager.Unlock(victimPath)
+		}
+	}()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writer, err := fs.BeginSet(ctx, keys[1], &daramjwee.Metadata{ETag: "v2"})
+		if err != nil {
+			writeDone <- err
+			return
+		}
+		if _, err := writer.Write([]byte(strings.Repeat("b", 64))); err != nil {
+			writeDone <- err
+			return
+		}
+		writeDone <- writer.Close()
+	}()
+
+	require.Eventually(t, func() bool {
+		fs.mu.RLock()
+		defer fs.mu.RUnlock()
+		_, victimExists := fs.fileSizes[keys[0]]
+		_, triggerExists := fs.fileSizes[keys[1]]
+		return victimExists && triggerExists && fs.currentSize > fs.capacity
+	}, time.Second, 10*time.Millisecond)
+
+	fs.lockManager.Unlock(victimPath)
+	victimLocked = false
+	require.NoError(t, <-writeDone)
+	fs.lockManager.Lock(victimPath)
+	victimLocked = true
+
+	fs.mu.RLock()
+	_, victimExists := fs.fileSizes[keys[0]]
+	_, triggerExists := fs.fileSizes[keys[1]]
+	fs.mu.RUnlock()
+	assert.False(t, victimExists)
+	assert.True(t, triggerExists)
+}
+
+func TestFileStore_CloseReleasesEncodedLockBeforeLegacyCleanup(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := ""
+	for i := 0; i < 64; i++ {
+		candidate := fmt.Sprintf("legacy-cleanup-%d", i)
+		if fs.lockManager.getSlot(fs.toDataPath(candidate)) != fs.lockManager.getSlot(fs.legacyDataPath(candidate)) {
+			key = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, key)
+
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("payload"))
+	require.NoError(t, err)
+
+	legacyPath := fs.legacyDataPath(key)
+	encodedPath := fs.toDataPath(key)
+	fs.lockManager.Lock(legacyPath)
+	legacyLocked := true
+	defer func() {
+		if legacyLocked {
+			fs.lockManager.Unlock(legacyPath)
+		}
+	}()
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- writer.Close()
+	}()
+
+	encodedAcquired := make(chan struct{}, 1)
+	go func() {
+		fs.lockManager.Lock(encodedPath)
+		fs.lockManager.Unlock(encodedPath)
+		encodedAcquired <- struct{}{}
+	}()
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-encodedAcquired:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	fs.lockManager.Unlock(legacyPath)
+	legacyLocked = false
+	require.NoError(t, <-closeDone)
+}
+
 // TestFileStore_Overwrite tests overwriting an existing object.
 func TestFileStore_Overwrite(t *testing.T) {
 	fs := setupTestStore(t)
@@ -121,13 +300,13 @@ func TestFileStore_Overwrite(t *testing.T) {
 	key := "overwrite-key"
 
 	// Write version 1
-	writer1, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer1, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	_, err := writer1.Write([]byte("version 1"))
 	require.NoError(t, err)
 	require.NoError(t, writer1.Close())
 
 	// Write version 2
-	writer2, _ := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v2"})
+	writer2, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v2"})
 	_, err = writer2.Write([]byte("version 2"))
 	require.NoError(t, err)
 	require.NoError(t, writer2.Close())
@@ -147,11 +326,11 @@ func TestFileStore_PathTraversal(t *testing.T) {
 	ctx := context.Background()
 
 	maliciousKey := "../malicious-file"
-	writer, err := fs.SetWithWriter(ctx, maliciousKey, &daramjwee.Metadata{ETag: "v1"})
+	writer, err := fs.BeginSet(ctx, maliciousKey, &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 
-	expectedPath := filepath.Join(fs.baseDir, "malicious-file")
+	expectedPath := fs.toDataPath(maliciousKey)
 	_, err = os.Stat(expectedPath)
 	assert.NoError(t, err, "file should be created inside the base directory")
 
@@ -182,8 +361,8 @@ func TestFileStore_NestedPaths(t *testing.T) {
 			content := fmt.Sprintf("content for %s", uniqueKey)
 
 			// Write the file
-			writer, err := fs.SetWithWriter(ctx, uniqueKey, &daramjwee.Metadata{ETag: "v1"})
-			require.NoError(t, err, "SetWithWriter should succeed for key: %s", uniqueKey)
+			writer, err := fs.BeginSet(ctx, uniqueKey, &daramjwee.Metadata{ETag: "v1"})
+			require.NoError(t, err, "BeginSet should succeed for key: %s", uniqueKey)
 
 			_, err = writer.Write([]byte(content))
 			require.NoError(t, err, "Write should succeed")
@@ -242,7 +421,7 @@ func TestFileStore_PathSafety(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			content := fmt.Sprintf("content for %s", tc.key)
 
-			writer, err := fs.SetWithWriter(ctx, tc.key, &daramjwee.Metadata{ETag: "v1"})
+			writer, err := fs.BeginSet(ctx, tc.key, &daramjwee.Metadata{ETag: "v1"})
 			if !tc.shouldWork {
 				// For cases that shouldn't work, we might still get a writer
 				// but operations should fail gracefully
@@ -250,7 +429,7 @@ func TestFileStore_PathSafety(t *testing.T) {
 					return // Expected failure
 				}
 			} else {
-				require.NoError(t, err, "SetWithWriter should succeed for: %s", tc.description)
+				require.NoError(t, err, "BeginSet should succeed for: %s", tc.description)
 			}
 
 			if writer != nil {
@@ -282,7 +461,7 @@ func TestFileStore_SetWithCopyAndTruncate(t *testing.T) {
 	key := "copy-test"
 	content := "data for copy"
 
-	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v-copy"})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v-copy"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
 	require.NoError(t, err)
@@ -306,10 +485,12 @@ func TestFileStore_Set_ErrorOnFinalize_Rename(t *testing.T) {
 	dataPath := fs.toDataPath(key)
 
 	// Create a directory where the file should be, to cause os.Rename to fail.
-	err := os.Mkdir(dataPath, 0755)
+	err := os.MkdirAll(filepath.Dir(dataPath), 0755)
+	require.NoError(t, err)
+	err = os.Mkdir(dataPath, 0755)
 	require.NoError(t, err)
 
-	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("some data"))
 	require.NoError(t, err)
@@ -331,26 +512,24 @@ func TestFileStore_Set_ErrorOnFinalize_Rename(t *testing.T) {
 func TestFileStore_Set_ErrorOnFinalize_Copy(t *testing.T) {
 	fs := setupTestStore(t, WithCopyAndTruncate())
 	ctx := context.Background()
-	key := "subdir/copy-fail-key"
-	destDir := filepath.Dir(fs.toDataPath(key))
+	key := "copy-fail-key"
+	dataPath := fs.toDataPath(key)
 
-	// Create the destination directory, then make it read-only.
-	require.NoError(t, os.MkdirAll(destDir, 0755))
-	require.NoError(t, os.Chmod(destDir, 0555)) // Read and execute only
+	// Create a directory where the file should be, so the final copy fails.
+	require.NoError(t, os.MkdirAll(dataPath, 0755))
 
-	writer, err := fs.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v1"})
-	require.NoError(t, err, "SetWithWriter should succeed as temp file creation is unaffected")
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err, "BeginSet should succeed as temp file creation is unaffected")
 	_, err = writer.Write([]byte("some data"))
 	require.NoError(t, err)
 
 	err = writer.Close()
-	require.Error(t, err, "Close() should fail on copy error due to read-only destination")
-	assert.ErrorContains(t, err, "permission denied")
+	require.Error(t, err, "Close() should fail on copy error due to directory destination")
 
 	// Check that the temp file was cleaned up.
 	files, _ := os.ReadDir(fs.baseDir)
 	for _, file := range files {
-		if file.IsDir() && file.Name() == "subdir" {
+		if file.IsDir() && file.Name() == filepath.Base(dataPath) {
 			continue
 		}
 		assert.False(t, strings.HasPrefix(file.Name(), "daramjwee-tmp-"), "Temp file should be cleaned up")
@@ -369,7 +548,7 @@ func TestFileStore_MetadataFields(t *testing.T) {
 		CachedAt:   now,
 		IsNegative: true,
 	}
-	writer, err := fs.SetWithWriter(ctx, key, originalMeta)
+	writer, err := fs.BeginSet(ctx, key, originalMeta)
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 
@@ -378,6 +557,412 @@ func TestFileStore_MetadataFields(t *testing.T) {
 	assert.Equal(t, originalMeta.ETag, retrievedMeta.ETag)
 	assert.True(t, originalMeta.CachedAt.Equal(retrievedMeta.CachedAt))
 	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
+}
+
+func TestFileStore_DistinctKeysDoNotCollideOnDisk(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	writerA, err := fs.BeginSet(ctx, "", &daramjwee.Metadata{ETag: "empty"})
+	require.NoError(t, err)
+	_, err = writerA.Write([]byte("empty-key-data"))
+	require.NoError(t, err)
+	require.NoError(t, writerA.Close())
+
+	writerB, err := fs.BeginSet(ctx, "empty_key", &daramjwee.Metadata{ETag: "literal"})
+	require.NoError(t, err)
+	_, err = writerB.Write([]byte("literal-data"))
+	require.NoError(t, err)
+	require.NoError(t, writerB.Close())
+
+	readerA, metaA, err := fs.GetStream(ctx, "")
+	require.NoError(t, err)
+	defer readerA.Close()
+	bodyA, err := io.ReadAll(readerA)
+	require.NoError(t, err)
+	assert.Equal(t, "empty", metaA.ETag)
+	assert.Equal(t, "empty-key-data", string(bodyA))
+
+	readerB, metaB, err := fs.GetStream(ctx, "empty_key")
+	require.NoError(t, err)
+	defer readerB.Close()
+	bodyB, err := io.ReadAll(readerB)
+	require.NoError(t, err)
+	assert.Equal(t, "literal", metaB.ETag)
+	assert.Equal(t, "literal-data", string(bodyB))
+}
+
+func TestFileStore_LegacyPathRemainsReadableAndDeletable(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "legacy/key.txt"
+	legacyPath := legacyDataPathForTest(fs.baseDir, key)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy"}))
+	_, err = f.Write([]byte("legacy-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	fs2, err := New(fs.baseDir, log.NewNopLogger())
+	require.NoError(t, err)
+
+	reader, meta, err := fs2.GetStream(ctx, key)
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, "legacy", meta.ETag)
+	assert.Equal(t, "legacy-data", string(body))
+
+	require.NoError(t, fs2.Delete(ctx, key))
+
+	_, statErr := os.Stat(legacyPath)
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestFileStore_OverwriteLegacyPathRemovesLegacyFile(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "legacy/overwrite.txt"
+	legacyPath := legacyDataPathForTest(fs.baseDir, key)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy"}))
+	_, err = f.Write([]byte("legacy-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	fs2, err := New(fs.baseDir, log.NewNopLogger())
+	require.NoError(t, err)
+
+	writer, err := fs2.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "new"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("new-data"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	_, statErr := os.Stat(legacyPath)
+	assert.True(t, os.IsNotExist(statErr), "legacy file should be removed after overwrite")
+
+	reader, meta, err := fs2.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "new", meta.ETag)
+	assert.Equal(t, "new-data", string(body))
+}
+
+func TestFileStore_LegacyFallbackDoesNotAliasEncodedNamespaceKeys(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	writer, err := fs.BeginSet(ctx, "foo", &daramjwee.Metadata{ETag: "foo"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("foo-data"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	_, _, err = fs.GetStream(ctx, "b64_Zm9v")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	_, statErr := fs.Stat(ctx, "b64_Zm9v")
+	assert.ErrorIs(t, statErr, daramjwee.ErrNotFound)
+
+	require.NoError(t, fs.Delete(ctx, "b64_Zm9v"))
+
+	reader, meta, err := fs.GetStream(ctx, "foo")
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "foo", meta.ETag)
+	assert.Equal(t, "foo-data", string(body))
+}
+
+func TestFileStore_EncodedNamespaceDoesNotOverwriteLegacyB64PrefixedKey(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	legacyKey := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(fs.baseDir, legacyKey)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy"}))
+	_, err = f.Write([]byte("legacy-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	writer, err := fs.BeginSet(ctx, "foo", &daramjwee.Metadata{ETag: "foo"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("foo-data"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	_, err = os.Stat(fs.toDataPath("foo"))
+	require.NoError(t, err)
+	_, err = os.Stat(legacyPath)
+	require.NoError(t, err)
+	require.NotEqual(t, fs.toDataPath("foo"), legacyPath)
+
+	legacyReader, legacyMeta, err := fs.GetStream(ctx, legacyKey)
+	require.NoError(t, err)
+	defer legacyReader.Close()
+	legacyBody, err := io.ReadAll(legacyReader)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy", legacyMeta.ETag)
+	assert.Equal(t, "legacy-data", string(legacyBody))
+
+	reader, meta, err := fs.GetStream(ctx, "foo")
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "foo", meta.ETag)
+	assert.Equal(t, "foo-data", string(body))
+}
+
+func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFile(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+
+	legacyKey := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(fs.baseDir, legacyKey)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-ambiguous"}))
+	_, err = f.Write([]byte("legacy-ambiguous-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, _, err = fs.GetStream(ctx, "foo")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	_, statErr := fs.Stat(ctx, "foo")
+	assert.ErrorIs(t, statErr, daramjwee.ErrNotFound)
+
+	require.NoError(t, fs.Delete(ctx, "foo"))
+	_, statErr = os.Stat(legacyPath)
+	require.NoError(t, statErr, "delete for encoded owner must not remove ambiguous legacy file")
+
+	reader, meta, err := fs.GetStream(ctx, legacyKey)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-ambiguous", meta.ETag)
+	assert.Equal(t, "legacy-ambiguous-data", string(body))
+}
+
+func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFileWithTrailingSlashBaseDir(t *testing.T) {
+	dir := t.TempDir()
+	logger := log.NewNopLogger()
+	ctx := context.Background()
+
+	fs, err := New(dir+string(os.PathSeparator), logger)
+	require.NoError(t, err)
+
+	legacyKey := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(dir, legacyKey)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-trailing"}))
+	_, err = f.Write([]byte("legacy-trailing-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, _, err = fs.GetStream(ctx, "foo")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	require.NoError(t, fs.Delete(ctx, "foo"))
+	_, statErr := os.Stat(legacyPath)
+	require.NoError(t, statErr)
+
+	reader, meta, err := fs.GetStream(ctx, legacyKey)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-trailing", meta.ETag)
+	assert.Equal(t, "legacy-trailing-data", string(body))
+}
+
+func TestFileStore_LegacyB64PrefixedKeyRemainsReachable(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(fs.baseDir, key)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-b64"}))
+	_, err = f.Write([]byte("legacy-b64-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	reader, meta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, "legacy-b64", meta.ETag)
+	assert.Equal(t, "legacy-b64-data", string(body))
+
+	statMeta, err := fs.Stat(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-b64", statMeta.ETag)
+
+	require.NoError(t, fs.Delete(ctx, key))
+	_, statErr := os.Stat(legacyPath)
+	assert.True(t, os.IsNotExist(statErr), "legacy b64-prefixed file should still be deletable after upgrade")
+}
+
+func TestFileStore_ReopenPreservesLegacyB64PrefixedKeyTracking(t *testing.T) {
+	dir := t.TempDir()
+	logger := log.NewNopLogger()
+	ctx := context.Background()
+	key := "b64_Zm9v"
+	legacyPath := legacyDataPathForTest(dir, key)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
+	f, err := os.Create(legacyPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-b64"}))
+	_, err = f.Write([]byte("legacy-b64-data"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	fs, err := New(dir, logger)
+	require.NoError(t, err)
+
+	meta, err := fs.Stat(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-b64", meta.ETag)
+
+	require.NoError(t, fs.Delete(ctx, key))
+	_, statErr := os.Stat(legacyPath)
+	assert.True(t, os.IsNotExist(statErr), "reopened store should still track and delete legacy b64-prefixed files")
+}
+
+func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t *testing.T) {
+	dir := t.TempDir()
+	logger := log.NewNopLogger()
+	key := "foo"
+	legacyPath := legacyDataPathForTest(dir, key)
+	encodedPath := filepath.Join(dir, encodedKeyDir, encodeKey(key))
+
+	writeStoreFile := func(path, storedKey, etag, body string) {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		f, err := os.Create(path)
+		require.NoError(t, err)
+		if storedKey != "" {
+			require.NoError(t, writeStoredMetadata(f, storedKey, &daramjwee.Metadata{ETag: etag}))
+		} else {
+			require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: etag}))
+		}
+		_, err = f.Write([]byte(body))
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+
+	writeStoreFile(legacyPath, "", "legacy", "legacy-data")
+	writeStoreFile(encodedPath, key, "encoded", "encoded-data")
+
+	fs, err := New(dir, logger)
+	require.NoError(t, err)
+	require.NoError(t, err)
+
+	fs.mu.RLock()
+	currentSize := fs.currentSize
+	trackedSize := fs.fileSizes[key]
+	fs.mu.RUnlock()
+
+	legacyInfo, err := os.Stat(legacyPath)
+	require.NoError(t, err)
+	encodedInfo, err := os.Stat(encodedPath)
+	require.NoError(t, err)
+	assert.Equal(t, trackedSize, currentSize)
+	assert.Contains(t, []int64{legacyInfo.Size(), encodedInfo.Size()}, trackedSize)
+	assert.NotEqual(t, legacyInfo.Size()+encodedInfo.Size(), currentSize)
+}
+
+func TestLockedWriteCloser_DoesNotCommitWhenFileCloseFails(t *testing.T) {
+	var committed bool
+	var aborted bool
+
+	badFile := os.NewFile(^uintptr(0), "bad-file")
+	writer := newLockedWriteCloser(
+		badFile,
+		func() error {
+			committed = true
+			return nil
+		},
+		func() error {
+			aborted = true
+			return nil
+		},
+	)
+
+	err := writer.Close()
+	require.Error(t, err)
+	assert.False(t, committed)
+	assert.True(t, aborted)
+}
+
+func legacyDataPathForTest(baseDir, key string) string {
+	safeFallback := func(key string) string {
+		safeKey := strings.ReplaceAll(key, "..", "")
+		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
+		safeKey = strings.ReplaceAll(safeKey, "/", "_")
+		if safeKey == "" {
+			safeKey = "safe_fallback"
+		}
+		return filepath.Join(baseDir, safeKey)
+	}
+
+	if key == "" {
+		return filepath.Join(baseDir, "empty_key")
+	}
+
+	slashedKey := filepath.ToSlash(key)
+	cleanKey := filepath.Clean("/" + slashedKey)
+	cleanKey = strings.TrimPrefix(cleanKey, "/")
+
+	if cleanKey == "" || cleanKey == "." {
+		cleanKey = "root_file"
+	}
+
+	fullPath := filepath.Join(baseDir, cleanKey)
+
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return safeFallback(key)
+	}
+
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return safeFallback(key)
+	}
+
+	if !strings.HasPrefix(absPath+string(os.PathSeparator), absBase+string(os.PathSeparator)) && absPath != absBase {
+		return safeFallback(key)
+	}
+
+	return fullPath
 }
 
 // setupBenchmarkStore is a helper for benchmarks.
@@ -402,9 +987,9 @@ func benchmarkFileStoreSet(b *testing.B, store *FileStore) {
 
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("bench-key-%d", i)
-		writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v-bench"})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v-bench"})
 		if err != nil {
-			b.Fatalf("SetWithWriter failed: %v", err)
+			b.Fatalf("BeginSet failed: %v", err)
 		}
 		_, err = writer.Write(data)
 		if err != nil {
@@ -436,9 +1021,9 @@ func benchmarkFileStoreGet(b *testing.B, store *FileStore) {
 
 	for i := 0; i < numItems; i++ {
 		key := fmt.Sprintf("bench-key-%d", i)
-		writer, err := store.SetWithWriter(ctx, key, &daramjwee.Metadata{ETag: "v-bench"})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v-bench"})
 		if err != nil {
-			b.Fatalf("Setup: SetWithWriter failed: %v", err)
+			b.Fatalf("Setup: BeginSet failed: %v", err)
 		}
 		_, err = writer.Write(data)
 		if err != nil {

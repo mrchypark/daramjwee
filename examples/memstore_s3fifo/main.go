@@ -57,7 +57,7 @@ func main() {
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(memStore),
+		daramjwee.WithTiers(memStore),
 		daramjwee.WithDefaultTimeout(10*time.Second),
 		daramjwee.WithShutdownTimeout(5*time.Second),
 	)

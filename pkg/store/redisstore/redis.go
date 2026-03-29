@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -17,11 +18,24 @@ const (
 	chunkSize = 512 * 1024 // 512KB
 )
 
+const commitLuaScript = `
+if redis.call("EXISTS", KEYS[3]) == 0 then
+  redis.call("SET", KEYS[3], "")
+end
+redis.call("RENAME", KEYS[3], KEYS[1])
+redis.call("SET", KEYS[2], ARGV[1])
+return 1
+`
+
 // RedisStore is a Redis-based implementation of the daramjwee.Store.
 type RedisStore struct {
 	client redis.UniversalClient
 	logger log.Logger
 }
+
+func (rs *RedisStore) GetStreamUsesContext() bool { return true }
+
+func (rs *RedisStore) BeginSetUsesContext() bool { return true }
 
 // New creates a new RedisStore.
 func New(client redis.UniversalClient, logger log.Logger) daramjwee.Store {
@@ -111,8 +125,8 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 	return reader, meta, nil
 }
 
-// SetWithWriter returns a writer that streams data into Redis.
-func (rs *RedisStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
+// BeginSet returns a sink that streams data into Redis.
+func (rs *RedisStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -160,20 +174,31 @@ type redisStoreWriter struct {
 	key      string
 	tempKey  string
 	metadata *daramjwee.Metadata
+	wrote    bool
+	mu       sync.Mutex
+	done     bool
 }
 
 // Write appends the provided data to the Redis key.
 func (w *redisStoreWriter) Write(p []byte) (n int, err error) {
+	if w.isDone() {
+		return 0, io.ErrClosedPipe
+	}
 	if err := w.rs.client.Append(w.ctx, w.tempKey, string(p)).Err(); err != nil {
 		return 0, err
 	}
+	w.wrote = true
 	return len(p), nil
 }
 
 // Close commits the metadata to Redis.
 func (w *redisStoreWriter) Close() error {
+	if !w.markDone() {
+		return nil
+	}
 	select {
 	case <-w.ctx.Done():
+		_ = w.rs.client.Del(context.Background(), w.tempKey).Err()
 		return w.ctx.Err()
 	default:
 	}
@@ -184,11 +209,13 @@ func (w *redisStoreWriter) Close() error {
 		return err
 	}
 
-	pipe := w.rs.client.Pipeline()
-	pipe.Set(w.ctx, w.rs.MetaKey(w.key), metaBytes, 0)
-	pipe.Rename(w.ctx, w.tempKey, w.rs.DataKey(w.key))
-
-	if _, err := pipe.Exec(w.ctx); err != nil {
+	_, err = w.rs.client.Eval(
+		w.ctx,
+		commitLuaScript,
+		[]string{w.rs.DataKey(w.key), w.rs.MetaKey(w.key), w.tempKey},
+		metaBytes,
+	).Result()
+	if err != nil {
 		level.Error(w.rs.logger).Log("msg", "failed to commit data and metadata", "key", w.key, "err", err)
 		// Attempt to clean up the temporary key
 		if delErr := w.rs.client.Del(w.ctx, w.tempKey).Err(); delErr != nil {
@@ -198,6 +225,29 @@ func (w *redisStoreWriter) Close() error {
 	}
 
 	return nil
+}
+
+func (w *redisStoreWriter) Abort() error {
+	if !w.markDone() {
+		return nil
+	}
+	return w.rs.client.Del(context.Background(), w.tempKey).Err()
+}
+
+func (w *redisStoreWriter) markDone() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return false
+	}
+	w.done = true
+	return true
+}
+
+func (w *redisStoreWriter) isDone() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.done
 }
 
 // redisStreamReader is a helper type that satisfies the io.ReadCloser interface

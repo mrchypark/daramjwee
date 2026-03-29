@@ -2,11 +2,14 @@ package filestore
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -29,6 +32,22 @@ type FileStore struct {
 	currentSize int64 // Current total size of stored files in bytes
 	policy      daramjwee.EvictionPolicy
 	fileSizes   map[string]int64 // Track file sizes for eviction
+}
+
+var _ daramjwee.TierValidator = (*FileStore)(nil)
+
+const encodedKeyPrefix = "b64_"
+const encodedKeyDir = "__encoded__"
+
+type dataPathCandidate struct {
+	path      string
+	isLegacy  bool
+	ambiguous bool
+}
+
+type storedMetadata struct {
+	daramjwee.Metadata
+	StoredKey *string `json:"__stored_key,omitempty"`
 }
 
 // Option configures the FileStore.
@@ -63,6 +82,7 @@ func WithEvictionPolicy(policy daramjwee.EvictionPolicy) Option {
 // New creates a new FileStore.
 // It ensures the base directory exists and initializes the file locking mechanism.
 func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
+	dir = filepath.Clean(dir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
 	}
@@ -91,46 +111,62 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 	return fs, nil
 }
 
+// ValidateTier rejects tier positions that would weaken the stream-through
+// publish contract expected from the ordered tier chain.
+func (fs *FileStore) ValidateTier(index int) error {
+	if index == 0 && fs.useCopyAndTruncate {
+		return errors.New("filestore: WithCopyAndTruncate mode does not support stream-through publish semantics and cannot be used as tier 0")
+	}
+	return nil
+}
+
 // GetStream reads an object from the store.
 // It returns an io.ReadCloser, the object's metadata, and an error if any.
 func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	path := fs.toDataPath(key)
-	fs.lockManager.RLock(path)
+	for _, candidate := range fs.dataPathCandidates(key) {
+		fs.lockManager.RLock(candidate.path)
 
-	file, err := os.Open(path)
-	if err != nil {
-		fs.lockManager.RUnlock(path)
-		if os.IsNotExist(err) {
-			return nil, nil, daramjwee.ErrNotFound
+		file, err := os.Open(candidate.path)
+		if err != nil {
+			fs.lockManager.RUnlock(candidate.path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, nil, err
 		}
-		return nil, nil, err
+
+		meta, storedKey, storedKeyPresent, dataOffset, err := readStoredMetadata(file)
+		if err != nil {
+			file.Close()
+			fs.lockManager.RUnlock(candidate.path)
+			return nil, nil, err
+		}
+		if !fs.candidateMatchesKey(candidate, key, storedKey, storedKeyPresent) {
+			file.Close()
+			fs.lockManager.RUnlock(candidate.path)
+			continue
+		}
+
+		if _, err := file.Seek(dataOffset, io.SeekStart); err != nil {
+			file.Close()
+			fs.lockManager.RUnlock(candidate.path)
+			return nil, nil, fmt.Errorf("failed to seek to data section: %w", err)
+		}
+
+		// Notify the policy that this key was accessed
+		fs.mu.Lock()
+		fs.policy.Touch(key)
+		fs.mu.Unlock()
+
+		return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(candidate.path) }), meta, nil
 	}
-
-	meta, dataOffset, err := readMetadata(file)
-	if err != nil {
-		file.Close()
-		fs.lockManager.RUnlock(path)
-		return nil, nil, err
-	}
-
-	if _, err := file.Seek(dataOffset, io.SeekStart); err != nil {
-		file.Close()
-		fs.lockManager.RUnlock(path)
-		return nil, nil, fmt.Errorf("failed to seek to data section: %w", err)
-	}
-
-	// Notify the policy that this key was accessed
-	fs.mu.Lock()
-	fs.policy.Touch(key)
-	fs.mu.Unlock()
-
-	return newLockedReadCloser(file, func() { fs.lockManager.RUnlock(path) }), meta, nil
+	return nil, nil, daramjwee.ErrNotFound
 }
 
-// SetWithWriter returns a writer that streams data to the store.
+// BeginSet returns a sink that streams data to the store.
 // The data is written to a temporary file and then atomically moved to the final location
 // upon closing the writer, or copied if WithCopyAndTruncate option is used.
-func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
+func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
 
@@ -147,22 +183,39 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 	}
 
 	// Write metadata to the temporary file first.
-	if err := writeMetadata(tmpFile, metadata); err != nil {
+	if err := writeStoredMetadata(tmpFile, key, metadata); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
 		fs.lockManager.Unlock(path)
 		return nil, err
 	}
 
-	onClose := func() (err error) {
-		defer fs.lockManager.Unlock(path)
+	pathLocked := true
+	unlockPath := func() {
+		if pathLocked {
+			fs.lockManager.Unlock(path)
+			pathLocked = false
+		}
+	}
 
+	cleanupTemp := func() error {
+		if err := os.Remove(tmpFile.Name()); err != nil && !os.IsNotExist(err) {
+			level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", err)
+			return err
+		}
+		return nil
+	}
+
+	abortCleanup := func() error {
+		defer unlockPath()
+		return cleanupTemp()
+	}
+
+	onClose := func() (err error) {
 		defer func() {
-			if errRemove := os.Remove(tmpFile.Name()); errRemove != nil && !os.IsNotExist(errRemove) {
-				level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", errRemove)
-				if err == nil {
-					err = errRemove
-				}
+			unlockPath()
+			if cleanupErr := cleanupTemp(); cleanupErr != nil && err == nil {
+				err = cleanupErr
 			}
 		}()
 
@@ -182,75 +235,87 @@ func (fs *FileStore) SetWithWriter(ctx context.Context, key string, metadata *da
 		if err := fs.updateAfterSet(key, path); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
 		}
+		unlockPath()
+		if err := fs.removeLegacyPathOnly(key, nil); err != nil {
+			level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
+		}
 
 		return nil
 	}
 
-	return newLockedWriteCloser(tmpFile, onClose), nil
+	return newLockedWriteCloser(tmpFile, onClose, abortCleanup), nil
 }
 
 // Delete removes an object from the store.
 func (fs *FileStore) Delete(ctx context.Context, key string) error {
-	path := fs.toDataPath(key)
-	fs.lockManager.Lock(path)
-	defer fs.lockManager.Unlock(path)
+	candidates := fs.dataPathCandidates(key)
+	paths := candidatePaths(candidates)
+	locked := fs.lockPaths(paths, nil)
+	defer fs.unlockPaths(locked)
 
-	// Get file size before deletion for policy update
-	fs.mu.Lock()
-	fileSize, exists := fs.fileSizes[key]
-	if exists {
-		fs.currentSize -= fileSize
-		delete(fs.fileSizes, key)
-		fs.policy.Remove(key)
-	}
-	fs.mu.Unlock()
-
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
-		// If deletion failed but we already updated the policy, revert the changes
-		if exists {
-			fs.mu.Lock()
-			fs.fileSizes[key] = fileSize
-			fs.currentSize += fileSize
-			fs.policy.Add(key, fileSize)
-			fs.mu.Unlock()
-		}
+	removablePaths, err := fs.deletablePaths(candidates, key)
+	if err != nil {
 		return err
 	}
+	if err := removeFiles(removablePaths); err != nil {
+		return err
+	}
+
+	fs.mu.Lock()
+	if fileSize, exists := fs.fileSizes[key]; exists {
+		fs.currentSize -= fileSize
+		delete(fs.fileSizes, key)
+	}
+	fs.policy.Remove(key)
+	fs.mu.Unlock()
+
 	return nil
 }
 
 // Stat reads the metadata of an object without reading the data.
 func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	path := fs.toDataPath(key)
-	fs.lockManager.RLock(path)
-	defer fs.lockManager.RUnlock(path)
+	for _, candidate := range fs.dataPathCandidates(key) {
+		fs.lockManager.RLock(candidate.path)
 
-	file, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, daramjwee.ErrNotFound
+		file, err := os.Open(candidate.path)
+		if err != nil {
+			fs.lockManager.RUnlock(candidate.path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
 		}
-		return nil, err
+
+		meta, storedKey, storedKeyPresent, _, err := readStoredMetadata(file)
+		closeErr := file.Close()
+		fs.lockManager.RUnlock(candidate.path)
+		if err != nil {
+			return nil, err
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if !fs.candidateMatchesKey(candidate, key, storedKey, storedKeyPresent) {
+			continue
+		}
+
+		// Access via Stat should also be considered a "touch"
+		fs.mu.Lock()
+		fs.policy.Touch(key)
+		fs.mu.Unlock()
+
+		return meta, nil
 	}
-	defer file.Close()
-
-	meta, _, err := readMetadata(file)
-	if err != nil {
-		return nil, err
-	}
-
-	// Access via Stat should also be considered a "touch"
-	fs.mu.Lock()
-	fs.policy.Touch(key)
-	fs.mu.Unlock()
-
-	return meta, nil
+	return nil, daramjwee.ErrNotFound
 }
 
 // toDataPath converts a key into a safe file path within the base directory.
 // It prevents path traversal by cleaning the path and ensuring it stays within baseDir.
 func (fs *FileStore) toDataPath(key string) string {
+	return filepath.Join(fs.baseDir, encodedKeyDir, encodeKey(key))
+}
+
+func (fs *FileStore) legacyDataPath(key string) string {
 	safeFallback := func(key string) string {
 		safeKey := strings.ReplaceAll(key, "..", "")
 		safeKey = strings.ReplaceAll(safeKey, string(os.PathSeparator), "_")
@@ -261,27 +326,20 @@ func (fs *FileStore) toDataPath(key string) string {
 		return filepath.Join(fs.baseDir, safeKey)
 	}
 
-	// Handle empty key
 	if key == "" {
 		return filepath.Join(fs.baseDir, "empty_key")
 	}
 
-	// Sanitize the key to prevent path traversal while preserving directory structure.
-	// By cleaning the key relative to a root, we resolve all ".." segments safely.
-	// We use "/" as it's the canonical separator for this operation.
 	slashedKey := filepath.ToSlash(key)
 	cleanKey := filepath.Clean("/" + slashedKey)
 	cleanKey = strings.TrimPrefix(cleanKey, "/")
 
-	// If cleaning results in an empty or dot path, use a safe default.
 	if cleanKey == "" || cleanKey == "." {
 		cleanKey = "root_file"
 	}
 
-	// Join with base directory. Join will handle OS-specific separators.
 	fullPath := filepath.Join(fs.baseDir, cleanKey)
 
-	// Final safety check: ensure the resolved path is still within baseDir.
 	absBase, err := filepath.Abs(fs.baseDir)
 	if err != nil {
 		return safeFallback(key)
@@ -292,7 +350,6 @@ func (fs *FileStore) toDataPath(key string) string {
 		return safeFallback(key)
 	}
 
-	// Check if path is within base directory
 	if !strings.HasPrefix(absPath+string(os.PathSeparator), absBase+string(os.PathSeparator)) && absPath != absBase {
 		return safeFallback(key)
 	}
@@ -300,8 +357,141 @@ func (fs *FileStore) toDataPath(key string) string {
 	return fullPath
 }
 
+func (fs *FileStore) dataPathCandidates(key string) []dataPathCandidate {
+	encodedPath := fs.toDataPath(key)
+	legacyPath := fs.legacyDataPath(key)
+	if legacyPath == encodedPath {
+		return []dataPathCandidate{{path: encodedPath, ambiguous: fs.isAmbiguousLegacyPath(encodedPath)}}
+	}
+	return []dataPathCandidate{
+		{path: encodedPath, ambiguous: fs.isAmbiguousLegacyPath(encodedPath)},
+		{path: legacyPath, isLegacy: true, ambiguous: fs.isAmbiguousLegacyPath(legacyPath)},
+	}
+}
+
+func (fs *FileStore) isAmbiguousLegacyPath(path string) bool {
+	return filepath.Dir(path) == fs.baseDir && strings.HasPrefix(filepath.Base(path), encodedKeyPrefix)
+}
+
+func candidatePaths(candidates []dataPathCandidate) []string {
+	paths := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		paths = append(paths, candidate.path)
+	}
+	return paths
+}
+
+func (fs *FileStore) candidateMatchesKey(candidate dataPathCandidate, key, storedKey string, storedKeyPresent bool) bool {
+	if !candidate.ambiguous {
+		return true
+	}
+	if !storedKeyPresent {
+		return candidate.isLegacy
+	}
+	return storedKey == key
+}
+
+func (fs *FileStore) deletablePaths(candidates []dataPathCandidate, key string) ([]string, error) {
+	removable := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if !candidate.ambiguous {
+			removable = append(removable, candidate.path)
+			continue
+		}
+
+		storedKey, storedKeyPresent, err := fs.readStoredKeyForCandidate(candidate.path)
+		if err != nil {
+			return nil, err
+		}
+		if fs.candidateMatchesKey(candidate, key, storedKey, storedKeyPresent) {
+			removable = append(removable, candidate.path)
+		}
+	}
+	return removable, nil
+}
+
+func (fs *FileStore) readStoredKeyForCandidate(path string) (string, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	defer file.Close()
+
+	_, storedKey, storedKeyPresent, _, err := readStoredMetadata(file)
+	if err != nil {
+		return "", false, err
+	}
+	return storedKey, storedKeyPresent, nil
+}
+
+func (fs *FileStore) lockPaths(paths []string, heldSlots map[uint64]struct{}) []string {
+	type slotPath struct {
+		slot uint64
+		path string
+	}
+
+	bySlot := make(map[uint64]string, len(paths))
+	for _, path := range paths {
+		slot := fs.lockManager.getSlot(path)
+		if _, skip := heldSlots[slot]; skip {
+			continue
+		}
+		if existing, ok := bySlot[slot]; !ok || path < existing {
+			bySlot[slot] = path
+		}
+	}
+
+	ordered := make([]slotPath, 0, len(bySlot))
+	for slot, path := range bySlot {
+		ordered = append(ordered, slotPath{slot: slot, path: path})
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].slot == ordered[j].slot {
+			return ordered[i].path < ordered[j].path
+		}
+		return ordered[i].slot < ordered[j].slot
+	})
+
+	locked := make([]string, 0, len(ordered))
+	for _, candidate := range ordered {
+		fs.lockManager.Lock(candidate.path)
+		locked = append(locked, candidate.path)
+	}
+	return locked
+}
+
+func (fs *FileStore) unlockPaths(paths []string) {
+	for i := len(paths) - 1; i >= 0; i-- {
+		fs.lockManager.Unlock(paths[i])
+	}
+}
+
+func removeFiles(paths []string) error {
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
 func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
+	return writeStoredMetadataEnvelope(w, storedMetadata{Metadata: derefMetadata(meta)})
+}
+
+func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata) error {
+	storedKey := key
+	return writeStoredMetadataEnvelope(w, storedMetadata{
+		Metadata:  derefMetadata(meta),
+		StoredKey: &storedKey,
+	})
+}
+
+func writeStoredMetadataEnvelope(w io.Writer, meta storedMetadata) error {
 	metaBytes, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
@@ -319,36 +509,51 @@ func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 	return nil
 }
 
+func derefMetadata(meta *daramjwee.Metadata) daramjwee.Metadata {
+	if meta == nil {
+		return daramjwee.Metadata{}
+	}
+	return *meta
+}
+
 // readMetadata reads metadata from a reader.
 // It expects the metadata length as a uint32 prefix, followed by the JSON-encoded metadata.
 // It returns the metadata, the offset where the data begins, and an error if any.
 func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
+	meta, _, _, dataOffset, err := readStoredMetadata(r)
+	return meta, dataOffset, err
+}
+
+func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, int64, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(r, lenBuf); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
+			return nil, "", false, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
 		}
-		return nil, 0, fmt.Errorf("failed to read metadata length: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to read metadata length: %w", err)
 	}
 
 	metaLen := binary.BigEndian.Uint32(lenBuf)
 	// Add a sanity check for metaLen to avoid allocating huge buffers
 	if metaLen > 10*1024*1024 { // 10MB limit for metadata
-		return nil, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
+		return nil, "", false, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
 	}
 
 	metaBytes := make([]byte, metaLen)
 	if _, err := io.ReadFull(r, metaBytes); err != nil {
-		return nil, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
 	}
 
-	var meta daramjwee.Metadata
+	var meta storedMetadata
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
 	dataOffset := int64(4 + metaLen)
-	return &meta, dataOffset, nil
+	if meta.StoredKey == nil {
+		return &meta.Metadata, "", false, dataOffset, nil
+	}
+	return &meta.Metadata, *meta.StoredKey, true, dataOffset, nil
 }
 
 // copyFile copies a file from src to dst.
@@ -398,17 +603,33 @@ func (lrc *lockedReadCloser) Close() error {
 type lockedWriteCloser struct {
 	*os.File
 	onClose func() error
+	onAbort func() error
+	mu      sync.Mutex
+	done    bool
 }
 
 // newLockedWriteCloser creates a new lockedWriteCloser.
-func newLockedWriteCloser(f *os.File, onClose func() error) io.WriteCloser {
-	return &lockedWriteCloser{File: f, onClose: onClose}
+func newLockedWriteCloser(f *os.File, onClose func() error, onAbort func() error) daramjwee.WriteSink {
+	return &lockedWriteCloser{File: f, onClose: onClose, onAbort: onAbort}
 }
 
 // Close closes the underlying file and then executes the onClose callback.
 // It prioritizes the error from the onClose callback.
 func (lwc *lockedWriteCloser) Close() error {
+	if !lwc.markDone() {
+		return nil
+	}
+
 	closeErr := lwc.File.Close()
+	if closeErr != nil {
+		if lwc.onAbort != nil {
+			abortErr := lwc.onAbort()
+			if abortErr != nil {
+				return errors.Join(closeErr, abortErr)
+			}
+		}
+		return closeErr
+	}
 
 	onCloseErr := lwc.onClose()
 
@@ -416,6 +637,29 @@ func (lwc *lockedWriteCloser) Close() error {
 		return onCloseErr
 	}
 	return closeErr
+}
+
+func (lwc *lockedWriteCloser) Abort() error {
+	if !lwc.markDone() {
+		return nil
+	}
+
+	closeErr := lwc.File.Close()
+	var abortErr error
+	if lwc.onAbort != nil {
+		abortErr = lwc.onAbort()
+	}
+	return errors.Join(closeErr, abortErr)
+}
+
+func (lwc *lockedWriteCloser) markDone() bool {
+	lwc.mu.Lock()
+	defer lwc.mu.Unlock()
+	if lwc.done {
+		return false
+	}
+	lwc.done = true
+	return true
 }
 
 // initializeCurrentSize scans the base directory to calculate the current total size
@@ -441,15 +685,40 @@ func (fs *FileStore) initializeCurrentSize() error {
 			return err
 		}
 
-		key := filepath.ToSlash(relPath)
+		key, err := fs.storedKeyForPath(path, filepath.ToSlash(relPath))
+		if err != nil {
+			return err
+		}
 		size := info.Size()
 
+		if oldSize, exists := fs.fileSizes[key]; exists {
+			fs.currentSize -= oldSize
+			fs.policy.Remove(key)
+		}
 		fs.fileSizes[key] = size
 		fs.currentSize += size
 		fs.policy.Add(key, size)
 
 		return nil
 	})
+}
+
+func (fs *FileStore) storedKeyForPath(path, relPath string) (string, error) {
+	if fs.isAmbiguousLegacyPath(path) {
+		storedKey, storedKeyPresent, err := fs.readStoredKeyForCandidate(path)
+		if err != nil {
+			return "", err
+		}
+		if storedKeyPresent {
+			return storedKey, nil
+		}
+		return relPath, nil
+	}
+
+	if key, ok := decodeStoredKey(relPath); ok {
+		return key, nil
+	}
+	return relPath, nil
 }
 
 // updateAfterSet updates the policy and size tracking after a successful file write.
@@ -476,8 +745,10 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 
 	// Collect keys to evict while holding the lock
 	var keysToEvict []string
+	projectedSize := fs.currentSize
+	scheduled := make(map[string]struct{})
 	if fs.capacity > 0 {
-		for fs.currentSize > fs.capacity {
+		for projectedSize > fs.capacity {
 			candidates := fs.policy.Evict()
 			if len(candidates) == 0 {
 				break
@@ -486,6 +757,9 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 			var filteredCandidates []string
 			for _, candidate := range candidates {
 				if candidate != key {
+					if _, alreadyScheduled := scheduled[candidate]; alreadyScheduled {
+						continue
+					}
 					filteredCandidates = append(filteredCandidates, candidate)
 				}
 			}
@@ -499,11 +773,10 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 
 			keysToEvict = append(keysToEvict, filteredCandidates...)
 
-			// Optimistically update size tracking
 			for _, keyToEvict := range filteredCandidates {
+				scheduled[keyToEvict] = struct{}{}
 				if size, exists := fs.fileSizes[keyToEvict]; exists {
-					fs.currentSize -= size
-					delete(fs.fileSizes, keyToEvict)
+					projectedSize -= size
 				}
 			}
 		}
@@ -512,15 +785,15 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 	fs.mu.Unlock()
 
 	// Perform actual file deletions without holding the mutex
+	heldSlots := map[uint64]struct{}{
+		fs.lockManager.getSlot(path): {},
+	}
 	for _, keyToEvict := range keysToEvict {
-		if err := fs.deleteFileOnly(keyToEvict); err != nil {
+		if err := fs.evictKey(keyToEvict, heldSlots); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to evict file", "key", keyToEvict, "err", err)
-			// Revert the optimistic update for this key
 			fs.mu.Lock()
-			if fileInfo, statErr := os.Stat(fs.toDataPath(keyToEvict)); statErr == nil {
-				fs.fileSizes[keyToEvict] = fileInfo.Size()
-				fs.currentSize += fileInfo.Size()
-				fs.policy.Add(keyToEvict, fileInfo.Size())
+			if size, exists := fs.fileSizes[keyToEvict]; exists {
+				fs.policy.Add(keyToEvict, size)
 			}
 			fs.mu.Unlock()
 		} else {
@@ -531,19 +804,79 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 	return nil
 }
 
-// deleteFileOnly removes a file from disk without updating internal tracking.
-// This is used during eviction when tracking has already been updated optimistically.
-func (fs *FileStore) deleteFileOnly(key string) error {
-	path := fs.toDataPath(key)
+func (fs *FileStore) evictKey(key string, heldSlots map[uint64]struct{}) error {
+	candidates := fs.dataPathCandidates(key)
+	paths := candidatePaths(candidates)
+	locked := fs.lockPaths(paths, heldSlots)
+	defer fs.unlockPaths(locked)
 
-	// Lock the file for deletion
-	fs.lockManager.Lock(path)
-	defer fs.lockManager.Unlock(path)
-
-	// Remove the file
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	removablePaths, err := fs.deletablePaths(candidates, key)
+	if err != nil {
+		return err
+	}
+	if err := removeFiles(removablePaths); err != nil {
 		return fmt.Errorf("failed to remove file during eviction: %w", err)
 	}
 
+	fs.mu.Lock()
+	if size, exists := fs.fileSizes[key]; exists {
+		fs.currentSize -= size
+		delete(fs.fileSizes, key)
+	}
+	fs.policy.Remove(key)
+	fs.mu.Unlock()
+
 	return nil
+}
+
+func (fs *FileStore) removeLegacyPathOnly(key string, heldSlots map[uint64]struct{}) error {
+	legacyPath := fs.legacyDataPath(key)
+	currentPath := fs.toDataPath(key)
+	if legacyPath == currentPath {
+		return nil
+	}
+
+	candidate := dataPathCandidate{
+		path:      legacyPath,
+		isLegacy:  true,
+		ambiguous: fs.isAmbiguousLegacyPath(legacyPath),
+	}
+
+	locked := fs.lockPaths([]string{candidate.path}, heldSlots)
+	defer fs.unlockPaths(locked)
+
+	if candidate.ambiguous {
+		storedKey, storedKeyPresent, err := fs.readStoredKeyForCandidate(candidate.path)
+		if err != nil {
+			return err
+		}
+		if !fs.candidateMatchesKey(candidate, key, storedKey, storedKeyPresent) {
+			return nil
+		}
+	}
+
+	err := os.Remove(candidate.path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove legacy file: %w", err)
+	}
+	return nil
+}
+
+func encodeKey(key string) string {
+	return encodedKeyPrefix + base64.RawURLEncoding.EncodeToString([]byte(key))
+}
+
+func decodeStoredKey(relPath string) (string, bool) {
+	if dir := filepath.Dir(relPath); dir != "." && dir != encodedKeyDir {
+		return "", false
+	}
+	name := filepath.Base(relPath)
+	if !strings.HasPrefix(name, encodedKeyPrefix) {
+		return "", false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(name, encodedKeyPrefix))
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
 }

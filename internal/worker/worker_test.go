@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +13,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
 
 // TestWorkerManager_NewManager verifies that the worker manager is created with the correct strategy.
 func TestWorkerManager_NewManager(t *testing.T) {
@@ -233,4 +251,73 @@ func TestPoolStrategy_DropsJob_WhenQueueIsFull_And_LogsIt(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "level=warn msg=\"worker queue is full, dropping job\"", "A warning log should be recorded when a job is dropped.")
 
 	close(firstJobBlocker)
+}
+
+func TestAllStrategy_SubmitAfterShutdownDoesNotPanic(t *testing.T) {
+	strategy := NewAllStrategy(log.NewNopLogger(), time.Second)
+	require.NoError(t, strategy.Shutdown(time.Second))
+
+	require.NotPanics(t, func() {
+		assert.False(t, strategy.Submit(func(ctx context.Context) {}))
+	})
+}
+
+func TestPoolStrategy_RecoversFromJobPanic(t *testing.T) {
+	var logBuf lockedBuffer
+	strategy := NewPoolStrategy(log.NewLogfmtLogger(&logBuf), 1, 4, time.Second)
+	defer strategy.Shutdown(time.Second)
+
+	panicDone := make(chan struct{})
+	nextJobDone := make(chan struct{})
+
+	require.True(t, strategy.Submit(func(ctx context.Context) {
+		defer close(panicDone)
+		panic("boom")
+	}))
+
+	<-panicDone
+
+	require.True(t, strategy.Submit(func(ctx context.Context) {
+		close(nextJobDone)
+	}))
+
+	select {
+	case <-nextJobDone:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not continue after recovered panic")
+	}
+
+	assert.Eventually(t, func() bool {
+		return strings.Contains(logBuf.String(), "msg=\"worker job panicked\"")
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestAllStrategy_RecoversFromJobPanic(t *testing.T) {
+	var logBuf lockedBuffer
+	strategy := NewAllStrategy(log.NewLogfmtLogger(&logBuf), time.Second)
+	defer strategy.Shutdown(time.Second)
+
+	panicDone := make(chan struct{})
+	nextJobDone := make(chan struct{})
+
+	require.True(t, strategy.Submit(func(ctx context.Context) {
+		defer close(panicDone)
+		panic("boom")
+	}))
+
+	<-panicDone
+
+	require.True(t, strategy.Submit(func(ctx context.Context) {
+		close(nextJobDone)
+	}))
+
+	select {
+	case <-nextJobDone:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not continue after recovered panic")
+	}
+
+	assert.Eventually(t, func() bool {
+		return strings.Contains(logBuf.String(), "msg=\"worker job panicked\"")
+	}, time.Second, 10*time.Millisecond)
 }

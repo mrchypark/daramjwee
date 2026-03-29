@@ -50,7 +50,7 @@ func ExampleSimpleFetcher_Fetch() {
 	// Fetched data: Hello, Daramjwee!
 }
 
-// main showcases the usage of a multi-tier daramjwee cache with a memory store (hot) and a file store (cold).
+// main showcases the usage of an ordered-tier daramjwee cache with memory tier 0 and file tier 1.
 func main() {
 	ctx := context.Background()
 
@@ -73,8 +73,7 @@ func main() {
 
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(memStore),
-		daramjwee.WithColdStore(fileStore),
+		daramjwee.WithTiers(memStore, fileStore),
 		daramjwee.WithDefaultTimeout(10*time.Second),
 		daramjwee.WithShutdownTimeout(5*time.Second),
 	)
@@ -95,7 +94,7 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	fmt.Println("--- Second Get (Hot Cache Hit) ---")
+	fmt.Println("--- Second Get (Tier 0 Hit) ---")
 	reader, err = cache.Get(ctx, "multi-key", fetcher)
 	if err != nil {
 		logger.Log("msg", "Failed to get key", "err", err)
@@ -105,15 +104,15 @@ func main() {
 	reader.Close()
 	fmt.Printf("Got data: %s", string(body))
 
-	fmt.Println("--- Simulating Hot Cache Eviction ---")
+	fmt.Println("--- Simulating Tier 0 Eviction ---")
 	err = memStore.Delete(ctx, "multi-key")
 	if err != nil {
-		logger.Log("msg", "Failed to delete from hot cache", "err", err)
+		logger.Log("msg", "Failed to delete from tier 0", "err", err)
 		os.Exit(1)
 	}
-	fmt.Println("Key 'multi-key' removed from hot cache.")
+	fmt.Println("Key 'multi-key' removed from tier 0.")
 
-	fmt.Println("--- Third Get (Cold Cache Hit) ---")
+	fmt.Println("--- Third Get (Lower-Tier Hit) ---")
 	reader, err = cache.Get(ctx, "multi-key", fetcher)
 	if err != nil {
 		logger.Log("msg", "Failed to get key", "err", err)

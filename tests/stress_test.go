@@ -21,7 +21,7 @@ type mockStore struct {
 	meta           map[string]*daramjwee.Metadata
 	err            error
 	writeCompleted chan string
-	forceSetError  bool // forceSetError, if true, makes SetWithWriter return an error.
+	forceSetError  bool // forceSetError, if true, makes BeginSet return an error.
 }
 
 // newMockStore creates a new mockStore.
@@ -54,8 +54,8 @@ func (s *mockStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 	return io.NopCloser(bytes.NewReader(data)), meta, nil
 }
 
-// SetWithWriter simulates writing a stream to the store.
-func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *daramjwee.Metadata) (io.WriteCloser, error) {
+// BeginSet simulates writing a stream to the store.
+func (s *mockStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	if s.forceSetError {
 		return nil, errors.New("simulated set error")
 	}
@@ -65,7 +65,7 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *dar
 	}
 
 	var buf bytes.Buffer
-	return &mockWriteCloser{
+	return &mockWriteSink{
 		onClose: func() error {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -84,7 +84,8 @@ func (s *mockStore) SetWithWriter(ctx context.Context, key string, metadata *dar
 			}
 			return nil
 		},
-		buf: &buf,
+		onAbort: func() error { return nil },
+		buf:     &buf,
 	}, nil
 }
 
@@ -116,17 +117,36 @@ func (s *mockStore) setData(key, content string, metadata *daramjwee.Metadata) {
 	s.meta[key] = metadata
 }
 
-// mockWriteCloser is a mock implementation of io.WriteCloser.
-type mockWriteCloser struct {
+// mockWriteSink is a mock implementation of daramjwee.WriteSink.
+type mockWriteSink struct {
 	buf     *bytes.Buffer
 	onClose func() error
+	onAbort func() error
+	done    bool
 }
 
 // Write writes bytes to the underlying buffer.
-func (mwc *mockWriteCloser) Write(p []byte) (n int, err error) { return mwc.buf.Write(p) }
+func (mwc *mockWriteSink) Write(p []byte) (n int, err error) { return mwc.buf.Write(p) }
 
 // Close executes the onClose callback.
-func (mwc *mockWriteCloser) Close() error { return mwc.onClose() }
+func (mwc *mockWriteSink) Close() error {
+	if mwc.done {
+		return nil
+	}
+	mwc.done = true
+	return mwc.onClose()
+}
+
+func (mwc *mockWriteSink) Abort() error {
+	if mwc.done {
+		return nil
+	}
+	mwc.done = true
+	if mwc.onAbort != nil {
+		return mwc.onAbort()
+	}
+	return nil
+}
 
 // mockFetcher is a mock implementation of the Fetcher interface for testing purposes.
 type mockFetcher struct {
@@ -166,6 +186,16 @@ func (f *mockFetcher) getFetchCount() int {
 	return f.fetchCount
 }
 
+func (f *mockFetcher) getLastOldMetadata() *daramjwee.Metadata {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lastOldMetadata == nil {
+		return nil
+	}
+	copied := *f.lastOldMetadata
+	return &copied
+}
+
 // slowMockStore simulates a slow storage by adding an intentional delay.
 type slowMockStore struct {
 	mockStore
@@ -196,13 +226,18 @@ func TestCache_WithSlowColdStore(t *testing.T) {
 	hot := newMockStore()
 	slowCold := newSlowMockStore(100 * time.Millisecond)
 
-	cache, err := daramjwee.New(nil, daramjwee.WithHotStore(hot), daramjwee.WithColdStore(slowCold), daramjwee.WithDefaultTimeout(1*time.Second))
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot, slowCold),
+		daramjwee.WithTierFreshness(time.Hour, time.Hour),
+		daramjwee.WithDefaultTimeout(1*time.Second),
+	)
 	require.NoError(t, err)
 	defer cache.Close()
 
 	key := "slow-item"
 	content := "content from slow store"
-	slowCold.setData(key, content, &daramjwee.Metadata{ETag: "v-slow"})
+	slowCold.setData(key, content, &daramjwee.Metadata{ETag: "v-slow", CachedAt: time.Now()})
 
 	stream, err := cache.Get(context.Background(), key, &mockFetcher{})
 	require.NoError(t, err)

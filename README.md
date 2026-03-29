@@ -2,13 +2,19 @@
 
 A pragmatic and lightweight hybrid caching middleware for Go.
 
-`daramjwee` sits between your application and your origin data source (e.g., a database or an API), providing an efficient, stream-based hybrid caching layer. It is designed with a focus on simplicity and core functionality to achieve high throughput at a low cost in cloud-native environments.
+`daramjwee` sits between your application and your origin data source (e.g., a database or an API), providing an efficient, stream-oriented hybrid caching layer. It is designed with a focus on simplicity and core functionality to achieve high throughput at a low cost in cloud-native environments.
 
 ## Core Design Philosophy
 
 `daramjwee` is built on two primary principles:
 
-1.  **Purely Stream-Based API:** All data is processed through `io.Reader` and `io.Writer` interfaces. This means that even large objects are handled without memory overhead from intermediate buffering, guaranteeing optimal performance for proxying use cases. **Crucially, the user must always `Close()` the stream to finalize operations and prevent resource leaks.**
+1.  **Stream-Oriented API:** Public reads and writes are expressed through `io.Reader` and `io.Writer` interfaces, so store implementations can stream data without forcing full in-memory buffering in user code.
+
+    Key semantics:
+    - Callers must always `Close()` the returned stream to finalize the operation and release resources.
+    - Tier-0 hits are returned directly as streams.
+    - Lower-tier hits and origin misses are streamed to the caller while tier 0 is filled in the same read lifecycle.
+    - If the caller stops early and closes the stream, the staged write is discarded instead of publishing partial data.
 2.  **Modular and Pluggable Architecture:** Key components such as the storage backend (`Store`), eviction strategy (`EvictionPolicy`), and asynchronous task runner (`Worker`) are all designed as interfaces. This allows users to easily swap in their own implementations to fit specific needs.
 
 ## Current Status & Key Implementations
@@ -17,9 +23,9 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
   * **Robust Storage Backends (`Store`):**
 
-      * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyAndTruncate`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**.
+      * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyAndTruncate`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**, and it is not supported as a top-tier (tier 0) store due to limitations with the stream-through publish contract.
       * **`MemStore`**: A thread-safe, high-throughput in-memory store with fully integrated capacity-based eviction logic. Its performance is optimized using `sync.Pool` to reduce memory allocations under high concurrency.
-      * **`objstore` Adapter**: A built-in adapter for `thanos-io/objstore` allows immediate use of major cloud object stores (S3, GCS, Azure Blob Storage) as a Cold Tier. It supports true, memory-efficient streaming uploads using `io.Pipe`. **Note: Concurrent writes to the same key are not protected against race conditions by default.**
+      * **`objectstore`**: A first-party `Store` for `thanos-io/objstore` providers (S3, GCS, Azure Blob Storage). It is designed for cost-efficient durable caching, especially when object count and large-object read cost matter, while still fitting into the same ordered-tier cache model as the other backends. In distributed deployments, concurrent writes to the same key are still last-writer-wins unless you coordinate writers externally.
 
   * **Advanced Eviction Policies (`EvictionPolicy`):**
 
@@ -42,7 +48,7 @@ The data retrieval process in `daramjwee` follows a clear, tiered approach to ma
 
 ```mermaid
 flowchart TD
-    A[Client Request for a Key] --> B{Check Hot Tier};
+    A[Client Request for a Key] --> B{Check Tier 0};
 
     B -- Hit --> C{Is item stale?};
     C -- No --> D[Stream data to Client];
@@ -51,33 +57,33 @@ flowchart TD
     F --> G(Schedule Background Refresh);
     G --> E;
 
-    B -- Miss --> H{Check Cold Tier};
+    B -- Miss --> H{Check Lower Tiers};
 
-    H -- Hit --> I[Stream data to Client & Promote to Hot Tier];
+    H -- Hit --> I[Stream while filling Tier 0];
     I --> E;
 
     H -- Miss --> J[Fetch from Origin];
-    J -- Success --> K[Stream data to Client & Write to Hot Tier];
-    K --> L(Optionally: Schedule write to Cold Tier);
+    J -- Success --> K[Stream from Origin while filling Tier 0];
+    K --> L(Optionally: Schedule async fan-out to lower tiers);
     L --> E;
     
     J -- Not Found (Cacheable) --> M[Cache Negative Entry];
     M --> N[Return 'Not Found' to Client];
     N --> E;
     
-    J -- Not Modified (304) --> O{Re-fetch from Hot Tier};
+    J -- Not Modified (304) --> O{Re-fetch from Tier 0};
     O -- Success --> D;
     O -- Failure (e.g., evicted) --> N;
 ```
 
-1.  **Check Hot Tier:** Looks for the object in the Hot Tier.
+1.  **Check Tier 0:** Looks for the object in the first regular tier.
       * **Hit (Fresh):** Immediately returns the object stream to the client.
       * **Hit (Stale):** Immediately returns the **stale** object stream to the client and schedules a background task to refresh the cache from the origin.
-2.  **Check Cold Tier:** If not in the Hot Tier, it checks the Cold Tier.
-      * **Hit:** Streams the object to the client while simultaneously promoting it to the Hot Tier for faster access next time.
+2.  **Check lower tiers:** If tier 0 misses, `daramjwee` checks the remaining ordered tiers.
+      * **Hit:** Streams the object to the caller while simultaneously filling tier 0, so the next access is a tier-0 hit if the caller finishes and closes the stream.
 3.  **Fetch from Origin:** If the object is in neither tier (Cache Miss), it invokes the user-provided `Fetcher`.
-      * **Success:** The fetched data stream is sent to the client and written to the Hot Tier at the same time.
-      * **Not Modified:** If the origin returns `ErrNotModified`, `daramjwee` attempts to re-serve the data from the Hot Tier.
+      * **Success:** The fetched data is streamed directly to the client while simultaneously filling tier 0. Once the read completes and the caller closes the stream, the entry becomes visible in tier 0 and can be fanned out asynchronously to lower tiers.
+      * **Not Modified:** If the origin returns `ErrNotModified`, `daramjwee` attempts to re-serve the data from tier 0.
       * **Not Found:** If the origin returns `ErrCacheableNotFound`, a negative entry is stored to prevent repeated fetches.
 
 ## Getting Started
@@ -147,7 +153,7 @@ func main() {
 	logger := log.NewLogfmtLogger(os.Stderr)
 	logger = level.NewFilter(logger, level.AllowDebug())
 
-	// 2. Create a store for the Hot Tier (e.g., FileStore).
+	// 2. Create a store for tier 0 (e.g., FileStore).
 	// The New function signature was updated.
 	hotStore, err := filestore.New("./daramjwee-cache", log.With(logger, "tier", "hot"))
 	if err != nil {
@@ -157,9 +163,9 @@ func main() {
 	// 3. Create a daramjwee cache instance with your configuration.
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(hotStore),
+		daramjwee.WithTiers(hotStore),
 		daramjwee.WithDefaultTimeout(5*time.Second),
-		// New options like WithCache and WithShutdownTimeout are available.
+		// WithCache / WithNegativeCache configure regular-tier freshness.
 		daramjwee.WithCache(1*time.Minute),
 		daramjwee.WithNegativeCache(30*time.Second),
 		daramjwee.WithShutdownTimeout(10*time.Second),

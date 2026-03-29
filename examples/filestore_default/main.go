@@ -48,7 +48,7 @@ func ExampleSimpleFetcher_Fetch() {
 	// Fetched data: Hello, Daramjwee!
 }
 
-// main showcases the usage of daramjwee cache with a filestore as the hot store.
+// main showcases the usage of daramjwee cache with a filestore as a simple tier-0 store.
 func main() {
 	ctx := context.Background()
 
@@ -68,7 +68,7 @@ func main() {
 
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(fileStore),
+		daramjwee.WithTiers(fileStore),
 		daramjwee.WithDefaultTimeout(10*time.Second),
 		daramjwee.WithShutdownTimeout(5*time.Second),
 	)

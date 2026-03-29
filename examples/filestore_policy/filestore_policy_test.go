@@ -43,7 +43,7 @@ func TestFileStoreWithLRUPolicy(t *testing.T) {
 			CachedAt: time.Now(),
 		}
 
-		writer, err := store.SetWithWriter(ctx, key, metadata)
+		writer, err := store.BeginSet(ctx, key, metadata)
 		if err != nil {
 			return err
 		}
@@ -134,7 +134,7 @@ func TestFileStoreWithS3FIFOPolicy(t *testing.T) {
 	}
 
 	// Write a file
-	writer, err := store.SetWithWriter(ctx, "test-key", metadata)
+	writer, err := store.BeginSet(ctx, "test-key", metadata)
 	if err != nil {
 		t.Fatalf("Failed to get writer: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestFileStoreWithSIEVEPolicy(t *testing.T) {
 			CachedAt: time.Now(),
 		}
 
-		writer, err := store.SetWithWriter(ctx, key, metadata)
+		writer, err := store.BeginSet(ctx, key, metadata)
 		if err != nil {
 			return err
 		}
@@ -263,7 +263,7 @@ func TestFileStoreWithoutEvictionPolicy(t *testing.T) {
 		CachedAt: time.Now(),
 	}
 
-	writer, err := store.SetWithWriter(ctx, "test-key", metadata)
+	writer, err := store.BeginSet(ctx, "test-key", metadata)
 	if err != nil {
 		t.Fatalf("Failed to get writer: %v", err)
 	}

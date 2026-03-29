@@ -77,7 +77,7 @@ func benchmarkFileStorePolicy(b *testing.B, policyName string, pol daramjwee.Evi
 			CachedAt: time.Now(),
 		}
 
-		writer, err := store.SetWithWriter(ctx, key, metadata)
+		writer, err := store.BeginSet(ctx, key, metadata)
 		if err != nil {
 			b.Fatalf("Failed to get writer: %v", err)
 		}
@@ -148,7 +148,7 @@ func benchmarkMixedWorkload(b *testing.B, policyName string, pol daramjwee.Evict
 			CachedAt: time.Now(),
 		}
 
-		writer, err := store.SetWithWriter(ctx, key, metadata)
+		writer, err := store.BeginSet(ctx, key, metadata)
 		if err != nil {
 			b.Fatalf("Failed to get writer during pre-population: %v", err)
 		}
@@ -173,7 +173,7 @@ func benchmarkMixedWorkload(b *testing.B, policyName string, pol daramjwee.Evict
 				CachedAt: time.Now(),
 			}
 
-			writer, err := store.SetWithWriter(ctx, key, metadata)
+			writer, err := store.BeginSet(ctx, key, metadata)
 			if err != nil {
 				continue
 			}
