@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -614,6 +616,47 @@ func TestCache_SingleTierStaleNotModifiedRefreshesCachedAt(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 	assert.Equal(t, fetchCount, fetcher.getFetchCount())
+}
+
+func TestCache_SingleTierFilestoreStaleNotModifiedRefreshesWithoutSelfDeadlock(t *testing.T) {
+	dir := t.TempDir()
+	tier, err := filestore.New(dir, log.NewNopLogger())
+	require.NoError(t, err)
+
+	oldCachedAt := time.Now().Add(-time.Hour)
+	writer, err := tier.BeginSet(context.Background(), "filestore-stale-304", &daramjwee.Metadata{
+		ETag:     "old",
+		CachedAt: oldCachedAt,
+	})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("old-value"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(tier),
+		daramjwee.WithTierFreshness(time.Second, 0),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "filestore-stale-304", fetcher)
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, "old-value", string(body))
+
+	require.Eventually(t, func() bool {
+		meta, err := tier.Stat(context.Background(), "filestore-stale-304")
+		if err != nil {
+			return false
+		}
+		return meta.ETag == "old" && meta.CachedAt.After(oldCachedAt)
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestCache_SingleTierZeroCachedAtHitRefreshesOnlyTier(t *testing.T) {

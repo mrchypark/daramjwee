@@ -441,13 +441,20 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 	if err != nil {
 		return err
 	}
-	defer srcStream.Close()
+	content, err := io.ReadAll(srcStream)
+	closeErr := srcStream.Close()
+	if err != nil {
+		return errors.Join(err, closeErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
 
 	writer, err := c.setStreamToStore(ctx, target, key, &metaToRefresh)
 	if err != nil {
 		return err
 	}
-	if _, copyErr := io.Copy(writer, srcStream); copyErr != nil {
+	if _, copyErr := writer.Write(content); copyErr != nil {
 		abortErr := writer.Abort()
 		return errors.Join(copyErr, abortErr)
 	}
