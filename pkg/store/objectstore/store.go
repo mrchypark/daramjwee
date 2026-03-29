@@ -430,6 +430,33 @@ func trimSlashes(s string) string {
 	return strings.Trim(s, "/")
 }
 
+// OwnsObjectPath reports whether the provided bucket object path belongs to the
+// internal remote namespace used by this store instance.
+func (s *Store) OwnsObjectPath(name string) bool {
+	name = trimSlashes(name)
+	if name == "" {
+		return false
+	}
+
+	prefix := trimSlashes(s.prefix)
+	if prefix != "" {
+		if name == prefix {
+			return false
+		}
+		if !strings.HasPrefix(name, prefix+"/") {
+			return false
+		}
+		name = strings.TrimPrefix(name, prefix+"/")
+	}
+
+	for _, root := range []string{"manifests", "blobs", "segments", "checkpoints"} {
+		if name == root || strings.HasPrefix(name, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
 	if meta == nil {
 		return nil

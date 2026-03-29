@@ -26,7 +26,7 @@ func NewObjstoreAdapter(bucket objstore.Bucket, logger log.Logger, opts ...objec
 }
 
 type objstoreAdapter struct {
-	modern daramjwee.Store
+	modern *objectstore.Store
 	bucket objstore.Bucket
 	logger log.Logger
 }
@@ -68,6 +68,13 @@ func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	if !legacyExists {
+		if a.modern.OwnsObjectPath(key) {
+			return nil
+		}
+		err := a.bucket.Delete(ctx, key)
+		if err != nil && !a.bucket.IsObjNotFoundErr(err) {
+			return err
+		}
 		return nil
 	}
 	for _, name := range []string{key, legacyMetaPath(key)} {

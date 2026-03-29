@@ -97,6 +97,19 @@ func TestObjstoreAdapter_DeleteDoesNotRemoveRawNamesWithoutLegacyMetadata(t *tes
 	assert.Equal(t, "internal object body", string(body))
 }
 
+func TestObjstoreAdapter_DeleteRemovesOrphanedLegacyPayloadWithoutMetadata(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	key := "legacy-orphan"
+	require.NoError(t, bucket.Upload(ctx, key, strings.NewReader("legacy body")))
+
+	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDataDir(t.TempDir()))
+	require.NoError(t, store.Delete(ctx, key))
+
+	_, err := bucket.Get(ctx, key)
+	require.True(t, bucket.IsObjNotFoundErr(err))
+}
+
 func TestObjstoreAdapter_DeleteRemovesLegacyObjectsEvenWithCorruptMetadata(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
