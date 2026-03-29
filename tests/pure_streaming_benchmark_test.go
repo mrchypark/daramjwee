@@ -46,6 +46,18 @@ func BenchmarkCacheGet_Miss_1MiB(b *testing.B) {
 	benchmarkMissStreamThrough(b, benchmarkLargePayload)
 }
 
+func BenchmarkCacheGet_Miss_1MiB_PrebuiltFetcher(b *testing.B) {
+	benchmarkMissStreamThroughWithFixtures(b, bytes.Repeat([]byte("c"), benchmarkLargePayload), newMockStore(), benchmarkFetcherModePrebuilt)
+}
+
+func BenchmarkCacheGet_Miss_1MiB_DirectSink(b *testing.B) {
+	benchmarkMissStreamThroughWithFixtures(b, bytes.Repeat([]byte("c"), benchmarkLargePayload), &benchmarkDirectSinkStore{}, benchmarkFetcherModeString)
+}
+
+func BenchmarkCacheGet_Miss_1MiB_PrebuiltFetcher_DirectSink(b *testing.B) {
+	benchmarkMissStreamThroughWithFixtures(b, bytes.Repeat([]byte("c"), benchmarkLargePayload), &benchmarkDirectSinkStore{}, benchmarkFetcherModePrebuilt)
+}
+
 func BenchmarkCacheGet_MissPartialReadAbort(b *testing.B) {
 	hot := newMockStore()
 	payload := strings.Repeat("p", benchmarkLargePayload)
@@ -264,6 +276,50 @@ func benchmarkMissStreamThrough(b *testing.B, payloadSize int) {
 	}
 }
 
+type benchmarkFetcherMode int
+
+const (
+	benchmarkFetcherModeString benchmarkFetcherMode = iota
+	benchmarkFetcherModePrebuilt
+)
+
+func benchmarkMissStreamThroughWithFixtures(b *testing.B, payload []byte, hot daramjwee.Store, mode benchmarkFetcherMode) {
+	cache := mustNewBenchmarkCache(
+		b,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+
+	var (
+		payloadString string
+		fetcher       daramjwee.Fetcher
+	)
+	switch mode {
+	case benchmarkFetcherModePrebuilt:
+		fetcher = &benchmarkBytesFetcher{body: payload, etag: "v1"}
+	default:
+		payloadString = string(payload)
+		fetcher = &mockFetcher{content: payloadString, etag: "v1"}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		key := benchmarkKey("miss-fixture", i)
+		stream, err := cache.Get(context.Background(), key, fetcher)
+		if err != nil {
+			b.Fatalf("get: %v", err)
+		}
+		if _, err := io.Copy(io.Discard, stream); err != nil {
+			b.Fatalf("copy: %v", err)
+		}
+		if err := stream.Close(); err != nil {
+			b.Fatalf("close: %v", err)
+		}
+	}
+}
+
 func mustNewBenchmarkCache(b *testing.B, opts ...daramjwee.Option) daramjwee.Cache {
 	b.Helper()
 
@@ -310,6 +366,36 @@ func (f *benchmarkDelayedFetcher) Fetch(ctx context.Context, oldMetadata *daramj
 		Body:     newBenchmarkDelayedReadCloser(f.first, f.rest, f.delay),
 		Metadata: &daramjwee.Metadata{ETag: f.etag},
 	}, nil
+}
+
+type benchmarkBytesFetcher struct {
+	body []byte
+	etag string
+}
+
+func (f *benchmarkBytesFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	return &daramjwee.FetchResult{
+		Body:     io.NopCloser(bytes.NewReader(f.body)),
+		Metadata: &daramjwee.Metadata{ETag: f.etag},
+	}, nil
+}
+
+type benchmarkDirectSinkStore struct{}
+
+func (s *benchmarkDirectSinkStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	return nil, nil, daramjwee.ErrNotFound
+}
+
+func (s *benchmarkDirectSinkStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return &benchmarkDiscardSink{}, nil
+}
+
+func (s *benchmarkDirectSinkStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s *benchmarkDirectSinkStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	return nil, daramjwee.ErrNotFound
 }
 
 type benchmarkDelayedColdStore struct {

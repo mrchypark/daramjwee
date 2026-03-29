@@ -219,6 +219,6 @@ func main() {
 	fmt.Println("  ✅ All existing daramjwee features available")
 
 	fmt.Println("\n🎉 Generic Cache Demo Complete!")
-	fmt.Printf("📊 Memory Store (Hot): Fast access\n")
-	fmt.Printf("💾 File Store (Cold): Persistent storage at %s\n", baseDir)
+	fmt.Printf("📊 Tier 0 (MemStore): Fast access\n")
+	fmt.Printf("💾 Tier 1 (FileStore): Persistent storage at %s\n", baseDir)
 }
