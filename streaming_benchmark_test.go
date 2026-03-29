@@ -44,20 +44,16 @@ func BenchmarkStreamThrough_1MiB(b *testing.B) {
 	})
 }
 
-type benchmarkDiscardSink struct {
-	done bool
-}
+type benchmarkDiscardSink struct{}
 
 func (s *benchmarkDiscardSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
 func (s *benchmarkDiscardSink) Close() error {
-	s.done = true
 	return nil
 }
 
 func (s *benchmarkDiscardSink) Abort() error {
-	s.done = true
 	return nil
 }

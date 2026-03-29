@@ -387,7 +387,7 @@ func (s *benchmarkDirectSinkStore) GetStream(ctx context.Context, key string) (i
 }
 
 func (s *benchmarkDirectSinkStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
-	return &benchmarkDirectWriteSink{}, nil
+	return &benchmarkDiscardSink{}, nil
 }
 
 func (s *benchmarkDirectSinkStore) Delete(ctx context.Context, key string) error {
@@ -396,24 +396,6 @@ func (s *benchmarkDirectSinkStore) Delete(ctx context.Context, key string) error
 
 func (s *benchmarkDirectSinkStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
 	return nil, daramjwee.ErrNotFound
-}
-
-type benchmarkDirectWriteSink struct {
-	done bool
-}
-
-func (s *benchmarkDirectWriteSink) Write(p []byte) (int, error) {
-	return len(p), nil
-}
-
-func (s *benchmarkDirectWriteSink) Close() error {
-	s.done = true
-	return nil
-}
-
-func (s *benchmarkDirectWriteSink) Abort() error {
-	s.done = true
-	return nil
 }
 
 type benchmarkDelayedColdStore struct {
