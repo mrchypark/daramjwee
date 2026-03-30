@@ -77,6 +77,8 @@ func main() {
 		objectstore.WithPackedObjectThreshold(1<<20),
 		objectstore.WithPageSize(256<<10),
 		objectstore.WithMemoryBlockCache(64<<20),
+		objectstore.WithMemoryCheckpointCache(16<<20),
+		objectstore.WithCheckpointCacheTTL(2*time.Second),
 	)
 	logger.Log(
 		"level", "info",
@@ -86,6 +88,8 @@ func main() {
 		"packed_threshold", 1<<20,
 		"page_size", 256<<10,
 		"memory_block_cache", 64<<20,
+		"memory_checkpoint_cache", 16<<20,
+		"checkpoint_cache_ttl", 2*time.Second,
 	)
 
 	hotStoreDir, err := os.MkdirTemp("", "daramjwee-hot-cache-*")

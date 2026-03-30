@@ -13,6 +13,10 @@ import (
 )
 
 func (s *Store) loadCheckpointSnapshot(ctx context.Context, shardID string) (*checkpoint, error) {
+	if cp, ok := s.checkpointCache.Get(shardID); ok {
+		return cp, nil
+	}
+
 	reader, err := s.bucket.Get(ctx, internalshard.CheckpointObjectPath(s.prefix, shardID))
 	if err != nil {
 		if s.bucket.IsObjNotFoundErr(err) {
@@ -31,6 +35,7 @@ func (s *Store) loadCheckpointSnapshot(ctx context.Context, shardID string) (*ch
 	if err := json.Unmarshal(data, &cp); err != nil {
 		return nil, fmt.Errorf("objectstore: decode checkpoint for shard %q: %w", shardID, err)
 	}
+	s.checkpointCache.Set(shardID, &cp, int64(len(data)))
 	return &cp, nil
 }
 

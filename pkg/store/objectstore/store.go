@@ -60,6 +60,7 @@ type Store struct {
 	pageSize        int64
 	blockCache      *blockcache.Cache
 	pageCache       *pagecache.Cache
+	checkpointCache *checkpointCache
 	catalog         *internalcatalog.Catalog
 	lockManager     *keyLockManager
 	blockLoads      singleflight.Group
@@ -128,6 +129,9 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		autoFlush:       true,
 		now:             time.Now,
 	}
+	store.checkpointCache = newCheckpointCache(cfg.memoryCheckpointBytes, cfg.checkpointCacheTTL, func() time.Time {
+		return store.now()
+	})
 	if store.initErr == nil {
 		if err := store.recoverLocalState(); err != nil {
 			store.initErr = fmt.Errorf("failed to recover local objectstore state: %w", err)

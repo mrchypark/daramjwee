@@ -224,6 +224,8 @@ cache, err := daramjwee.New(
             objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
             objectstore.WithPageSize(256<<10),            // 256 KiB
             objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
+            objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
+            objectstore.WithCheckpointCacheTTL(2*time.Second),
         ),
     ),
 )
@@ -250,5 +252,14 @@ Recommended starting points:
 - `WithMemoryBlockCache(...)`
   - In-process packed-block cache.
   - Speeds up repeated remote packed reads, but it is not persistent across restarts.
+- `WithMemoryCheckpointCache(...)`
+  - In-process cache for decoded shard checkpoints such as `latest.json`.
+  - This is metadata cache, not payload cache.
+  - It reduces repeated remote GET + JSON decode cost for hot shards.
+  - Start around `8 MiB ~ 32 MiB`, then tune from shard count and key density.
+- `WithCheckpointCacheTTL(...)`
+  - How long a decoded shard checkpoint stays valid before the backend rechecks remote storage.
+  - Keep this short when multiple distributed writers can update the same shard.
+  - `1s ~ 5s` is a reasonable starting range.
 
 See [pkg/store/objectstore/README.md](pkg/store/objectstore/README.md) for a more detailed explanation of each option and suggested presets.

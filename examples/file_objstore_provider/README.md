@@ -63,6 +63,8 @@ objectstore.New(
     objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
     objectstore.WithPageSize(256<<10),            // 256 KiB
     objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
+    objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
+    objectstore.WithCheckpointCacheTTL(2*time.Second),
 )
 ```
 
@@ -75,6 +77,10 @@ Why these values:
   - reasonable default block size for packed remote reads
 - `WithMemoryBlockCache(64<<20)`
   - helps repeated packed remote reads inside the same process
+- `WithMemoryCheckpointCache(16<<20)`
+  - caches decoded shard checkpoints for hot shards and avoids repeated `latest.json` GET/decode work
+- `WithCheckpointCacheTTL(2*time.Second)`
+  - keeps checkpoint metadata reasonably fresh while still cutting remote metadata traffic
 - `WithPrefix(...)`
   - keeps example objects in an isolated namespace
 - `WithDataDir(...)`

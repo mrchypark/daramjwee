@@ -316,5 +316,9 @@ func (s *Store) publishCheckpoint(ctx context.Context, shardID string, entries m
 	if err != nil {
 		return err
 	}
-	return s.bucket.Upload(ctx, internalshard.CheckpointObjectPath(s.prefix, shardID), bytes.NewReader(data))
+	if err := s.bucket.Upload(ctx, internalshard.CheckpointObjectPath(s.prefix, shardID), bytes.NewReader(data)); err != nil {
+		return err
+	}
+	s.checkpointCache.Set(shardID, &payload, int64(len(data)))
+	return nil
 }

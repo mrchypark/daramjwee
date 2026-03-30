@@ -17,6 +17,8 @@ cache, err := daramjwee.New(
             objectstore.WithPackedObjectThreshold(1<<20),
             objectstore.WithPageSize(256<<10),
             objectstore.WithMemoryBlockCache(64<<20),
+            objectstore.WithMemoryCheckpointCache(16<<20),
+            objectstore.WithCheckpointCacheTTL(2*time.Second),
         ),
     ),
 )
@@ -138,6 +140,39 @@ Recommended starting values:
 - `32 MiB` when `FileStore` is already in front
 - `64 MiB ~ 128 MiB` when `objectstore` serves more remote hits directly
 
+### `WithMemoryCheckpointCache(capacityBytes int64)`
+
+Enables an in-process cache for decoded shard checkpoints such as `checkpoints/<shard>/latest.json`.
+
+Properties:
+
+- caches checkpoint metadata, not payload blocks
+- avoids repeated remote GET + JSON decode for hot shards
+- does not survive restart
+- is most useful when many requests repeatedly touch the same shard set
+
+Recommended starting values:
+
+- `8 MiB ~ 16 MiB` for moderate shard churn
+- `16 MiB ~ 32 MiB` when key count per hot shard is high
+
+If your keys are very fine-grained (for example, plant/day time-series objects), do not try to cache every shard indefinitely. Keep this cache bounded and rely on the TTL.
+
+### `WithCheckpointCacheTTL(ttl time.Duration)`
+
+Controls how long an in-memory shard checkpoint stays valid before the next read reloads it from remote storage.
+
+Properties:
+
+- same-process checkpoint publishes refresh the cache immediately
+- external writers are observed after TTL expiry
+- shorter TTL reduces staleness; longer TTL reduces remote metadata traffic
+
+Recommended starting values:
+
+- `2s` when the same shard may be updated by multiple writers
+- `5s` when writes are rare and read fan-out is high
+
 ### `WithMemoryPageCache(capacityBytes int64)`
 
 This is mainly relevant for paged manifest-backed reads.
@@ -163,6 +198,8 @@ objectstore.New(
     objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
     objectstore.WithPageSize(256<<10),            // 256 KiB
     objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
+    objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
+    objectstore.WithCheckpointCacheTTL(2*time.Second),
 )
 ```
 
@@ -177,6 +214,8 @@ objectstore.New(
     objectstore.WithPackedObjectThreshold(2<<20), // 2 MiB
     objectstore.WithPageSize(256<<10),
     objectstore.WithMemoryBlockCache(32<<20),
+    objectstore.WithMemoryCheckpointCache(8<<20), // 8 MiB
+    objectstore.WithCheckpointCacheTTL(2*time.Second),
 )
 ```
 
@@ -191,6 +230,8 @@ objectstore.New(
     objectstore.WithPackedObjectThreshold(512<<10), // 512 KiB
     objectstore.WithPageSize(256<<10),
     objectstore.WithMemoryBlockCache(128<<20),
+    objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
+    objectstore.WithCheckpointCacheTTL(5*time.Second),
 )
 ```
 

@@ -75,6 +75,8 @@ objectstore.New(
     objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
     objectstore.WithPageSize(256<<10),            // 256 KiB
     objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
+    objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
+    objectstore.WithCheckpointCacheTTL(2*time.Second),
 )
 ```
 
@@ -92,6 +94,10 @@ What they mean:
   - packed remote reads use 256 KiB blocks
 - `WithMemoryBlockCache(64<<20)`
   - repeated packed remote reads are cached in process memory
+- `WithMemoryCheckpointCache(16<<20)`
+  - hot shard checkpoint metadata stays in memory, so repeated remote hits do not re-fetch and re-decode `latest.json` every time
+- `WithCheckpointCacheTTL(2*time.Second)`
+  - keeps checkpoint metadata fresh enough for distributed writers while still reducing metadata traffic
 
 ## When to use a different layout
 
