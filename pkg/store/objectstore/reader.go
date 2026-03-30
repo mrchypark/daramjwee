@@ -13,8 +13,18 @@ import (
 )
 
 func (s *Store) loadCheckpointSnapshot(ctx context.Context, shardID string) (*checkpoint, error) {
-	if cp, ok := s.checkpointCache.Get(shardID); ok {
-		return cp, nil
+	return s.loadCheckpointSnapshotMode(ctx, shardID, true)
+}
+
+func (s *Store) loadCheckpointSnapshotFresh(ctx context.Context, shardID string) (*checkpoint, error) {
+	return s.loadCheckpointSnapshotMode(ctx, shardID, false)
+}
+
+func (s *Store) loadCheckpointSnapshotMode(ctx context.Context, shardID string, allowCache bool) (*checkpoint, error) {
+	if allowCache {
+		if cp, ok := s.checkpointCache.Get(shardID); ok {
+			return cp, nil
+		}
 	}
 
 	reader, err := s.bucket.Get(ctx, internalshard.CheckpointObjectPath(s.prefix, shardID))

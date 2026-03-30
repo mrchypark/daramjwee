@@ -217,24 +217,10 @@ func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Met
 		if !os.IsNotExist(err) {
 			return nil, nil, false, err
 		}
-	}
-
-	entry, ok, err := s.loadLiveLocalEntry(key)
-	if err != nil {
-		if errors.Is(err, errMissingLocalEntry) {
-			return nil, nil, false, daramjwee.ErrNotFound
+		if attempts < maxLocalOpenAttempts-1 {
+			continue
 		}
-		return nil, nil, false, err
-	}
-	if !ok {
-		return nil, nil, false, nil
-	}
 
-	stream, err := s.openLocalEntry(entry)
-	if err == nil {
-		return stream, cloneMetadata(&entry.Metadata), true, nil
-	}
-	if os.IsNotExist(err) {
 		recheckEntry, recheckOK, repairErr := s.loadLiveLocalEntry(key)
 		if repairErr != nil {
 			if errors.Is(repairErr, errMissingLocalEntry) {
@@ -242,18 +228,21 @@ func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Met
 			}
 			return nil, nil, false, repairErr
 		}
-		if recheckOK {
-			recheckStream, recheckErr := s.openLocalEntry(recheckEntry)
-			if recheckErr == nil {
-				return recheckStream, cloneMetadata(&recheckEntry.Metadata), true, nil
-			}
-			if !os.IsNotExist(recheckErr) {
-				return nil, nil, false, recheckErr
-			}
+		if !recheckOK {
+			return nil, nil, false, nil
 		}
-		return nil, nil, false, nil
+
+		recheckStream, recheckErr := s.openLocalEntry(recheckEntry)
+		if recheckErr == nil {
+			return recheckStream, cloneMetadata(&recheckEntry.Metadata), true, nil
+		}
+		if os.IsNotExist(recheckErr) {
+			return nil, nil, false, nil
+		}
+		return nil, nil, false, recheckErr
 	}
-	return nil, nil, false, err
+
+	return nil, nil, false, nil
 }
 
 // BeginSet starts a staged write for a new immutable generation.

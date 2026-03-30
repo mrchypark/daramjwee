@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/goccy/go-json"
@@ -18,6 +19,50 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
 )
+
+func TestStore_FlushUsesFreshCheckpointBaseWhenMemoryCacheIsEnabled(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	ttl := time.Hour
+	storeA := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithMemoryCheckpointCache(1<<20),
+		WithCheckpointCacheTTL(ttl),
+	)
+	storeB := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithMemoryCheckpointCache(1<<20),
+		WithCheckpointCacheTTL(ttl),
+	)
+	storeA.autoFlush = false
+	storeB.autoFlush = false
+
+	keyA, keyB, keyC := sameShardKeys3("flush-fresh-base")
+	writeAndFlush := func(t *testing.T, store *Store, key, etag, body string) {
+		t.Helper()
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, body)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, store.flushPending(ctx))
+	}
+
+	writeAndFlush(t, storeA, keyA, "v1", "alpha")
+	writeAndFlush(t, storeB, keyB, "v2", "beta")
+	writeAndFlush(t, storeA, keyC, "v3", "gamma")
+
+	checkpointObjects := listObjectNames(t, bucket, joinPath(storeA.prefix, "checkpoints"))
+	require.Len(t, checkpointObjects, 1)
+	checkpoint := loadCheckpoint(t, bucket, checkpointObjects[0])
+	require.Contains(t, checkpoint.Entries, keyA)
+	require.Contains(t, checkpoint.Entries, keyB)
+	require.Contains(t, checkpoint.Entries, keyC)
+}
 
 func TestStore_FlushUploadsSealedLocalSegmentAsRemoteSegmentObject(t *testing.T) {
 	ctx := context.Background()
@@ -266,6 +311,21 @@ func sameShardKeys(base string) (string, string) {
 		}
 	}
 	panic("failed to find same-shard key")
+}
+
+func sameShardKeys3(base string) (string, string, string) {
+	shard := shardForKey(base)
+	keys := []string{base}
+	for i := 1; len(keys) < 3 && i < 4096; i++ {
+		candidate := base + "-" + strconv.Itoa(i)
+		if shardForKey(candidate) == shard {
+			keys = append(keys, candidate)
+		}
+	}
+	if len(keys) != 3 {
+		panic("failed to find same-shard keys")
+	}
+	return keys[0], keys[1], keys[2]
 }
 
 func loadCheckpoint(t *testing.T, bucket objstore.Bucket, objectName string) checkpoint {

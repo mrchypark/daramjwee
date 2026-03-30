@@ -263,7 +263,7 @@ func (s *Store) flushDirectRecord(
 }
 
 func (s *Store) loadCheckpointEntries(ctx context.Context, shardID string) (map[string]checkpointEntry, error) {
-	cp, err := s.loadCheckpointSnapshot(ctx, shardID)
+	cp, err := s.loadCheckpointSnapshotFresh(ctx, shardID)
 	if err != nil {
 		if errors.Is(err, daramjwee.ErrNotFound) {
 			return make(map[string]checkpointEntry), nil
