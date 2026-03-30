@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.4.1
+
+### 🚀 Features & Enhancements
+
+*   **Objectstore local spool reclaim**: `objectstore` now treats local disk as a flush spool and reclaims sealed local segments after remote commit, instead of retaining them as an implicit local read cache.
+*   **Checkpoint metadata memory cache**: Added an in-memory shard checkpoint cache for remote `latest.json` snapshots to reduce repeated metadata fetch and decode cost on hot read paths.
+*   **Expanded objectstore docs and examples**: Added more detailed `objectstore` tuning guidance and aligned the file/objectstore examples around the current GCS-backed presets and tiered deployment model.
+
+### 🐛 Bug Fixes & Refinements
+
+*   **Safer local/reclaim read races**: Hardened `objectstore` local-open retry logic so reclaim, overwrite, and disappearing-local races fall back safely without surfacing stale or incorrect generations.
+*   **Correct multi-writer checkpoint merges**: Flushes now build their shard checkpoint merge base from a fresh remote checkpoint instead of a cached snapshot, avoiding cross-writer key loss when checkpoint caching is enabled.
+
+### ✅ Verification
+
+*   `go test ./...`
+*   `go test -race ./pkg/store/objectstore ./tests`
+*   `go test ./pkg/store/objectstore -run '^$' -bench 'BenchmarkStore_(ReadRemotePackedCold|ReadRemotePackedWarm)$' -benchmem -cpu=1 -benchtime=2s -count=5`
+
 ## v0.4.0
 
 ### ⚠️ Breaking Changes & API Updates
