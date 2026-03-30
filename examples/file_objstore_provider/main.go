@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -56,8 +57,36 @@ func main() {
 		logger.Log("level", "error", "msg", "FATAL: failed to create GCS client", "err", err)
 		os.Exit(1)
 	}
-	tier1Store := objectstore.New(gcsClient, logger)
-	logger.Log("level", "info", "msg", "Tier 1 (GCS objectstore) initialized.")
+	tier1DataDir, err := os.MkdirTemp("", "daramjwee-objectstore-*")
+	if err != nil {
+		logger.Log("level", "error", "msg", "FATAL: failed to create temp dir for tier 1 objectstore workspace", "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		logger.Log("level", "info", "msg", "Cleaning up tier 1 objectstore workspace.", "path", tier1DataDir)
+		if err := os.RemoveAll(tier1DataDir); err != nil {
+			logger.Log("level", "error", "msg", "Failed to remove tier 1 objectstore workspace during cleanup.", "path", tier1DataDir, "err", err)
+		}
+	}()
+
+	tier1Store := objectstore.New(
+		gcsClient,
+		log.With(logger, "tier", "1"),
+		objectstore.WithDataDir(filepath.Join(tier1DataDir, "workspace")),
+		objectstore.WithPrefix("examples/file-objstore-provider"),
+		objectstore.WithPackedObjectThreshold(1<<20),
+		objectstore.WithPageSize(256<<10),
+		objectstore.WithMemoryBlockCache(64<<20),
+	)
+	logger.Log(
+		"level", "info",
+		"msg", "Tier 1 (GCS objectstore) initialized",
+		"data_dir", filepath.Join(tier1DataDir, "workspace"),
+		"prefix", "examples/file-objstore-provider",
+		"packed_threshold", 1<<20,
+		"page_size", 256<<10,
+		"memory_block_cache", 64<<20,
+	)
 
 	hotStoreDir, err := os.MkdirTemp("", "daramjwee-hot-cache-*")
 	if err != nil {
