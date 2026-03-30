@@ -361,6 +361,74 @@ func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *
 	assert.Equal(t, "v3", meta.ETag)
 }
 
+func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallback(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+	writer, err := flushed.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "old remote body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+	writer, err = store.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{ETag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "first local body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	secondSegmentPath := filepath.Join(store.dataDir, "manual-second-local.seg")
+	require.NoError(t, os.WriteFile(secondSegmentPath, []byte("second local body"), 0o644))
+	thirdSegmentPath := filepath.Join(store.dataDir, "manual-third-local.seg")
+	require.NoError(t, os.WriteFile(thirdSegmentPath, []byte("third local body"), 0o644))
+
+	origOpen := openLocalSegmentFile
+	openCount := 0
+	openLocalSegmentFile = func(path string) (*os.File, error) {
+		openCount++
+		switch openCount {
+		case 1:
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, store.updateLocalEntry("local-final-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+				require.True(t, exists)
+				current.SegmentPath = secondSegmentPath
+				current.Offset = 0
+				current.Length = int64(len("second local body"))
+				current.Metadata.ETag = "v3"
+				return current, true
+			}))
+		case 2:
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, store.updateLocalEntry("local-final-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+				require.True(t, exists)
+				current.SegmentPath = thirdSegmentPath
+				current.Offset = 0
+				current.Length = int64(len("third local body"))
+				current.Metadata.ETag = "v4"
+				return current, true
+			}))
+		}
+		return origOpen(path)
+	}
+	t.Cleanup(func() {
+		openLocalSegmentFile = origOpen
+	})
+
+	stream, meta, err := store.GetStream(ctx, "local-final-recheck-newer-local")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "third local body", string(body))
+	assert.Equal(t, "v4", meta.ETag)
+}
+
 func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()

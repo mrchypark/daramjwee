@@ -240,26 +240,12 @@ Recommended starting points:
   - Start with `512 KiB ~ 1 MiB` for `objectstore`-only tiers.
   - Start with `1 MiB ~ 2 MiB` when `FileStore` is in front and absorbs most hot reads.
 - `WithDataDir(...)`
-  - Local workspace for ingest segments and catalog state.
-  - Use a stable path per pod or instance.
-  - Do not point multiple live instances at the same path.
-- `WithPrefix(...)`
-  - Namespace inside the bucket.
-  - Use one prefix per service or environment.
-- `WithPageSize(...)`
-  - Block size for packed remote range reads.
-  - `256 KiB` is a reasonable starting point.
+  - Local ingest/catalog workspace for the backend.
 - `WithMemoryBlockCache(...)`
-  - In-process packed-block cache.
-  - Speeds up repeated remote packed reads, but it is not persistent across restarts.
+  - In-process payload block cache for packed remote reads.
 - `WithMemoryCheckpointCache(...)`
-  - In-process cache for decoded shard checkpoints such as `latest.json`.
-  - This is metadata cache, not payload cache.
-  - It reduces repeated remote GET + JSON decode cost for hot shards.
-  - Start around `8 MiB ~ 32 MiB`, then tune from shard count and key density.
+  - In-process metadata cache for decoded shard checkpoints such as `latest.json`.
 - `WithCheckpointCacheTTL(...)`
-  - How long a decoded shard checkpoint stays valid before the backend rechecks remote storage.
-  - Keep this short when multiple distributed writers can update the same shard.
-  - `1s ~ 5s` is a reasonable starting range.
+  - Freshness window for the checkpoint metadata cache.
 
 See [pkg/store/objectstore/README.md](pkg/store/objectstore/README.md) for a more detailed explanation of each option and suggested presets.
