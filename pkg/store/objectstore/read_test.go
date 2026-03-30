@@ -3,6 +3,7 @@ package objectstore
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -95,6 +96,56 @@ func TestStore_GetStream_RemotePackedRecordReturnsExactLogicalObject(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, "beta remote value", string(body))
 	assert.Equal(t, "v2", meta.ETag)
+}
+
+func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "local-disappears-remote-live", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "remote fallback body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	entry, ok := store.catalog.Get("local-disappears-remote-live")
+	require.True(t, ok)
+	remotePath := joinPath(store.prefix, "segments", "local-disappears-remote-live.seg")
+	require.NoError(t, bucket.Upload(ctx, remotePath, strings.NewReader("remote fallback body")))
+	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("local-disappears-remote-live"), map[string]checkpointEntry{
+		"local-disappears-remote-live": {
+			SegmentPath: remotePath,
+			Offset:      0,
+			Length:      int64(len("remote fallback body")),
+			Metadata:    entry.Metadata,
+		},
+	}))
+	require.NoError(t, store.updateLocalEntry("local-disappears-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		require.True(t, exists)
+		current.RemotePath = remotePath
+		current.RemoteOffset = 0
+		return current, true
+	}))
+
+	origOpen := openLocalSegmentFile
+	openLocalSegmentFile = func(path string) (*os.File, error) {
+		require.NoError(t, os.Remove(path))
+		return origOpen(path)
+	}
+	t.Cleanup(func() {
+		openLocalSegmentFile = origOpen
+	})
+
+	stream, meta, err := store.GetStream(ctx, "local-disappears-remote-live")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "remote fallback body", string(body))
+	assert.Equal(t, "v1", meta.ETag)
 }
 
 func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T) {

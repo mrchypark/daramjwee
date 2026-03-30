@@ -155,10 +155,26 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		return nil, nil, err
 	} else if ok {
 		stream, err := s.openLocalEntry(entry)
-		if err != nil {
+		if err == nil {
+			return stream, cloneMetadata(&entry.Metadata), nil
+		}
+		if !os.IsNotExist(err) {
 			return nil, nil, err
 		}
-		return stream, cloneMetadata(&entry.Metadata), nil
+
+		if retryEntry, retryOK, retryErr := s.loadLiveLocalEntry(key); retryErr != nil {
+			if !errors.Is(retryErr, errMissingLocalEntry) {
+				return nil, nil, retryErr
+			}
+		} else if retryOK {
+			retryStream, retryOpenErr := s.openLocalEntry(retryEntry)
+			if retryOpenErr == nil {
+				return retryStream, cloneMetadata(&retryEntry.Metadata), nil
+			}
+			if !os.IsNotExist(retryOpenErr) {
+				return nil, nil, retryOpenErr
+			}
+		}
 	}
 
 	entry, err := s.loadRemoteEntry(ctx, key)
