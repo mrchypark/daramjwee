@@ -25,7 +25,7 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
       * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyAndTruncate`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**, and it is not supported as a top-tier (tier 0) store due to limitations with the stream-through publish contract.
       * **`MemStore`**: A thread-safe, high-throughput in-memory store with fully integrated capacity-based eviction logic. Its performance is optimized using `sync.Pool` to reduce memory allocations under high concurrency.
-      * **`objectstore`**: A first-party `Store` for `thanos-io/objstore` providers (S3, GCS, Azure Blob Storage). It is designed for cost-efficient durable caching, especially when object count and large-object read cost matter, while still fitting into the same ordered-tier cache model as the other backends. In distributed deployments, concurrent writes to the same key are still last-writer-wins unless you coordinate writers externally.
+      * **`objectstore`**: A first-party `Store` for `thanos-io/objstore` providers (S3, GCS, Azure Blob Storage). It is designed for cost-efficient durable caching, especially when object count and large-object read cost matter, while still fitting into the same ordered-tier cache model as the other backends. Its local `dataDir` is an ingest/catalog workspace, not a persistent local read-cache tier. If you want durable remote backing plus local file-cache hits, place `FileStore` ahead of `objectstore` in `WithTiers(...)`. In distributed deployments, concurrent writes to the same key are still last-writer-wins unless you coordinate writers externally.
 
   * **Advanced Eviction Policies (`EvictionPolicy`):**
 
@@ -195,7 +195,60 @@ func main() {
 		io.Copy(w, stream)
 	})
 
-	fmt.Println("Server is running on :8080")
-	http.ListenAndServe(":8080", nil)
+fmt.Println("Server is running on :8080")
+http.ListenAndServe(":8080", nil)
 }
 ```
+
+## objectstore Configuration
+
+`objectstore` exposes its behavior entirely through constructor options. There are two separate configuration layers:
+
+- `daramjwee.WithTiers(...)` decides where `objectstore` sits in the ordered tier chain.
+- `objectstore.With...(...)` options tune how the backend stores and reads remote objects.
+
+The most important design point is that `objectstore.WithDataDir(...)` is **not** a user-visible file-cache tier. It stores local catalog state and flush spool data so the backend can stream writes efficiently to remote object storage. If the pod restarts with an empty directory, already-flushed remote entries can still be served from the remote checkpoint/segment state. If you want local filesystem read-cache behavior after restart, put `FileStore` in front of `objectstore`.
+
+Typical ordered-tier layout:
+
+```go
+cache, err := daramjwee.New(
+    logger,
+    daramjwee.WithTiers(
+        filestore.New("/var/lib/daramjwee/tier0", log.With(logger, "tier", "0")),
+        objectstore.New(
+            bucket,
+            log.With(logger, "tier", "1"),
+            objectstore.WithDataDir("/var/lib/daramjwee/objectstore"),
+            objectstore.WithPrefix("prod/api-cache"),
+            objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
+            objectstore.WithPageSize(256<<10),            // 256 KiB
+            objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
+        ),
+    ),
+)
+```
+
+Recommended starting points:
+
+- `WithPackedObjectThreshold(...)`
+  - The main cost/performance knob for current `objectstore`.
+  - Smaller than the threshold: packed into shared remote segment objects.
+  - Larger than the threshold: uploaded as direct remote blobs.
+  - Start with `512 KiB ~ 1 MiB` for `objectstore`-only tiers.
+  - Start with `1 MiB ~ 2 MiB` when `FileStore` is in front and absorbs most hot reads.
+- `WithDataDir(...)`
+  - Local workspace for ingest segments and catalog state.
+  - Use a stable path per pod or instance.
+  - Do not point multiple live instances at the same path.
+- `WithPrefix(...)`
+  - Namespace inside the bucket.
+  - Use one prefix per service or environment.
+- `WithPageSize(...)`
+  - Block size for packed remote range reads.
+  - `256 KiB` is a reasonable starting point.
+- `WithMemoryBlockCache(...)`
+  - In-process packed-block cache.
+  - Speeds up repeated remote packed reads, but it is not persistent across restarts.
+
+See [pkg/store/objectstore/README.md](pkg/store/objectstore/README.md) for a more detailed explanation of each option and suggested presets.
