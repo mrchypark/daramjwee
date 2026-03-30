@@ -152,62 +152,10 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		return nil, nil, err
 	}
 
-	sawLocalENOENT := false
-	for attempts := 0; attempts < 2; attempts++ {
-		entry, ok, err := s.loadLiveLocalEntry(key)
-		if err != nil {
-			if errors.Is(err, errMissingLocalEntry) {
-				return nil, nil, daramjwee.ErrNotFound
-			}
-			return nil, nil, err
-		}
-		if !ok {
-			break
-		}
-
-		stream, err := s.openLocalEntry(entry)
-		if err == nil {
-			return stream, cloneMetadata(&entry.Metadata), nil
-		}
-		if !os.IsNotExist(err) {
-			return nil, nil, err
-		}
-		sawLocalENOENT = true
-	}
-	if sawLocalENOENT {
-		entry, ok, err := s.loadLiveLocalEntry(key)
-		if err != nil {
-			if errors.Is(err, errMissingLocalEntry) {
-				return nil, nil, daramjwee.ErrNotFound
-			}
-			return nil, nil, err
-		}
-		if ok {
-			stream, err := s.openLocalEntry(entry)
-			if err == nil {
-				return stream, cloneMetadata(&entry.Metadata), nil
-			}
-			if !os.IsNotExist(err) {
-				return nil, nil, err
-			}
-
-			recheckEntry, recheckOK, err := s.loadLiveLocalEntry(key)
-			if err != nil {
-				if errors.Is(err, errMissingLocalEntry) {
-					return nil, nil, daramjwee.ErrNotFound
-				}
-				return nil, nil, err
-			}
-			if recheckOK {
-				stream, err := s.openLocalEntry(recheckEntry)
-				if err == nil {
-					return stream, cloneMetadata(&recheckEntry.Metadata), nil
-				}
-				if !os.IsNotExist(err) {
-					return nil, nil, err
-				}
-			}
-		}
+	if stream, metadata, ok, err := s.openCurrentLocalEntry(key); err != nil {
+		return nil, nil, err
+	} else if ok {
+		return stream, metadata, nil
 	}
 
 	entry, err := s.loadRemoteEntry(ctx, key)
@@ -245,6 +193,67 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		return nil, nil, err
 	}
 	return reader, cloneMetadata(&entry.Metadata), nil
+}
+
+func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Metadata, bool, error) {
+	const maxLocalOpenAttempts = 3
+
+	for attempts := 0; attempts < maxLocalOpenAttempts; attempts++ {
+		entry, ok, err := s.loadLiveLocalEntry(key)
+		if err != nil {
+			if errors.Is(err, errMissingLocalEntry) {
+				return nil, nil, false, daramjwee.ErrNotFound
+			}
+			return nil, nil, false, err
+		}
+		if !ok {
+			return nil, nil, false, nil
+		}
+
+		stream, err := s.openLocalEntry(entry)
+		if err == nil {
+			return stream, cloneMetadata(&entry.Metadata), true, nil
+		}
+		if !os.IsNotExist(err) {
+			return nil, nil, false, err
+		}
+	}
+
+	entry, ok, err := s.loadLiveLocalEntry(key)
+	if err != nil {
+		if errors.Is(err, errMissingLocalEntry) {
+			return nil, nil, false, daramjwee.ErrNotFound
+		}
+		return nil, nil, false, err
+	}
+	if !ok {
+		return nil, nil, false, nil
+	}
+
+	stream, err := s.openLocalEntry(entry)
+	if err == nil {
+		return stream, cloneMetadata(&entry.Metadata), true, nil
+	}
+	if os.IsNotExist(err) {
+		recheckEntry, recheckOK, repairErr := s.loadLiveLocalEntry(key)
+		if repairErr != nil {
+			if errors.Is(repairErr, errMissingLocalEntry) {
+				return nil, nil, false, daramjwee.ErrNotFound
+			}
+			return nil, nil, false, repairErr
+		}
+		if recheckOK {
+			recheckStream, recheckErr := s.openLocalEntry(recheckEntry)
+			if recheckErr == nil {
+				return recheckStream, cloneMetadata(&recheckEntry.Metadata), true, nil
+			}
+			if !os.IsNotExist(recheckErr) {
+				return nil, nil, false, recheckErr
+			}
+		}
+		return nil, nil, false, nil
+	}
+	return nil, nil, false, err
 }
 
 // BeginSet starts a staged write for a new immutable generation.
