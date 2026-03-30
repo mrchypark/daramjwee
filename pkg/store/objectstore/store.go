@@ -66,6 +66,9 @@ type Store struct {
 	pageLoads       singleflight.Group
 	versionSeq      atomic.Uint64
 	initErr         error
+	segmentRefsMu   sync.Mutex
+	segmentRefs     map[string]int
+	reclaimableSegs map[string]struct{}
 	flushMu         sync.Mutex
 	flushRunMu      sync.Mutex
 	pendingShards   map[string]struct{}
@@ -119,6 +122,8 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		catalog:         cat,
 		lockManager:     newKeyLockManager(2048),
 		initErr:         initErr,
+		segmentRefs:     make(map[string]int),
+		reclaimableSegs: make(map[string]struct{}),
 		pendingShards:   make(map[string]struct{}),
 		autoFlush:       true,
 		now:             time.Now,
@@ -149,7 +154,7 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		}
 		return nil, nil, err
 	} else if ok {
-		stream, err := openLocalEntry(entry)
+		stream, err := s.openLocalEntry(entry)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -472,20 +477,16 @@ func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
 
 type fileSectionReadCloser struct {
 	io.Reader
-	file *os.File
+	closeFn func() error
+	once    sync.Once
+	err     error
 }
 
 func (r *fileSectionReadCloser) Close() error {
-	return r.file.Close()
-}
-
-func openLocalEntry(entry localCatalogEntry) (io.ReadCloser, error) {
-	file, err := os.Open(entry.SegmentPath)
-	if err != nil {
-		return nil, err
-	}
-	section := io.NewSectionReader(file, entry.Offset, entry.Length)
-	return &fileSectionReadCloser{Reader: section, file: file}, nil
+	r.once.Do(func() {
+		r.err = r.closeFn()
+	})
+	return r.err
 }
 
 func objectTimestampFromPath(objectPath string) (time.Time, bool) {

@@ -212,10 +212,12 @@ func (s *Store) flushPackedRecords(
 		}
 		current.RemotePath = remotePath
 		current.RemoteOffset = offsets[record.key]
+		current.SegmentPath = ""
+		current.Offset = 0
 		updates[record.key] = current
 		mergedEntries[record.key] = checkpointEntry{
-			SegmentPath: current.RemotePath,
-			Offset:      current.RemoteOffset,
+			SegmentPath: remotePath,
+			Offset:      offsets[record.key],
 			Length:      current.Length,
 			Metadata:    current.Metadata,
 		}
@@ -248,9 +250,11 @@ func (s *Store) flushDirectRecord(
 
 	current.RemotePath = remotePath
 	current.RemoteOffset = 0
+	current.SegmentPath = ""
+	current.Offset = 0
 	updates[record.key] = current
 	mergedEntries[record.key] = checkpointEntry{
-		SegmentPath: current.RemotePath,
+		SegmentPath: remotePath,
 		Offset:      0,
 		Length:      current.Length,
 		Metadata:    current.Metadata,

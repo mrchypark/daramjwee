@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -156,6 +157,81 @@ func TestStore_DeleteRepublishesCheckpointWithoutDeletedKey(t *testing.T) {
 	after := loadCheckpoint(t, bucket, checkpointObjects[0])
 	require.NotContains(t, after.Entries, keyA)
 	require.Contains(t, after.Entries, keyB)
+}
+
+func TestStore_FlushReclaimsLocalSegmentAfterRemoteCommit(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "reclaim-after-flush", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "flush payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	require.Len(t, localSegmentPaths(t, dataDir), 1)
+	require.NoError(t, store.flushPending(ctx))
+	require.Empty(t, localSegmentPaths(t, dataDir))
+
+	entry, ok := store.catalog.Get("reclaim-after-flush")
+	require.True(t, ok)
+	assert.Empty(t, entry.SegmentPath)
+	assert.NotEmpty(t, entry.RemotePath)
+
+	stream, meta, err := store.GetStream(ctx, "reclaim-after-flush")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "flush payload", string(body))
+	assert.Equal(t, "v1", meta.ETag)
+}
+
+func TestStore_FlushDefersLocalSegmentReclaimUntilReaderCloses(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "reclaim-after-reader-close", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "flush payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	stream, meta, err := store.GetStream(ctx, "reclaim-after-reader-close")
+	require.NoError(t, err)
+	require.Equal(t, "v1", meta.ETag)
+
+	require.Len(t, localSegmentPaths(t, dataDir), 1)
+	require.NoError(t, store.flushPending(ctx))
+	require.Len(t, localSegmentPaths(t, dataDir), 1)
+
+	require.NoError(t, stream.Close())
+	require.Empty(t, localSegmentPaths(t, dataDir))
+
+	remoteStream, remoteMeta, err := store.GetStream(ctx, "reclaim-after-reader-close")
+	require.NoError(t, err)
+	defer remoteStream.Close()
+
+	body, err := io.ReadAll(remoteStream)
+	require.NoError(t, err)
+	assert.Equal(t, "flush payload", string(body))
+	assert.Equal(t, "v1", remoteMeta.ETag)
+}
+
+func localSegmentPaths(t *testing.T, dataDir string) []string {
+	t.Helper()
+
+	segments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
+	require.NoError(t, err)
+	slices.Sort(segments)
+	return segments
 }
 
 func listObjectNames(t *testing.T, bucket objstore.Bucket, prefix string) []string {
