@@ -43,14 +43,16 @@ func (s *Store) releaseLocalSegment(segmentPath string) {
 
 	var shouldReclaim bool
 	s.segmentRefsMu.Lock()
-	if refs := s.segmentRefs[segmentPath]; refs == 1 {
+	if refs := s.segmentRefs[segmentPath]; refs > 1 {
+		s.segmentRefs[segmentPath] = refs - 1
+	} else if refs == 1 {
 		delete(s.segmentRefs, segmentPath)
 		_, shouldReclaim = s.reclaimableSegs[segmentPath]
 		if shouldReclaim {
 			delete(s.reclaimableSegs, segmentPath)
 		}
-	} else if refs > 1 {
-		s.segmentRefs[segmentPath] = refs - 1
+	} else {
+		level.Error(s.logger).Log("msg", "invalid refcount on segment release", "path", segmentPath, "refs", refs)
 	}
 	s.segmentRefsMu.Unlock()
 

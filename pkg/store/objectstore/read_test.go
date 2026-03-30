@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -180,6 +181,61 @@ func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappe
 
 	_, _, err = store.GetStream(ctx, "local-disappears-stale-remote")
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+	writer, err := flushed.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "old remote body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+	writer, err = store.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{ETag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "older local body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	newSegmentPath := filepath.Join(store.dataDir, "manual-newer-local.seg")
+	require.NoError(t, os.WriteFile(newSegmentPath, []byte("newest local body"), 0o644))
+
+	origOpen := openLocalSegmentFile
+	first := true
+	openLocalSegmentFile = func(path string) (*os.File, error) {
+		if first {
+			first = false
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, store.updateLocalEntry("local-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+				require.True(t, exists)
+				current.SegmentPath = newSegmentPath
+				current.Offset = 0
+				current.Length = int64(len("newest local body"))
+				current.Metadata.ETag = "v3"
+				return current, true
+			}))
+		}
+		return origOpen(path)
+	}
+	t.Cleanup(func() {
+		openLocalSegmentFile = origOpen
+	})
+
+	stream, meta, err := store.GetStream(ctx, "local-recheck-newer-local")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "newest local body", string(body))
+	assert.Equal(t, "v3", meta.ETag)
 }
 
 func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T) {

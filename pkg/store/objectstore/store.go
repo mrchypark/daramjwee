@@ -171,11 +171,28 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		sawLocalENOENT = true
 	}
 	if sawLocalENOENT {
-		if _, _, err := s.loadLiveLocalEntry(key); err != nil {
+		entry, ok, err := s.loadLiveLocalEntry(key)
+		if err != nil {
 			if errors.Is(err, errMissingLocalEntry) {
 				return nil, nil, daramjwee.ErrNotFound
 			}
 			return nil, nil, err
+		}
+		if ok {
+			stream, err := s.openLocalEntry(entry)
+			if err == nil {
+				return stream, cloneMetadata(&entry.Metadata), nil
+			}
+			if !os.IsNotExist(err) {
+				return nil, nil, err
+			}
+
+			if _, _, err := s.loadLiveLocalEntry(key); err != nil {
+				if errors.Is(err, errMissingLocalEntry) {
+					return nil, nil, daramjwee.ErrNotFound
+				}
+				return nil, nil, err
+			}
 		}
 	}
 
