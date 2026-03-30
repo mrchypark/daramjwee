@@ -76,7 +76,7 @@ func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) error {
 		return err
 	}
 	if ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
-		_ = removeLocalSegment(prev.SegmentPath)
+		s.markLocalSegmentReclaimable(prev.SegmentPath)
 	}
 	return nil
 }
@@ -104,13 +104,18 @@ func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCata
 		if !ok {
 			continue
 		}
+		applied := false
 		if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 			if !exists || current != expected {
 				return current, exists
 			}
+			applied = true
 			return next, true
 		}); err != nil {
 			return err
+		}
+		if applied && expected.SegmentPath != "" && expected.SegmentPath != next.SegmentPath {
+			s.markLocalSegmentReclaimable(expected.SegmentPath)
 		}
 	}
 	return nil
@@ -125,7 +130,7 @@ func (s *Store) deleteLocalEntry(key string) error {
 		return err
 	}
 	if ok && prev.SegmentPath != "" {
-		_ = removeLocalSegment(prev.SegmentPath)
+		s.markLocalSegmentReclaimable(prev.SegmentPath)
 	}
 	return nil
 }

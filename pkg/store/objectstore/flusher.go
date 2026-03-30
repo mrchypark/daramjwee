@@ -212,10 +212,12 @@ func (s *Store) flushPackedRecords(
 		}
 		current.RemotePath = remotePath
 		current.RemoteOffset = offsets[record.key]
+		current.SegmentPath = ""
+		current.Offset = 0
 		updates[record.key] = current
 		mergedEntries[record.key] = checkpointEntry{
-			SegmentPath: current.RemotePath,
-			Offset:      current.RemoteOffset,
+			SegmentPath: remotePath,
+			Offset:      offsets[record.key],
 			Length:      current.Length,
 			Metadata:    current.Metadata,
 		}
@@ -248,9 +250,11 @@ func (s *Store) flushDirectRecord(
 
 	current.RemotePath = remotePath
 	current.RemoteOffset = 0
+	current.SegmentPath = ""
+	current.Offset = 0
 	updates[record.key] = current
 	mergedEntries[record.key] = checkpointEntry{
-		SegmentPath: current.RemotePath,
+		SegmentPath: remotePath,
 		Offset:      0,
 		Length:      current.Length,
 		Metadata:    current.Metadata,
@@ -259,7 +263,7 @@ func (s *Store) flushDirectRecord(
 }
 
 func (s *Store) loadCheckpointEntries(ctx context.Context, shardID string) (map[string]checkpointEntry, error) {
-	cp, err := s.loadCheckpointSnapshot(ctx, shardID)
+	cp, err := s.loadCheckpointSnapshotFresh(ctx, shardID)
 	if err != nil {
 		if errors.Is(err, daramjwee.ErrNotFound) {
 			return make(map[string]checkpointEntry), nil
@@ -312,5 +316,9 @@ func (s *Store) publishCheckpoint(ctx context.Context, shardID string, entries m
 	if err != nil {
 		return err
 	}
-	return s.bucket.Upload(ctx, internalshard.CheckpointObjectPath(s.prefix, shardID), bytes.NewReader(data))
+	if err := s.bucket.Upload(ctx, internalshard.CheckpointObjectPath(s.prefix, shardID), bytes.NewReader(data)); err != nil {
+		return err
+	}
+	s.checkpointCache.Set(shardID, &payload, int64(len(data)))
+	return nil
 }

@@ -336,6 +336,98 @@ func TestStore_DeleteRemovesPublishedLocalSegment(t *testing.T) {
 	require.Empty(t, segments)
 }
 
+func TestStore_OverwriteDefersPreviousSegmentRemovalUntilReaderCloses(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDataDir(dataDir),
+	)
+	store.autoFlush = false
+
+	write := func(key, etag, body string) {
+		t.Helper()
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, body)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+	}
+
+	write("overwrite-reader", "v1", "old")
+
+	oldStream, oldMeta, err := store.GetStream(ctx, "overwrite-reader")
+	require.NoError(t, err)
+	require.Equal(t, "v1", oldMeta.ETag)
+
+	segmentsBefore, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
+	require.NoError(t, err)
+	require.Len(t, segmentsBefore, 1)
+	oldSegment := segmentsBefore[0]
+
+	write("overwrite-reader", "v2", "new")
+
+	_, err = os.Stat(oldSegment)
+	require.NoError(t, err)
+
+	newStream, newMeta, err := store.GetStream(ctx, "overwrite-reader")
+	require.NoError(t, err)
+	defer newStream.Close()
+	require.Equal(t, "v2", newMeta.ETag)
+
+	newBody, err := io.ReadAll(newStream)
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(newBody))
+
+	oldBody, err := io.ReadAll(oldStream)
+	require.NoError(t, err)
+	assert.Equal(t, "old", string(oldBody))
+	require.NoError(t, oldStream.Close())
+
+	_, err = os.Stat(oldSegment)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestStore_DeleteDefersSegmentRemovalUntilReaderCloses(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDataDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "delete-reader", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	stream, meta, err := store.GetStream(ctx, "delete-reader")
+	require.NoError(t, err)
+	require.Equal(t, "v1", meta.ETag)
+
+	segments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
+	require.NoError(t, err)
+	require.Len(t, segments, 1)
+	segmentPath := segments[0]
+
+	require.NoError(t, store.Delete(ctx, "delete-reader"))
+
+	_, err = os.Stat(segmentPath)
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "payload", string(body))
+	require.NoError(t, stream.Close())
+
+	_, err = os.Stat(segmentPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

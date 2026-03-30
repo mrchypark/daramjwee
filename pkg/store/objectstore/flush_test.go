@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/goccy/go-json"
@@ -17,6 +19,50 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
 )
+
+func TestStore_FlushUsesFreshCheckpointBaseWhenMemoryCacheIsEnabled(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	ttl := time.Hour
+	storeA := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithMemoryCheckpointCache(1<<20),
+		WithCheckpointCacheTTL(ttl),
+	)
+	storeB := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithMemoryCheckpointCache(1<<20),
+		WithCheckpointCacheTTL(ttl),
+	)
+	storeA.autoFlush = false
+	storeB.autoFlush = false
+
+	keyA, keyB, keyC := sameShardKeys3("flush-fresh-base")
+	writeAndFlush := func(t *testing.T, store *Store, key, etag, body string) {
+		t.Helper()
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, body)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, store.flushPending(ctx))
+	}
+
+	writeAndFlush(t, storeA, keyA, "v1", "alpha")
+	writeAndFlush(t, storeB, keyB, "v2", "beta")
+	writeAndFlush(t, storeA, keyC, "v3", "gamma")
+
+	checkpointObjects := listObjectNames(t, bucket, joinPath(storeA.prefix, "checkpoints"))
+	require.Len(t, checkpointObjects, 1)
+	checkpoint := loadCheckpoint(t, bucket, checkpointObjects[0])
+	require.Contains(t, checkpoint.Entries, keyA)
+	require.Contains(t, checkpoint.Entries, keyB)
+	require.Contains(t, checkpoint.Entries, keyC)
+}
 
 func TestStore_FlushUploadsSealedLocalSegmentAsRemoteSegmentObject(t *testing.T) {
 	ctx := context.Background()
@@ -158,6 +204,81 @@ func TestStore_DeleteRepublishesCheckpointWithoutDeletedKey(t *testing.T) {
 	require.Contains(t, after.Entries, keyB)
 }
 
+func TestStore_FlushReclaimsLocalSegmentAfterRemoteCommit(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "reclaim-after-flush", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "flush payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	require.Len(t, localSegmentPaths(t, dataDir), 1)
+	require.NoError(t, store.flushPending(ctx))
+	require.Empty(t, localSegmentPaths(t, dataDir))
+
+	entry, ok := store.catalog.Get("reclaim-after-flush")
+	require.True(t, ok)
+	assert.Empty(t, entry.SegmentPath)
+	assert.NotEmpty(t, entry.RemotePath)
+
+	stream, meta, err := store.GetStream(ctx, "reclaim-after-flush")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "flush payload", string(body))
+	assert.Equal(t, "v1", meta.ETag)
+}
+
+func TestStore_FlushDefersLocalSegmentReclaimUntilReaderCloses(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "reclaim-after-reader-close", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "flush payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	stream, meta, err := store.GetStream(ctx, "reclaim-after-reader-close")
+	require.NoError(t, err)
+	require.Equal(t, "v1", meta.ETag)
+
+	require.Len(t, localSegmentPaths(t, dataDir), 1)
+	require.NoError(t, store.flushPending(ctx))
+	require.Len(t, localSegmentPaths(t, dataDir), 1)
+
+	require.NoError(t, stream.Close())
+	require.Empty(t, localSegmentPaths(t, dataDir))
+
+	remoteStream, remoteMeta, err := store.GetStream(ctx, "reclaim-after-reader-close")
+	require.NoError(t, err)
+	defer remoteStream.Close()
+
+	body, err := io.ReadAll(remoteStream)
+	require.NoError(t, err)
+	assert.Equal(t, "flush payload", string(body))
+	assert.Equal(t, "v1", remoteMeta.ETag)
+}
+
+func localSegmentPaths(t *testing.T, dataDir string) []string {
+	t.Helper()
+
+	segments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
+	require.NoError(t, err)
+	slices.Sort(segments)
+	return segments
+}
+
 func listObjectNames(t *testing.T, bucket objstore.Bucket, prefix string) []string {
 	t.Helper()
 
@@ -190,6 +311,21 @@ func sameShardKeys(base string) (string, string) {
 		}
 	}
 	panic("failed to find same-shard key")
+}
+
+func sameShardKeys3(base string) (string, string, string) {
+	shard := shardForKey(base)
+	keys := []string{base}
+	for i := 1; len(keys) < 3 && i < 4096; i++ {
+		candidate := base + "-" + strconv.Itoa(i)
+		if shardForKey(candidate) == shard {
+			keys = append(keys, candidate)
+		}
+	}
+	if len(keys) != 3 {
+		panic("failed to find same-shard keys")
+	}
+	return keys[0], keys[1], keys[2]
 }
 
 func loadCheckpoint(t *testing.T, bucket objstore.Bucket, objectName string) checkpoint {

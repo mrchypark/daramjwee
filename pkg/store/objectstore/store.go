@@ -60,12 +60,16 @@ type Store struct {
 	pageSize        int64
 	blockCache      *blockcache.Cache
 	pageCache       *pagecache.Cache
+	checkpointCache *checkpointCache
 	catalog         *internalcatalog.Catalog
 	lockManager     *keyLockManager
 	blockLoads      singleflight.Group
 	pageLoads       singleflight.Group
 	versionSeq      atomic.Uint64
 	initErr         error
+	segmentRefsMu   sync.Mutex
+	segmentRefs     map[string]int
+	reclaimableSegs map[string]struct{}
 	flushMu         sync.Mutex
 	flushRunMu      sync.Mutex
 	pendingShards   map[string]struct{}
@@ -119,10 +123,15 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		catalog:         cat,
 		lockManager:     newKeyLockManager(2048),
 		initErr:         initErr,
+		segmentRefs:     make(map[string]int),
+		reclaimableSegs: make(map[string]struct{}),
 		pendingShards:   make(map[string]struct{}),
 		autoFlush:       true,
 		now:             time.Now,
 	}
+	store.checkpointCache = newCheckpointCache(cfg.memoryCheckpointBytes, cfg.checkpointCacheTTL, func() time.Time {
+		return store.now()
+	})
 	if store.initErr == nil {
 		if err := store.recoverLocalState(); err != nil {
 			store.initErr = fmt.Errorf("failed to recover local objectstore state: %w", err)
@@ -143,17 +152,10 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		return nil, nil, err
 	}
 
-	if entry, ok, err := s.loadLiveLocalEntry(key); err != nil {
-		if errors.Is(err, errMissingLocalEntry) {
-			return nil, nil, daramjwee.ErrNotFound
-		}
+	if stream, metadata, ok, err := s.openCurrentLocalEntry(key); err != nil {
 		return nil, nil, err
 	} else if ok {
-		stream, err := openLocalEntry(entry)
-		if err != nil {
-			return nil, nil, err
-		}
-		return stream, cloneMetadata(&entry.Metadata), nil
+		return stream, metadata, nil
 	}
 
 	entry, err := s.loadRemoteEntry(ctx, key)
@@ -191,6 +193,56 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		return nil, nil, err
 	}
 	return reader, cloneMetadata(&entry.Metadata), nil
+}
+
+func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Metadata, bool, error) {
+	const maxLocalOpenAttempts = 3
+
+	for attempts := 0; attempts < maxLocalOpenAttempts; attempts++ {
+		entry, ok, err := s.loadLiveLocalEntry(key)
+		if err != nil {
+			if errors.Is(err, errMissingLocalEntry) {
+				return nil, nil, false, daramjwee.ErrNotFound
+			}
+			return nil, nil, false, err
+		}
+		if !ok {
+			return nil, nil, false, nil
+		}
+
+		stream, err := s.openLocalEntry(entry)
+		if err == nil {
+			return stream, cloneMetadata(&entry.Metadata), true, nil
+		}
+		if !os.IsNotExist(err) {
+			return nil, nil, false, err
+		}
+		if attempts < maxLocalOpenAttempts-1 {
+			continue
+		}
+
+		recheckEntry, recheckOK, repairErr := s.loadLiveLocalEntry(key)
+		if repairErr != nil {
+			if errors.Is(repairErr, errMissingLocalEntry) {
+				return nil, nil, false, daramjwee.ErrNotFound
+			}
+			return nil, nil, false, repairErr
+		}
+		if !recheckOK {
+			return nil, nil, false, nil
+		}
+
+		recheckStream, recheckErr := s.openLocalEntry(recheckEntry)
+		if recheckErr == nil {
+			return recheckStream, cloneMetadata(&recheckEntry.Metadata), true, nil
+		}
+		if os.IsNotExist(recheckErr) {
+			return nil, nil, false, nil
+		}
+		return nil, nil, false, recheckErr
+	}
+
+	return nil, nil, false, nil
 }
 
 // BeginSet starts a staged write for a new immutable generation.
@@ -472,20 +524,16 @@ func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
 
 type fileSectionReadCloser struct {
 	io.Reader
-	file *os.File
+	closeFn func() error
+	once    sync.Once
+	err     error
 }
 
 func (r *fileSectionReadCloser) Close() error {
-	return r.file.Close()
-}
-
-func openLocalEntry(entry localCatalogEntry) (io.ReadCloser, error) {
-	file, err := os.Open(entry.SegmentPath)
-	if err != nil {
-		return nil, err
-	}
-	section := io.NewSectionReader(file, entry.Offset, entry.Length)
-	return &fileSectionReadCloser{Reader: section, file: file}, nil
+	r.once.Do(func() {
+		r.err = r.closeFn()
+	})
+	return r.err
 }
 
 func objectTimestampFromPath(objectPath string) (time.Time, bool) {

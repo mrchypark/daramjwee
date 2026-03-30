@@ -13,6 +13,8 @@ type config struct {
 	pageSize              int64
 	memoryPageCacheBytes  int64
 	memoryBlockCacheBytes int64
+	memoryCheckpointBytes int64
+	checkpointCacheTTL    time.Duration
 }
 
 // WithDataDir configures the local objectstore working directory used for
@@ -75,5 +77,22 @@ func WithMemoryPageCache(capacityBytes int64) Option {
 func WithMemoryBlockCache(capacityBytes int64) Option {
 	return func(cfg *config) {
 		cfg.memoryBlockCacheBytes = capacityBytes
+	}
+}
+
+// WithMemoryCheckpointCache enables in-memory shard checkpoint caching with the
+// provided byte capacity. A non-positive capacity disables the cache.
+func WithMemoryCheckpointCache(capacityBytes int64) Option {
+	return func(cfg *config) {
+		cfg.memoryCheckpointBytes = capacityBytes
+	}
+}
+
+// WithCheckpointCacheTTL sets how long decoded shard checkpoints stay valid in
+// the in-memory checkpoint cache before being reloaded from remote storage.
+// A non-positive TTL falls back to the backend default.
+func WithCheckpointCacheTTL(ttl time.Duration) Option {
+	return func(cfg *config) {
+		cfg.checkpointCacheTTL = ttl
 	}
 }
