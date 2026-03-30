@@ -10,11 +10,12 @@ import (
 var openLocalSegmentFile = os.Open
 
 func (s *Store) openLocalEntry(entry localCatalogEntry) (io.ReadCloser, error) {
+	s.acquireLocalSegment(entry.SegmentPath)
 	file, err := openLocalSegmentFile(entry.SegmentPath)
 	if err != nil {
+		s.releaseLocalSegment(entry.SegmentPath)
 		return nil, err
 	}
-	s.acquireLocalSegment(entry.SegmentPath)
 	section := io.NewSectionReader(file, entry.Offset, entry.Length)
 	return &fileSectionReadCloser{
 		Reader: section,

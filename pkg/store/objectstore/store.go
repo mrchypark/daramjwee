@@ -148,12 +148,19 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		return nil, nil, err
 	}
 
-	if entry, ok, err := s.loadLiveLocalEntry(key); err != nil {
-		if errors.Is(err, errMissingLocalEntry) {
-			return nil, nil, daramjwee.ErrNotFound
+	sawLocalENOENT := false
+	for attempts := 0; attempts < 2; attempts++ {
+		entry, ok, err := s.loadLiveLocalEntry(key)
+		if err != nil {
+			if errors.Is(err, errMissingLocalEntry) {
+				return nil, nil, daramjwee.ErrNotFound
+			}
+			return nil, nil, err
 		}
-		return nil, nil, err
-	} else if ok {
+		if !ok {
+			break
+		}
+
 		stream, err := s.openLocalEntry(entry)
 		if err == nil {
 			return stream, cloneMetadata(&entry.Metadata), nil
@@ -161,19 +168,14 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		if !os.IsNotExist(err) {
 			return nil, nil, err
 		}
-
-		if retryEntry, retryOK, retryErr := s.loadLiveLocalEntry(key); retryErr != nil {
-			if !errors.Is(retryErr, errMissingLocalEntry) {
-				return nil, nil, retryErr
+		sawLocalENOENT = true
+	}
+	if sawLocalENOENT {
+		if _, _, err := s.loadLiveLocalEntry(key); err != nil {
+			if errors.Is(err, errMissingLocalEntry) {
+				return nil, nil, daramjwee.ErrNotFound
 			}
-		} else if retryOK {
-			retryStream, retryOpenErr := s.openLocalEntry(retryEntry)
-			if retryOpenErr == nil {
-				return retryStream, cloneMetadata(&retryEntry.Metadata), nil
-			}
-			if !os.IsNotExist(retryOpenErr) {
-				return nil, nil, retryOpenErr
-			}
+			return nil, nil, err
 		}
 	}
 

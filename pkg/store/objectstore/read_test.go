@@ -148,6 +148,40 @@ func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *
 	assert.Equal(t, "v1", meta.ETag)
 }
 
+func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappears(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+	writer, err := flushed.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "old remote body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+	writer, err = store.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{ETag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "new local body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	origOpen := openLocalSegmentFile
+	openLocalSegmentFile = func(path string) (*os.File, error) {
+		require.NoError(t, os.Remove(path))
+		return origOpen(path)
+	}
+	t.Cleanup(func() {
+		openLocalSegmentFile = origOpen
+	})
+
+	_, _, err = store.GetStream(ctx, "local-disappears-stale-remote")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
 func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
