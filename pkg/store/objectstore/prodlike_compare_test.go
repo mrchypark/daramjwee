@@ -159,7 +159,6 @@ func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, bu
 	t.Helper()
 
 	for _, item := range items {
-		bucket.addLogicalRead()
 		reader, meta, err := store.GetStream(ctx, item.Key)
 		if err != nil {
 			t.Fatal(err)
@@ -167,6 +166,10 @@ func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, bu
 		if meta == nil || meta.ETag != item.ETag {
 			t.Fatalf("unexpected metadata for %q: %#v", item.Key, meta)
 		}
+
+		// Count one logical read per object key, for parity with filestore metrics.
+		bucket.recordLogicalRead()
+
 		if _, err := io.Copy(io.Discard, reader); err != nil {
 			if closeErr := reader.Close(); closeErr != nil {
 				t.Fatalf("copy failed for %q: %v; close failed: %v", item.Key, err, closeErr)
@@ -311,7 +314,7 @@ func (b *recordingBucket) reset() {
 	b.bytesReceived.Store(0)
 }
 
-func (b *recordingBucket) addLogicalRead() {
+func (b *recordingBucket) recordLogicalRead() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.stats.ReadCalls++
