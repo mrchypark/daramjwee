@@ -238,5 +238,37 @@ objectstore.New(
 ## Operational Notes
 
 - Concurrent same-key writes across multiple distributed writers are still last-writer-wins unless coordinated externally.
+
+## Prod-like Compare Harness
+
+`objectstore` has an env-gated Azurite compare harness that measures the production preset against a prod-like workload.
+
+Run only the current `objectstore + Azurite` harness:
+
+```bash
+DJ_RUN_PRODLIKE_COMPARE=1 \
+DJ_AZURITE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=https://127.0.0.1:10000/devstoreaccount1;" \
+go test ./pkg/store/objectstore -run TestObjstoreProdLikeCompareHarness -count=1 -v
+```
+
+This emits a single JSON line prefixed with `DJ_PRODLIKE_COMPARE=`.
+
+Reported metrics:
+
+- `write.duration_ms`: write plus explicit flush time
+- `cold_read.duration_ms`: remote read after reopening with a fresh data dir
+- `warm_read.duration_ms`: repeated read on the same reopened instance
+- `upload_calls`: remote object uploads
+- `get_calls`: remote full-object reads, including checkpoint fetches
+- `get_range_calls`: remote range reads for packed segments or direct blobs
+- `iter_calls`: list operations
+- `bytes_sent`: bytes uploaded to the bucket
+- `bytes_received`: bytes read back from the bucket
+
+To compare `current` against `v0.3.10` for both `filestore` and `objectstore + Azurite`, run:
+
+```bash
+scripts/run_prodlike_store_compare.sh
+```
 - Losing the local `dataDir` does not lose already-flushed remote cache entries.
 - Losing the local `dataDir` does remove the local spool/catalog state, so the next requests may read from remote until higher tiers are rewarmed.
