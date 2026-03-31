@@ -118,8 +118,10 @@ func readAllFilestoreItems(t *testing.T, ctx context.Context, store *FileStore, 
 			t.Fatalf("unexpected metadata for %q: %#v", item.Key, meta)
 		}
 		if _, err := io.Copy(io.Discard, reader); err != nil {
-			_ = reader.Close()
-			t.Fatal(err)
+			if closeErr := reader.Close(); closeErr != nil {
+				t.Fatalf("copy failed for %q: %v; close failed: %v", item.Key, err, closeErr)
+			}
+			t.Fatalf("copy failed for %q: %v", item.Key, err)
 		}
 		if err := reader.Close(); err != nil {
 			t.Fatal(err)

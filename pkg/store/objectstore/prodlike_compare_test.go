@@ -1,7 +1,6 @@
 package objectstore
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/tls"
@@ -12,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -121,13 +121,13 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 	coldStore.autoFlush = false
 
 	coldStart := time.Now()
-	readAllObjectstoreItems(t, ctx, coldStore, items)
+	readAllObjectstoreItems(t, ctx, coldStore, bucket, items)
 	coldStats := bucket.snapshot()
 	coldStats.DurationMs = time.Since(coldStart).Milliseconds()
 	bucket.reset()
 
 	warmStart := time.Now()
-	readAllObjectstoreItems(t, ctx, coldStore, items)
+	readAllObjectstoreItems(t, ctx, coldStore, bucket, items)
 	warmStats := bucket.snapshot()
 	warmStats.DurationMs = time.Since(warmStart).Milliseconds()
 
@@ -155,10 +155,11 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 	fmt.Printf("DJ_PRODLIKE_COMPARE=%s\n", payload)
 }
 
-func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, items []workloadItem) {
+func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, bucket *recordingBucket, items []workloadItem) {
 	t.Helper()
 
 	for _, item := range items {
+		bucket.addLogicalRead()
 		reader, meta, err := store.GetStream(ctx, item.Key)
 		if err != nil {
 			t.Fatal(err)
@@ -167,8 +168,10 @@ func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, it
 			t.Fatalf("unexpected metadata for %q: %#v", item.Key, meta)
 		}
 		if _, err := io.Copy(io.Discard, reader); err != nil {
-			_ = reader.Close()
-			t.Fatal(err)
+			if closeErr := reader.Close(); closeErr != nil {
+				t.Fatalf("copy failed for %q: %v; close failed: %v", item.Key, err, closeErr)
+			}
+			t.Fatalf("copy failed for %q: %v", item.Key, err)
 		}
 		if err := reader.Close(); err != nil {
 			t.Fatal(err)
@@ -221,22 +224,20 @@ func defaultAzuriteConnectionString() string {
 type recordingBucket struct {
 	objstore.Bucket
 
-	mu    sync.Mutex
-	stats providerStats
+	mu            sync.Mutex
+	stats         providerStats
+	bytesSent     atomic.Int64
+	bytesReceived atomic.Int64
 }
 
 func (b *recordingBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return err
-	}
-
 	b.mu.Lock()
 	b.stats.UploadCalls++
-	b.stats.BytesSent += int64(len(data))
 	b.mu.Unlock()
 
-	return b.Bucket.Upload(ctx, name, bytes.NewReader(data), opts...)
+	return b.Bucket.Upload(ctx, name, &countingReader{Reader: r, onRead: func(n int) {
+		b.bytesSent.Add(int64(n))
+	}}, opts...)
 }
 
 func (b *recordingBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
@@ -296,13 +297,24 @@ func (b *recordingBucket) Delete(ctx context.Context, name string) error {
 func (b *recordingBucket) snapshot() providerStats {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.stats
+	stats := b.stats
+	stats.BytesSent = b.bytesSent.Load()
+	stats.BytesReceived = b.bytesReceived.Load()
+	return stats
 }
 
 func (b *recordingBucket) reset() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.stats = providerStats{}
+	b.bytesSent.Store(0)
+	b.bytesReceived.Store(0)
+}
+
+func (b *recordingBucket) addLogicalRead() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.stats.ReadCalls++
 }
 
 type countingReadCloser struct {
@@ -312,10 +324,20 @@ type countingReadCloser struct {
 
 func (r *countingReadCloser) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
-	r.parent.mu.Lock()
-	r.parent.stats.ReadCalls++
-	r.parent.stats.BytesReceived += int64(n)
-	r.parent.mu.Unlock()
+	r.parent.bytesReceived.Add(int64(n))
+	return n, err
+}
+
+type countingReader struct {
+	io.Reader
+	onRead func(int)
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if n > 0 && r.onRead != nil {
+		r.onRead(n)
+	}
 	return n, err
 }
 
