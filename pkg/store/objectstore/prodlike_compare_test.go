@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/storetest"
@@ -69,7 +72,14 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 	)
 
 	bucket := newAzuriteRecordingBucket(t)
-	t.Cleanup(func() { _ = bucket.Close() })
+	t.Cleanup(func() {
+		if err := bucket.Close(); err != nil {
+			t.Logf("failed to close azurite bucket: %v", err)
+		}
+		if err := bucket.deleteContainer(context.Background()); err != nil {
+			t.Logf("failed to delete azurite container %q: %v", bucket.containerName, err)
+		}
+	})
 
 	writeDir := t.TempDir()
 	store := New(bucket, log.NewNopLogger(),
@@ -193,7 +203,11 @@ func newAzuriteRecordingBucket(t *testing.T) *recordingBucket {
 	if err != nil {
 		t.Fatalf("failed to create azurite bucket: %v", err)
 	}
-	return &recordingBucket{Bucket: bucket}
+	return &recordingBucket{
+		Bucket:           bucket,
+		connectionString: connString,
+		containerName:    conf.ContainerName,
+	}
 }
 
 func wrapAzuriteTransport(rt http.RoundTripper) http.RoundTripper {
@@ -223,6 +237,8 @@ type recordingBucket struct {
 	stats         providerStats
 	bytesSent     atomic.Int64
 	bytesReceived atomic.Int64
+	connectionString string
+	containerName    string
 }
 
 func (b *recordingBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
@@ -310,6 +326,22 @@ func (b *recordingBucket) recordLogicalRead() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.stats.ReadCalls++
+}
+
+func (b *recordingBucket) deleteContainer(ctx context.Context) error {
+	client, err := azblob.NewClientFromConnectionString(b.connectionString, &azblob.ClientOptions{
+		ClientOptions: azcore.ClientOptions{
+			Transport: &http.Client{Transport: wrapAzuriteTransport(http.DefaultTransport)},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = client.DeleteContainer(ctx, b.containerName, nil)
+	if err != nil && !bloberror.HasCode(err, bloberror.ContainerNotFound, bloberror.ResourceNotFound) {
+		return err
+	}
+	return nil
 }
 
 type countingReadCloser struct {

@@ -72,6 +72,10 @@ fi
 if [[ -n "$(listener_pid)" ]]; then
   ensure_existing_azurite
 else
+  if ! command -v npx >/dev/null 2>&1; then
+    echo "npx is required to run Azurite; install Node.js or point DJ_AZURITE_PORT at an existing TLS Azurite listener" >&2
+    exit 1
+  fi
   npx azurite \
     --blobHost "${AZURITE_HOST}" \
     --blobPort "${AZURITE_PORT}" \
@@ -320,6 +324,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
 	"github.com/thanos-io/objstore"
@@ -366,7 +373,14 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 	ctx := context.Background()
 	items, counts, totalBytes := buildProdLikeWorkload()
 	bucket := newAzuriteRecordingBucket(t)
-	defer bucket.Close()
+	t.Cleanup(func() {
+		if err := bucket.Close(); err != nil {
+			t.Logf("failed to close azurite bucket: %v", err)
+		}
+		if err := bucket.deleteContainer(context.Background()); err != nil {
+			t.Logf("failed to delete azurite container %q: %v", bucket.containerName, err)
+		}
+	})
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger())
 
@@ -387,14 +401,16 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 	writeStats.DurationMs = time.Since(writeStart).Milliseconds()
 	bucket.reset()
 
+	coldStore := NewObjstoreAdapter(bucket, log.NewNopLogger())
+
 	coldStart := time.Now()
-	readAllAdapterItems(t, ctx, store, bucket, items)
+	readAllAdapterItems(t, ctx, coldStore, bucket, items)
 	coldStats := bucket.snapshot()
 	coldStats.DurationMs = time.Since(coldStart).Milliseconds()
 	bucket.reset()
 
 	warmStart := time.Now()
-	readAllAdapterItems(t, ctx, store, bucket, items)
+	readAllAdapterItems(t, ctx, coldStore, bucket, items)
 	warmStats := bucket.snapshot()
 	warmStats.DurationMs = time.Since(warmStart).Milliseconds()
 
@@ -461,7 +477,11 @@ func newAzuriteRecordingBucket(t *testing.T) *recordingBucket {
 	if err != nil {
 		t.Fatalf("failed to create azurite bucket: %v", err)
 	}
-	return &recordingBucket{Bucket: bucket}
+	return &recordingBucket{
+		Bucket:           bucket,
+		connectionString: connString,
+		containerName:    conf.ContainerName,
+	}
 }
 
 func wrapAzuriteTransport(rt http.RoundTripper) http.RoundTripper {
@@ -485,6 +505,8 @@ type recordingBucket struct {
 	stats         providerStats
 	bytesSent     atomic.Int64
 	bytesReceived atomic.Int64
+	connectionString string
+	containerName    string
 }
 
 func (b *recordingBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
@@ -567,6 +589,22 @@ func (b *recordingBucket) addLogicalRead() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.stats.ReadCalls++
+}
+
+func (b *recordingBucket) deleteContainer(ctx context.Context) error {
+	client, err := azblob.NewClientFromConnectionString(b.connectionString, &azblob.ClientOptions{
+		ClientOptions: azcore.ClientOptions{
+			Transport: &http.Client{Transport: wrapAzuriteTransport(http.DefaultTransport)},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = client.DeleteContainer(ctx, b.containerName, nil)
+	if err != nil && !bloberror.HasCode(err, bloberror.ContainerNotFound, bloberror.ResourceNotFound) {
+		return err
+	}
+	return nil
 }
 
 type countingReadCloser struct {
