@@ -7,10 +7,12 @@ LOG_DIR="$(mktemp -d -t daramjwee-prodlike-logs-XXXXXX)"
 AZURITE_DIR="$(mktemp -d -t daramjwee-azurite-XXXXXX)"
 AZURITE_CERT_DIR="$(mktemp -d -t daramjwee-azurite-certs-XXXXXX)"
 AZURITE_PID=""
+AZURITE_HOST="${DJ_AZURITE_HOST:-127.0.0.1}"
+AZURITE_PORT="${DJ_AZURITE_PORT:-10000}"
 BASELINE_REF="${DJ_COMPARE_BASELINE_REF:-v0.3.10}"
 
 export DJ_RUN_PRODLIKE_COMPARE=1
-export DJ_AZURITE_CONNECTION_STRING="${DJ_AZURITE_CONNECTION_STRING:-DefaultEndpointsProtocol=https;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=https://127.0.0.1:10000/devstoreaccount1;}"
+export DJ_AZURITE_CONNECTION_STRING="${DJ_AZURITE_CONNECTION_STRING:-DefaultEndpointsProtocol=https;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=https://${AZURITE_HOST}:${AZURITE_PORT}/devstoreaccount1;}"
 KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-0}"
 
 cleanup() {
@@ -27,6 +29,38 @@ cleanup() {
 }
 trap cleanup EXIT
 
+listener_pid() {
+  lsof -nP -t -iTCP:"${AZURITE_PORT}" -sTCP:LISTEN 2>/dev/null | head -n 1
+}
+
+listener_looks_like_azurite() {
+  local pid
+  pid="$(listener_pid)"
+  if [[ -z "${pid}" ]]; then
+    return 1
+  fi
+
+  ps -p "${pid}" -o command= 2>/dev/null | grep -qi "azurite"
+}
+
+listener_supports_tls() {
+  openssl s_client \
+    -connect "${AZURITE_HOST}:${AZURITE_PORT}" \
+    -servername "${AZURITE_HOST}" \
+    -brief </dev/null >/dev/null 2>&1
+}
+
+ensure_existing_azurite() {
+  if ! listener_looks_like_azurite; then
+    echo "port ${AZURITE_PORT} is already in use by a non-Azurite listener; stop it or set DJ_AZURITE_PORT" >&2
+    exit 1
+  fi
+  if ! listener_supports_tls; then
+    echo "port ${AZURITE_PORT} is listening but does not accept TLS; stop it or set DJ_AZURITE_PORT" >&2
+    exit 1
+  fi
+}
+
 if [[ ! -f "${AZURITE_CERT_DIR}/cert.pem" || ! -f "${AZURITE_CERT_DIR}/key.pem" ]]; then
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "${AZURITE_CERT_DIR}/key.pem" \
@@ -35,10 +69,12 @@ if [[ ! -f "${AZURITE_CERT_DIR}/cert.pem" || ! -f "${AZURITE_CERT_DIR}/key.pem" 
     -subj "/CN=127.0.0.1" >/dev/null 2>&1
 fi
 
-if ! lsof -nP -iTCP:10000 -sTCP:LISTEN >/dev/null 2>&1; then
+if [[ -n "$(listener_pid)" ]]; then
+  ensure_existing_azurite
+else
   npx azurite \
-    --blobHost 127.0.0.1 \
-    --blobPort 10000 \
+    --blobHost "${AZURITE_HOST}" \
+    --blobPort "${AZURITE_PORT}" \
     --location "${AZURITE_DIR}" \
     --cert "${AZURITE_CERT_DIR}/cert.pem" \
     --key "${AZURITE_CERT_DIR}/key.pem" \
@@ -46,11 +82,19 @@ if ! lsof -nP -iTCP:10000 -sTCP:LISTEN >/dev/null 2>&1; then
     >"${LOG_DIR}/azurite.log" 2>&1 &
   AZURITE_PID=$!
   for _ in {1..30}; do
-    if lsof -nP -iTCP:10000 -sTCP:LISTEN >/dev/null 2>&1; then
+    if ! kill -0 "${AZURITE_PID}" >/dev/null 2>&1; then
+      echo "azurite exited before becoming ready; see ${LOG_DIR}/azurite.log" >&2
+      exit 1
+    fi
+    if [[ -n "$(listener_pid)" ]] && listener_supports_tls; then
       break
     fi
     sleep 1
   done
+  if [[ -z "$(listener_pid)" ]] || ! listener_supports_tls; then
+    echo "azurite did not become ready on ${AZURITE_HOST}:${AZURITE_PORT}; see ${LOG_DIR}/azurite.log" >&2
+    exit 1
+  fi
 fi
 
 BASELINE_COMMIT="$(git -C "${ROOT_DIR}" rev-parse --verify "${BASELINE_REF}^{commit}" 2>/dev/null || true)"
