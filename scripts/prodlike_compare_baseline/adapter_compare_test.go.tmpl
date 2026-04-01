@@ -1,4 +1,4 @@
-package objectstore
+package adapter
 
 import (
 	"context"
@@ -37,21 +37,15 @@ type providerStats struct {
 	BytesReceived int64 `json:"bytes_received"`
 }
 
-type objectstoreCompareResult struct {
-	Version              string         `json:"version"`
-	Provider             string         `json:"provider"`
-	KeyCount             int            `json:"key_count"`
-	TotalBytes           int64          `json:"total_bytes"`
-	UniqueShards         int            `json:"unique_shards"`
-	PackedThreshold      int64          `json:"packed_threshold"`
-	PageSize             int64          `json:"page_size"`
-	BlockCacheBytes      int64          `json:"block_cache_bytes"`
-	CheckpointCacheBytes int64          `json:"checkpoint_cache_bytes"`
-	CheckpointCacheTTLMS int64          `json:"checkpoint_cache_ttl_ms"`
-	WorkloadCounts       map[string]int `json:"workload_counts"`
-	Write                providerStats  `json:"write"`
-	ColdRead             providerStats  `json:"cold_read"`
-	WarmRead             providerStats  `json:"warm_read"`
+type compareResult struct {
+	Version        string         `json:"version"`
+	Provider       string         `json:"provider"`
+	KeyCount       int            `json:"key_count"`
+	TotalBytes     int64          `json:"total_bytes"`
+	WorkloadCounts map[string]int `json:"workload_counts"`
+	Write          providerStats  `json:"write"`
+	ColdRead       providerStats  `json:"cold_read"`
+	WarmRead       providerStats  `json:"warm_read"`
 }
 
 func TestObjstoreProdLikeCompareHarness(t *testing.T) {
@@ -61,16 +55,6 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 
 	ctx := context.Background()
 	items, counts, totalBytes := storetest.BuildProdLikeWorkload()
-	uniqueShards := countUniqueShards(items)
-
-	const (
-		packedThreshold      = int64(1 << 20)
-		pageSize             = int64(256 << 10)
-		blockCacheBytes      = int64(64 << 20)
-		checkpointCacheBytes = int64(16 << 20)
-		checkpointCacheTTL   = 2 * time.Second
-	)
-
 	bucket := newAzuriteRecordingBucket(t)
 	t.Cleanup(func() {
 		if err := bucket.Close(); err != nil {
@@ -81,20 +65,11 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 		}
 	})
 
-	writeDir := t.TempDir()
-	store := New(bucket, log.NewNopLogger(),
-		WithDataDir(writeDir),
-		WithPackedObjectThreshold(packedThreshold),
-		WithPageSize(pageSize),
-		WithMemoryBlockCache(blockCacheBytes),
-		WithMemoryCheckpointCache(checkpointCacheBytes),
-		WithCheckpointCacheTTL(checkpointCacheTTL),
-	)
-	store.autoFlush = false
+	store := NewObjstoreAdapter(bucket, log.NewNopLogger())
 
 	writeStart := time.Now()
 	for _, item := range items {
-		sink, err := store.BeginSet(ctx, item.Key, &daramjwee.Metadata{ETag: item.ETag})
+		sink, err := store.SetWithWriter(ctx, item.Key, &daramjwee.Metadata{ETag: item.ETag})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,49 +80,32 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.flushPending(ctx); err != nil {
-		t.Fatal(err)
-	}
 	writeStats := bucket.snapshot()
 	writeStats.DurationMs = time.Since(writeStart).Milliseconds()
 	bucket.reset()
 
-	coldStore := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(packedThreshold),
-		WithPageSize(pageSize),
-		WithMemoryBlockCache(blockCacheBytes),
-		WithMemoryCheckpointCache(checkpointCacheBytes),
-		WithCheckpointCacheTTL(checkpointCacheTTL),
-	)
-	coldStore.autoFlush = false
+	coldStore := NewObjstoreAdapter(bucket, log.NewNopLogger())
 
 	coldStart := time.Now()
-	readAllObjectstoreItems(t, ctx, coldStore, bucket, items)
+	readAllAdapterItems(t, ctx, coldStore, bucket, items)
 	coldStats := bucket.snapshot()
 	coldStats.DurationMs = time.Since(coldStart).Milliseconds()
 	bucket.reset()
 
 	warmStart := time.Now()
-	readAllObjectstoreItems(t, ctx, coldStore, bucket, items)
+	readAllAdapterItems(t, ctx, coldStore, bucket, items)
 	warmStats := bucket.snapshot()
 	warmStats.DurationMs = time.Since(warmStart).Milliseconds()
 
-	result := objectstoreCompareResult{
-		Version:              "current",
-		Provider:             "azure",
-		KeyCount:             len(items),
-		TotalBytes:           totalBytes,
-		UniqueShards:         uniqueShards,
-		PackedThreshold:      packedThreshold,
-		PageSize:             pageSize,
-		BlockCacheBytes:      blockCacheBytes,
-		CheckpointCacheBytes: checkpointCacheBytes,
-		CheckpointCacheTTLMS: checkpointCacheTTL.Milliseconds(),
-		WorkloadCounts:       counts,
-		Write:                writeStats,
-		ColdRead:             coldStats,
-		WarmRead:             warmStats,
+	result := compareResult{
+		Version:        "v0.3.10",
+		Provider:       "azure",
+		KeyCount:       len(items),
+		TotalBytes:     totalBytes,
+		WorkloadCounts: counts,
+		Write:          writeStats,
+		ColdRead:       coldStats,
+		WarmRead:       warmStats,
 	}
 
 	payload, err := json.Marshal(result)
@@ -157,7 +115,7 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 	fmt.Printf("DJ_PRODLIKE_COMPARE=%s\n", payload)
 }
 
-func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, bucket *recordingBucket, items []storetest.ProdLikeWorkloadItem) {
+func readAllAdapterItems(t *testing.T, ctx context.Context, store daramjwee.Store, bucket *recordingBucket, items []storetest.ProdLikeWorkloadItem) {
 	t.Helper()
 
 	for _, item := range items {
@@ -168,7 +126,6 @@ func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, bu
 		if meta == nil || meta.ETag != item.ETag {
 			t.Fatalf("unexpected metadata for %q: %#v", item.Key, meta)
 		}
-
 		if _, err := io.Copy(io.Discard, reader); err != nil {
 			if closeErr := reader.Close(); closeErr != nil {
 				t.Fatalf("copy failed for %q: %v; close failed: %v", item.Key, err, closeErr)
@@ -178,9 +135,7 @@ func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, bu
 		if err := reader.Close(); err != nil {
 			t.Fatal(err)
 		}
-
-		// Count one logical read per object key, for parity with filestore metrics.
-		bucket.recordLogicalRead()
+		bucket.addLogicalRead()
 	}
 }
 
@@ -189,7 +144,9 @@ func newAzuriteRecordingBucket(t *testing.T) *recordingBucket {
 
 	connString := os.Getenv("DJ_AZURITE_CONNECTION_STRING")
 	if connString == "" {
-		connString = defaultAzuriteConnectionString()
+		connString = "DefaultEndpointsProtocol=https;AccountName=devstoreaccount1;AccountKey=" +
+			"Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==" +
+			";BlobEndpoint=https://127.0.0.1:10000/devstoreaccount1;"
 	}
 
 	conf := azureprovider.Config{
@@ -224,19 +181,13 @@ func wrapAzuriteTransport(rt http.RoundTripper) http.RoundTripper {
 	return rt
 }
 
-func defaultAzuriteConnectionString() string {
-	return "DefaultEndpointsProtocol=https;AccountName=devstoreaccount1;AccountKey=" +
-		"Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==" +
-		";BlobEndpoint=https://127.0.0.1:10000/devstoreaccount1;"
-}
-
 type recordingBucket struct {
 	objstore.Bucket
 
-	mu            sync.Mutex
-	stats         providerStats
-	bytesSent     atomic.Int64
-	bytesReceived atomic.Int64
+	mu               sync.Mutex
+	stats            providerStats
+	bytesSent        atomic.Int64
+	bytesReceived    atomic.Int64
 	connectionString string
 	containerName    string
 }
@@ -245,7 +196,6 @@ func (b *recordingBucket) Upload(ctx context.Context, name string, r io.Reader, 
 	b.mu.Lock()
 	b.stats.UploadCalls++
 	b.mu.Unlock()
-
 	return b.Bucket.Upload(ctx, name, &countingReader{Reader: r, onRead: func(n int) {
 		b.bytesSent.Add(int64(n))
 	}}, opts...)
@@ -256,11 +206,9 @@ func (b *recordingBucket) Get(ctx context.Context, name string) (io.ReadCloser, 
 	if err != nil {
 		return nil, err
 	}
-
 	b.mu.Lock()
 	b.stats.GetCalls++
 	b.mu.Unlock()
-
 	return &countingReadCloser{ReadCloser: reader, parent: b}, nil
 }
 
@@ -269,11 +217,9 @@ func (b *recordingBucket) GetRange(ctx context.Context, name string, off, length
 	if err != nil {
 		return nil, err
 	}
-
 	b.mu.Lock()
 	b.stats.GetRangeCalls++
 	b.mu.Unlock()
-
 	return &countingReadCloser{ReadCloser: reader, parent: b}, nil
 }
 
@@ -322,7 +268,7 @@ func (b *recordingBucket) reset() {
 	b.bytesReceived.Store(0)
 }
 
-func (b *recordingBucket) recordLogicalRead() {
+func (b *recordingBucket) addLogicalRead() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.stats.ReadCalls++
@@ -366,12 +312,4 @@ func (r *countingReader) Read(p []byte) (int, error) {
 		r.onRead(n)
 	}
 	return n, err
-}
-
-func countUniqueShards(items []storetest.ProdLikeWorkloadItem) int {
-	seen := make(map[string]struct{}, len(items))
-	for _, item := range items {
-		seen[shardForKey(item.Key)] = struct{}{}
-	}
-	return len(seen)
 }
