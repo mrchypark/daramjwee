@@ -151,6 +151,9 @@ func TestCache_LowerTierStaleHitServesStaleWithoutPromotingAndSchedulesRefresh(t
 
 	require.NoError(t, stream.Close())
 
+	_, _, err = top.GetStream(context.Background(), "stale-lower-key")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
 	require.Eventually(t, func() bool {
 		reader, meta, err := top.GetStream(context.Background(), "stale-lower-key")
 		if err != nil {
