@@ -142,13 +142,14 @@ func TestCache_LowerTierStaleHitServesStaleWithoutPromotingAndSchedulesRefresh(t
 	stream, err := cache.Get(context.Background(), "stale-lower-key", fetcher)
 	require.NoError(t, err)
 
-	body, err := io.ReadAll(stream)
-	require.NoError(t, err)
-	require.NoError(t, stream.Close())
-	assert.Equal(t, "stale-value", string(body))
-
 	_, _, err = top.GetStream(context.Background(), "stale-lower-key")
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "stale-value", string(body))
+
+	require.NoError(t, stream.Close())
 
 	require.Eventually(t, func() bool {
 		reader, meta, err := top.GetStream(context.Background(), "stale-lower-key")
@@ -282,13 +283,14 @@ func TestCache_LowerTierHitWithZeroCachedAtSchedulesRefresh(t *testing.T) {
 	stream, err := cache.Get(context.Background(), "legacy-key", fetcher)
 	require.NoError(t, err)
 
-	body, err := io.ReadAll(stream)
-	require.NoError(t, err)
-	require.NoError(t, stream.Close())
-	assert.Equal(t, "legacy-value", string(body))
-
 	_, _, err = top.GetStream(context.Background(), "legacy-key")
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-value", string(body))
+
+	require.NoError(t, stream.Close())
 
 	require.Eventually(t, func() bool {
 		reader, meta, err := top.GetStream(context.Background(), "legacy-key")
