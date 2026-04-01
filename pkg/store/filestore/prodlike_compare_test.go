@@ -2,8 +2,6 @@ package filestore
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 )
 
 type compareStats struct {
@@ -35,20 +34,13 @@ type compareResult struct {
 	WarmRead       compareStats   `json:"warm_read"`
 }
 
-type workloadItem struct {
-	Key      string
-	Category string
-	Body     []byte
-	ETag     string
-}
-
 func TestFileStoreProdLikeCompareHarness(t *testing.T) {
 	if os.Getenv("DJ_RUN_PRODLIKE_COMPARE") != "1" {
 		t.Skip("set DJ_RUN_PRODLIKE_COMPARE=1 to run the prod-like compare harness")
 	}
 
 	ctx := context.Background()
-	items, counts, totalBytes := buildProdLikeWorkload()
+	items, counts, totalBytes := storetest.BuildProdLikeWorkload()
 
 	dir, err := os.MkdirTemp("", "daramjwee-filestore-compare-*")
 	if err != nil {
@@ -104,7 +96,7 @@ func TestFileStoreProdLikeCompareHarness(t *testing.T) {
 	fmt.Printf("DJ_PRODLIKE_COMPARE=%s\n", payload)
 }
 
-func readAllFilestoreItems(t *testing.T, ctx context.Context, store *FileStore, items []workloadItem) compareStats {
+func readAllFilestoreItems(t *testing.T, ctx context.Context, store *FileStore, items []storetest.ProdLikeWorkloadItem) compareStats {
 	t.Helper()
 
 	var stats compareStats
@@ -130,61 +122,4 @@ func readAllFilestoreItems(t *testing.T, ctx context.Context, store *FileStore, 
 	}
 	stats.DurationMs = time.Since(start).Milliseconds()
 	return stats
-}
-
-func buildProdLikeWorkload() ([]workloadItem, map[string]int, int64) {
-	type spec struct {
-		category string
-		count    int
-		size     int
-		prefix   string
-	}
-
-	specs := []spec{
-		{category: "metrics_negative_15m", count: 240, size: 77, prefix: "metrics/device/panel/15m/metrics_negative_15m"},
-		{category: "plant_small", count: 16, size: 800, prefix: "plant/plant/metadata/plant_small"},
-		{category: "registry_medium", count: 8, size: 32 << 10, prefix: "registry/registry/registry_medium"},
-		{category: "blueprint_medium", count: 8, size: 96 << 10, prefix: "blueprint/blueprint/manager/blueprint_medium"},
-		{category: "metrics_positive_15m_medium", count: 12, size: 128 << 10, prefix: "metrics/device/panel/15m/metrics_positive_15m_medium"},
-		{category: "metrics_positive_5m_large", count: 6, size: 768 << 10, prefix: "metrics/device/panel/5m/metrics_positive_5m_large"},
-		{category: "metrics_positive_5m_direct", count: 2, size: 2 << 20, prefix: "metrics/device/panel/5m/metrics_positive_5m_direct"},
-	}
-
-	items := make([]workloadItem, 0, 292)
-	counts := make(map[string]int, len(specs))
-	var totalBytes int64
-
-	for _, spec := range specs {
-		for i := 0; i < spec.count; i++ {
-			key := fmt.Sprintf("%s/%03d/%s", spec.prefix, i, workloadDate(i))
-			body := workloadBody(spec.category, i, spec.size)
-			items = append(items, workloadItem{
-				Key:      key,
-				Category: spec.category,
-				Body:     body,
-				ETag:     fmt.Sprintf("%s-%03d", spec.category, i),
-			})
-			counts[spec.category]++
-			totalBytes += int64(len(body))
-		}
-	}
-
-	return items, counts, totalBytes
-}
-
-func workloadDate(i int) string {
-	if i%2 == 0 {
-		return fmt.Sprintf("2026-03-%02d", (i%28)+1)
-	}
-	return fmt.Sprintf("2025-03-%02d", (i%28)+1)
-}
-
-func workloadBody(category string, index, size int) []byte {
-	sum := sha1.Sum([]byte(fmt.Sprintf("%s-%03d", category, index)))
-	pattern := []byte(hex.EncodeToString(sum[:]))
-	body := make([]byte, size)
-	for i := range body {
-		body[i] = pattern[i%len(pattern)]
-	}
-	return body
 }

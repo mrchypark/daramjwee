@@ -7,6 +7,7 @@ LOG_DIR="$(mktemp -d -t daramjwee-prodlike-logs-XXXXXX)"
 AZURITE_DIR="$(mktemp -d -t daramjwee-azurite-XXXXXX)"
 AZURITE_CERT_DIR="$(mktemp -d -t daramjwee-azurite-certs-XXXXXX)"
 AZURITE_PID=""
+BASELINE_REF="${DJ_COMPARE_BASELINE_REF:-v0.3.10}"
 
 export DJ_RUN_PRODLIKE_COMPARE=1
 export DJ_AZURITE_CONNECTION_STRING="${DJ_AZURITE_CONNECTION_STRING:-DefaultEndpointsProtocol=https;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=https://127.0.0.1:10000/devstoreaccount1;}"
@@ -44,7 +45,7 @@ if ! lsof -nP -iTCP:10000 -sTCP:LISTEN >/dev/null 2>&1; then
     --skipApiVersionCheck \
     >"${LOG_DIR}/azurite.log" 2>&1 &
   AZURITE_PID=$!
-  for _ in $(seq 1 30); do
+  for _ in {1..30}; do
     if lsof -nP -iTCP:10000 -sTCP:LISTEN >/dev/null 2>&1; then
       break
     fi
@@ -52,7 +53,17 @@ if ! lsof -nP -iTCP:10000 -sTCP:LISTEN >/dev/null 2>&1; then
   done
 fi
 
-git -C "${ROOT_DIR}" worktree add --detach "${WORKTREE_DIR}" v0.3.10 >/dev/null
+BASELINE_COMMIT="$(git -C "${ROOT_DIR}" rev-parse --verify "${BASELINE_REF}^{commit}" 2>/dev/null || true)"
+if [[ -z "${BASELINE_COMMIT}" ]]; then
+  git -C "${ROOT_DIR}" fetch --tags origin >/dev/null 2>&1 || true
+  BASELINE_COMMIT="$(git -C "${ROOT_DIR}" rev-parse --verify "${BASELINE_REF}^{commit}" 2>/dev/null || true)"
+fi
+if [[ -z "${BASELINE_COMMIT}" ]]; then
+  echo "failed to resolve baseline ref '${BASELINE_REF}'; set DJ_COMPARE_BASELINE_REF to a local ref or commit SHA" >&2
+  exit 1
+fi
+
+git -C "${ROOT_DIR}" worktree add --detach "${WORKTREE_DIR}" "${BASELINE_COMMIT}" >/dev/null
 
 cat >"${WORKTREE_DIR}/pkg/store/filestore/prodlike_compare_test.go" <<'EOF'
 package filestore
