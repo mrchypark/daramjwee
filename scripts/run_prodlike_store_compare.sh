@@ -30,17 +30,19 @@ cleanup() {
 trap cleanup EXIT
 
 listener_pid() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
   lsof -nP -t -iTCP:"${AZURITE_PORT}" -sTCP:LISTEN 2>/dev/null | head -n 1
 }
 
-listener_looks_like_azurite() {
-  local pid
-  pid="$(listener_pid)"
-  if [[ -z "${pid}" ]]; then
-    return 1
+listener_is_reachable() {
+  if command -v lsof >/dev/null 2>&1; then
+    [[ -n "$(listener_pid)" ]]
+    return
   fi
 
-  ps -p "${pid}" -o command= 2>/dev/null | grep -qi "azurite"
+  (: <>"/dev/tcp/${AZURITE_HOST}/${AZURITE_PORT}") >/dev/null 2>&1
 }
 
 listener_supports_tls() {
@@ -50,13 +52,23 @@ listener_supports_tls() {
     -brief </dev/null >/dev/null 2>&1
 }
 
+listener_looks_like_azurite() {
+  printf 'GET /devstoreaccount1?comp=list HTTP/1.1\r\nHost: %s:%s\r\nConnection: close\r\n\r\n' \
+    "${AZURITE_HOST}" "${AZURITE_PORT}" |
+    openssl s_client \
+      -connect "${AZURITE_HOST}:${AZURITE_PORT}" \
+      -servername "${AZURITE_HOST}" \
+      -quiet 2>/dev/null |
+    grep -qi 'azurite'
+}
+
 ensure_existing_azurite() {
-  if ! listener_looks_like_azurite; then
-    echo "port ${AZURITE_PORT} is already in use by a non-Azurite listener; stop it or set DJ_AZURITE_PORT" >&2
-    exit 1
-  fi
   if ! listener_supports_tls; then
     echo "port ${AZURITE_PORT} is listening but does not accept TLS; stop it or set DJ_AZURITE_PORT" >&2
+    exit 1
+  fi
+  if ! listener_looks_like_azurite; then
+    echo "port ${AZURITE_PORT} is listening and accepts TLS, but it did not identify itself as Azurite; stop it or set DJ_AZURITE_PORT" >&2
     exit 1
   fi
 }
@@ -69,7 +81,7 @@ if [[ ! -f "${AZURITE_CERT_DIR}/cert.pem" || ! -f "${AZURITE_CERT_DIR}/key.pem" 
     -subj "/CN=127.0.0.1" >/dev/null 2>&1
 fi
 
-if [[ -n "$(listener_pid)" ]]; then
+if listener_is_reachable; then
   ensure_existing_azurite
 else
   if ! command -v npx >/dev/null 2>&1; then
@@ -90,12 +102,12 @@ else
       echo "azurite exited before becoming ready; see ${LOG_DIR}/azurite.log" >&2
       exit 1
     fi
-    if [[ -n "$(listener_pid)" ]] && listener_supports_tls; then
+    if listener_is_reachable && listener_supports_tls; then
       break
     fi
     sleep 1
   done
-  if [[ -z "$(listener_pid)" ]] || ! listener_supports_tls; then
+  if ! listener_is_reachable || ! listener_supports_tls || ! listener_looks_like_azurite; then
     echo "azurite did not become ready on ${AZURITE_HOST}:${AZURITE_PORT}; see ${LOG_DIR}/azurite.log" >&2
     exit 1
   fi
