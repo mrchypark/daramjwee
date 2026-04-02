@@ -43,7 +43,7 @@ func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 
 	obj, ok := fakeOrigin[f.key]
 	if !ok {
-		return nil, daramjwee.ErrNotFound
+		return nil, daramjwee.ErrCacheableNotFound
 	}
 
 	// If ETag matches, indicate that the data has not been modified.
@@ -96,25 +96,25 @@ func ExampleOriginFetcher_Fetch() {
 	// [Origin] Fetching key: hello, (old ETag: 'v1')Data not modified as expected.
 }
 
-// main sets up and runs a daramjwee cache example with a file-based hot store
+// main sets up and runs a daramjwee cache example with a file-based tier 0 store
 // and a simulated origin server, exposing cached content via an HTTP server.
 func main() {
 	logger := log.NewLogfmtLogger(os.Stderr)
 	logger = level.NewFilter(logger, level.AllowDebug())
 
-	hotStoreDir := "./daramjwee-hot-store"
-	if err := os.MkdirAll(hotStoreDir, 0755); err != nil {
+	tier0StoreDir := "./daramjwee-tier0-store"
+	if err := os.MkdirAll(tier0StoreDir, 0755); err != nil {
 		panic(err)
 	}
 
-	hotStore, err := filestore.New(hotStoreDir, log.With(logger, "tier", "hot"))
+	tier0Store, err := filestore.New(tier0StoreDir, log.With(logger, "tier", "0"))
 	if err != nil {
 		panic(err)
 	}
 
 	cache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(hotStore),
+		daramjwee.WithTiers(tier0Store),
 		daramjwee.WithDefaultTimeout(5*time.Second),
 	)
 	if err != nil {

@@ -88,3 +88,32 @@ BenchmarkFileStore_Get_CopyStrategy-8             269330              4312 ns/op
 PASS
 ok      github.com/mrchypark/daramjwee/pkg/store/filestore      6.558s
 ```
+
+## Prod-like Compare Harness
+
+`filestore` has an env-gated compare harness that models the production-heavy cache mix used during `v0.3.10` comparison.
+
+Run only the current `filestore` harness:
+
+```bash
+DJ_RUN_PRODLIKE_COMPARE=1 \
+go test ./pkg/store/filestore -run TestFileStoreProdLikeCompareHarness -count=1 -v
+```
+
+This emits a single JSON line prefixed with `DJ_PRODLIKE_COMPARE=`.
+
+Reported metrics:
+
+- `write.duration_ms`: publish time for the full workload
+- `cold_read.duration_ms`: read time after reopening the store
+- `warm_read.duration_ms`: repeated read time on the same reopened instance
+- `write_calls`: logical file publishes
+- `read_calls`: logical file reads
+- `list_calls`: reserved for symmetry with objectstore; remains `0` for this harness
+- `bytes_sent` / `bytes_received`: `0` for local `filestore`
+
+To compare `current` against `v0.3.10` together, run:
+
+```bash
+scripts/run_prodlike_store_compare.sh
+```

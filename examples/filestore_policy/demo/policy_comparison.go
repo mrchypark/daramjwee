@@ -112,7 +112,7 @@ func testPolicy(logger log.Logger, policyName string, pol daramjwee.EvictionPoli
 			CachedAt: time.Now(),
 		}
 
-		writer, err := store.SetWithWriter(ctx, key, metadata)
+		writer, err := store.BeginSet(ctx, key, metadata)
 		if err != nil {
 			return err
 		}

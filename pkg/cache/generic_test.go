@@ -10,6 +10,7 @@ import (
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/policy"
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
+	"github.com/stretchr/testify/assert"
 )
 
 type User struct {
@@ -30,9 +31,22 @@ func createTestCache() (daramjwee.Cache, error) {
 
 	return daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(memStore),
+		daramjwee.WithTiers(memStore),
 		daramjwee.WithDefaultTimeout(10*time.Second),
 		daramjwee.WithCache(1*time.Minute),
+	)
+}
+
+func createZeroTTLTestCache() (daramjwee.Cache, error) {
+	logger := log.NewNopLogger()
+	memStore := memstore.New(1*1024*1024, policy.NewLRU())
+
+	return daramjwee.New(
+		logger,
+		daramjwee.WithTiers(memStore),
+		daramjwee.WithDefaultTimeout(10*time.Second),
+		daramjwee.WithCache(0),
+		daramjwee.WithNegativeCache(time.Minute),
 	)
 }
 
@@ -234,6 +248,83 @@ func TestGenericCache_Must(t *testing.T) {
 	retrieved := stringCache.MustGet(ctx, "must-key", fetcher)
 	if retrieved != value {
 		t.Errorf("Expected %q, got %q", value, retrieved)
+	}
+}
+
+func TestGenericCache_CacheableNotFoundIsCached(t *testing.T) {
+	baseCache, err := createZeroTTLTestCache()
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+	defer baseCache.Close()
+
+	stringCache := NewGeneric[string](baseCache)
+	ctx := context.Background()
+
+	var fetchCount int32
+	fetcher := GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
+		atomic.AddInt32(&fetchCount, 1)
+		return "", nil, daramjwee.ErrCacheableNotFound
+	})
+
+	_, err = stringCache.Get(ctx, "missing-key", fetcher)
+	if err != daramjwee.ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+
+	_, err = stringCache.Get(ctx, "missing-key", fetcher)
+	if err != daramjwee.ErrNotFound {
+		t.Fatalf("expected ErrNotFound on second get, got %v", err)
+	}
+
+	if atomic.LoadInt32(&fetchCount) != 1 {
+		t.Fatalf("expected fetcher to be called once, got %d", fetchCount)
+	}
+}
+
+func TestGenericCache_StaleEntryHandlesNotModified(t *testing.T) {
+	baseCache, err := createZeroTTLTestCache()
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+	defer baseCache.Close()
+
+	stringCache := NewGeneric[string](baseCache)
+	ctx := context.Background()
+
+	var fetchCount int32
+	fetcher := GenericFetcher[string](func(_ context.Context, oldMetadata *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
+		call := atomic.AddInt32(&fetchCount, 1)
+		if call == 1 {
+			return "cached-value", &daramjwee.Metadata{ETag: "v1"}, nil
+		}
+		if oldMetadata != nil && oldMetadata.ETag == "v1" {
+			return "", nil, daramjwee.ErrNotModified
+		}
+		t.Fatalf("expected old metadata with ETag v1, got %#v", oldMetadata)
+		return "", nil, nil
+	})
+
+	value, err := stringCache.Get(ctx, "stale-key", fetcher)
+	if err != nil {
+		t.Fatalf("first get failed: %v", err)
+	}
+	if value != "cached-value" {
+		t.Fatalf("expected cached-value, got %q", value)
+	}
+
+	value, err = stringCache.Get(ctx, "stale-key", fetcher)
+	if err != nil {
+		t.Fatalf("second get failed: %v", err)
+	}
+	if value != "cached-value" {
+		t.Fatalf("expected cached-value after not modified, got %q", value)
+	}
+
+	if !assert.Eventually(t, func() bool {
+		return atomic.LoadInt32(&fetchCount) == 2
+	}, time.Second, 10*time.Millisecond) {
+		t.Fatalf("expected fetcher to be called twice, got %d", fetchCount)
 	}
 }
 

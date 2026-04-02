@@ -1,0 +1,606 @@
+package objectstore
+
+import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/go-kit/log"
+	"github.com/goccy/go-json"
+	"github.com/mrchypark/daramjwee"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/thanos-io/objstore"
+)
+
+func TestStore_GetStream_LocalPublishedHitReadsFromLocalSegment(t *testing.T) {
+	ctx := context.Background()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "local-read", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "local body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	stream, meta, err := store.GetStream(ctx, "local-read")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "local body", string(body))
+	assert.Equal(t, "v1", meta.ETag)
+}
+
+func TestStore_GetStream_RemoteOnlyHitResolvesThroughShardCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+
+	writer, err := flushed.BeginSet(ctx, "remote-only", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "remote checkpoint body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	remoteOnly.autoFlush = false
+
+	stream, meta, err := remoteOnly.GetStream(ctx, "remote-only")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "remote checkpoint body", string(body))
+	assert.Equal(t, "v1", meta.ETag)
+}
+
+func TestStore_GetStream_RemoteCheckpointCacheAvoidsRepeatedCheckpointFetch(t *testing.T) {
+	ctx := context.Background()
+	bucket := &countingCheckpointBucket{Bucket: objstore.NewInMemBucket()}
+	flushed := New(bucket, log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithPackedObjectThreshold(1),
+	)
+	flushed.autoFlush = false
+
+	writer, err := flushed.BeginSet(ctx, "remote-cached", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "remote cached body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	remoteOnly := New(bucket, log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithPackedObjectThreshold(1),
+		WithMemoryCheckpointCache(1<<20),
+		WithCheckpointCacheTTL(5*time.Second),
+	)
+	remoteOnly.autoFlush = false
+
+	for range 2 {
+		stream, _, err := remoteOnly.GetStream(ctx, "remote-cached")
+		require.NoError(t, err)
+		_, err = io.ReadAll(stream)
+		require.NoError(t, err)
+		require.NoError(t, stream.Close())
+	}
+
+	assert.Equal(t, 1, bucket.checkpointCalls())
+}
+
+func TestStore_GetStream_RemoteCheckpointCacheReloadsAfterTTL(t *testing.T) {
+	ctx := context.Background()
+	bucket := &countingCheckpointBucket{Bucket: objstore.NewInMemBucket()}
+	flushed := New(bucket, log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithPackedObjectThreshold(1),
+	)
+	flushed.autoFlush = false
+
+	writer, err := flushed.BeginSet(ctx, "remote-ttl", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "remote ttl body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	now := time.Unix(1_000, 0)
+	remoteOnly := New(bucket, log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithPackedObjectThreshold(1),
+		WithMemoryCheckpointCache(1<<20),
+		WithCheckpointCacheTTL(time.Second),
+	)
+	remoteOnly.autoFlush = false
+	remoteOnly.now = func() time.Time { return now }
+
+	stream, _, err := remoteOnly.GetStream(ctx, "remote-ttl")
+	require.NoError(t, err)
+	_, err = io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, 1, bucket.checkpointCalls())
+
+	now = now.Add(2 * time.Second)
+	stream, _, err = remoteOnly.GetStream(ctx, "remote-ttl")
+	require.NoError(t, err)
+	_, err = io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, 2, bucket.checkpointCalls())
+}
+
+func TestStore_PublishCheckpointRefreshesCheckpointCache(t *testing.T) {
+	ctx := context.Background()
+	bucket := &countingCheckpointBucket{Bucket: objstore.NewInMemBucket()}
+	store := New(bucket, log.NewNopLogger(),
+		WithDataDir(t.TempDir()),
+		WithMemoryCheckpointCache(1<<20),
+		WithCheckpointCacheTTL(5*time.Second),
+	)
+	store.autoFlush = false
+
+	shardID := shardForKey("checkpoint-cache-publish")
+	oldRemotePath := joinPath(store.prefix, "blobs", "old")
+	require.NoError(t, bucket.Upload(ctx, oldRemotePath, strings.NewReader("old body")))
+	require.NoError(t, store.publishCheckpoint(ctx, shardID, map[string]checkpointEntry{
+		"checkpoint-cache-publish": {
+			SegmentPath: oldRemotePath,
+			Offset:      0,
+			Length:      int64(len("old body")),
+			Metadata:    daramjwee.Metadata{ETag: "v1"},
+		},
+	}))
+
+	entry, err := store.loadRemoteEntry(ctx, "checkpoint-cache-publish")
+	require.NoError(t, err)
+	assert.Equal(t, "v1", entry.Metadata.ETag)
+	assert.Equal(t, 0, bucket.checkpointCalls())
+
+	newRemotePath := joinPath(store.prefix, "blobs", "new")
+	require.NoError(t, bucket.Upload(ctx, newRemotePath, strings.NewReader("new body")))
+	require.NoError(t, store.publishCheckpoint(ctx, shardID, map[string]checkpointEntry{
+		"checkpoint-cache-publish": {
+			SegmentPath: newRemotePath,
+			Offset:      0,
+			Length:      int64(len("new body")),
+			Metadata:    daramjwee.Metadata{ETag: "v2"},
+		},
+	}))
+
+	entry, err = store.loadRemoteEntry(ctx, "checkpoint-cache-publish")
+	require.NoError(t, err)
+	assert.Equal(t, "v2", entry.Metadata.ETag)
+	assert.Equal(t, 0, bucket.checkpointCalls())
+}
+
+func TestStore_GetStream_RemotePackedRecordReturnsExactLogicalObject(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+	keyA, keyB := sameShardKeys("packed-read")
+
+	for _, tc := range []struct {
+		key  string
+		etag string
+		body string
+	}{
+		{keyA, "v1", "alpha remote value"},
+		{keyB, "v2", "beta remote value"},
+	} {
+		writer, err := flushed.BeginSet(ctx, tc.key, &daramjwee.Metadata{ETag: tc.etag})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, tc.body)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+	}
+	require.NoError(t, flushed.flushPending(ctx))
+
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	remoteOnly.autoFlush = false
+
+	stream, meta, err := remoteOnly.GetStream(ctx, keyB)
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "beta remote value", string(body))
+	assert.Equal(t, "v2", meta.ETag)
+}
+
+func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "local-disappears-remote-live", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "remote fallback body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	entry, ok := store.catalog.Get("local-disappears-remote-live")
+	require.True(t, ok)
+	remotePath := joinPath(store.prefix, "segments", "local-disappears-remote-live.seg")
+	require.NoError(t, bucket.Upload(ctx, remotePath, strings.NewReader("remote fallback body")))
+	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("local-disappears-remote-live"), map[string]checkpointEntry{
+		"local-disappears-remote-live": {
+			SegmentPath: remotePath,
+			Offset:      0,
+			Length:      int64(len("remote fallback body")),
+			Metadata:    entry.Metadata,
+		},
+	}))
+	require.NoError(t, store.updateLocalEntry("local-disappears-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		require.True(t, exists)
+		current.RemotePath = remotePath
+		current.RemoteOffset = 0
+		return current, true
+	}))
+
+	origOpen := openLocalSegmentFile
+	openLocalSegmentFile = func(path string) (*os.File, error) {
+		require.NoError(t, os.Remove(path))
+		return origOpen(path)
+	}
+	t.Cleanup(func() {
+		openLocalSegmentFile = origOpen
+	})
+
+	stream, meta, err := store.GetStream(ctx, "local-disappears-remote-live")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "remote fallback body", string(body))
+	assert.Equal(t, "v1", meta.ETag)
+}
+
+func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappears(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+	writer, err := flushed.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "old remote body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+	writer, err = store.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{ETag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "new local body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	origOpen := openLocalSegmentFile
+	openLocalSegmentFile = func(path string) (*os.File, error) {
+		require.NoError(t, os.Remove(path))
+		return origOpen(path)
+	}
+	t.Cleanup(func() {
+		openLocalSegmentFile = origOpen
+	})
+
+	_, _, err = store.GetStream(ctx, "local-disappears-stale-remote")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+	writer, err := flushed.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "old remote body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+	writer, err = store.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{ETag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "older local body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	newSegmentPath := filepath.Join(store.dataDir, "manual-newer-local.seg")
+	require.NoError(t, os.WriteFile(newSegmentPath, []byte("newest local body"), 0o644))
+
+	origOpen := openLocalSegmentFile
+	first := true
+	openLocalSegmentFile = func(path string) (*os.File, error) {
+		if first {
+			first = false
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, store.updateLocalEntry("local-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+				require.True(t, exists)
+				current.SegmentPath = newSegmentPath
+				current.Offset = 0
+				current.Length = int64(len("newest local body"))
+				current.Metadata.ETag = "v3"
+				return current, true
+			}))
+		}
+		return origOpen(path)
+	}
+	t.Cleanup(func() {
+		openLocalSegmentFile = origOpen
+	})
+
+	stream, meta, err := store.GetStream(ctx, "local-recheck-newer-local")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "newest local body", string(body))
+	assert.Equal(t, "v3", meta.ETag)
+}
+
+func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallback(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+	writer, err := flushed.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "old remote body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, flushed.flushPending(ctx))
+
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+	writer, err = store.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{ETag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "first local body")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	secondSegmentPath := filepath.Join(store.dataDir, "manual-second-local.seg")
+	require.NoError(t, os.WriteFile(secondSegmentPath, []byte("second local body"), 0o644))
+	thirdSegmentPath := filepath.Join(store.dataDir, "manual-third-local.seg")
+	require.NoError(t, os.WriteFile(thirdSegmentPath, []byte("third local body"), 0o644))
+
+	origOpen := openLocalSegmentFile
+	openCount := 0
+	openLocalSegmentFile = func(path string) (*os.File, error) {
+		openCount++
+		switch openCount {
+		case 1:
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, store.updateLocalEntry("local-final-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+				require.True(t, exists)
+				current.SegmentPath = secondSegmentPath
+				current.Offset = 0
+				current.Length = int64(len("second local body"))
+				current.Metadata.ETag = "v3"
+				return current, true
+			}))
+		case 2:
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, store.updateLocalEntry("local-final-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+				require.True(t, exists)
+				current.SegmentPath = thirdSegmentPath
+				current.Offset = 0
+				current.Length = int64(len("third local body"))
+				current.Metadata.ETag = "v4"
+				return current, true
+			}))
+		}
+		return origOpen(path)
+	}
+	t.Cleanup(func() {
+		openLocalSegmentFile = origOpen
+	})
+
+	stream, meta, err := store.GetStream(ctx, "local-final-recheck-newer-local")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "third local body", string(body))
+	assert.Equal(t, "v4", meta.ETag)
+}
+
+func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	remotePath := joinPath(store.prefix, "segments", "packed-short.seg")
+	require.NoError(t, bucket.Upload(ctx, remotePath, strings.NewReader("abc")))
+
+	reader := &packedRemoteReader{
+		ctx:       ctx,
+		store:     store,
+		entry:     checkpointEntry{SegmentPath: remotePath, Offset: 4, Length: 2},
+		blockSize: store.pageSize,
+		blockIdx:  -1,
+	}
+
+	buf := make([]byte, 4)
+	n, err := reader.Read(buf)
+	require.Zero(t, n)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+type countingCheckpointBucket struct {
+	objstore.Bucket
+	mu             sync.Mutex
+	checkpointGets int
+}
+
+func (b *countingCheckpointBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	reader, err := b.Bucket.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(name, "/latest.json") {
+		b.mu.Lock()
+		b.checkpointGets++
+		b.mu.Unlock()
+	}
+	return reader, nil
+}
+
+func (b *countingCheckpointBucket) checkpointCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.checkpointGets
+}
+
+func TestStore_DeleteTombstoneHidesOlderPackedRecord(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "delete-tombstone", &daramjwee.Metadata{ETag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "stale remote value")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, store.flushPending(ctx))
+
+	require.NoError(t, store.Delete(ctx, "delete-tombstone"))
+
+	_, statErr := store.Stat(ctx, "delete-tombstone")
+	require.ErrorIs(t, statErr, daramjwee.ErrNotFound)
+
+	_, _, getErr := store.GetStream(ctx, "delete-tombstone")
+	require.ErrorIs(t, getErr, daramjwee.ErrNotFound)
+}
+
+func TestStore_DeleteRemoteOnlyKeyPreservesOtherCheckpointEntriesInSameShard(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed.autoFlush = false
+	keyA, keyB := sameShardKeys("remote-delete-restart")
+
+	for _, tc := range []struct {
+		key  string
+		etag string
+		body string
+	}{
+		{keyA, "v1", "alpha"},
+		{keyB, "v2", "beta"},
+	} {
+		writer, err := flushed.BeginSet(ctx, tc.key, &daramjwee.Metadata{ETag: tc.etag})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, tc.body)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+	}
+	require.NoError(t, flushed.flushPending(ctx))
+
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	remoteOnly.autoFlush = false
+
+	require.NoError(t, remoteOnly.Delete(ctx, keyA))
+
+	observer := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	observer.autoFlush = false
+
+	_, _, err := observer.GetStream(ctx, keyA)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	stream, meta, err := observer.GetStream(ctx, keyB)
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "beta", string(body))
+	assert.Equal(t, "v2", meta.ETag)
+
+	checkpointObjects := listObjectNames(t, bucket, joinPath(remoteOnly.prefix, "checkpoints"))
+	require.Len(t, checkpointObjects, 1)
+	checkpoint := loadCheckpoint(t, bucket, checkpointObjects[0])
+	require.NotContains(t, checkpoint.Entries, keyA)
+	require.Contains(t, checkpoint.Entries, keyB)
+}
+
+func TestStore_GetStream_FallsBackToLegacyManifestRemoteData(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	blobPath := store.blobPath("legacy-remote", "v1")
+	require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader("legacy manifest body")))
+	require.NoError(t, store.publishManifest(ctx, "legacy-remote", blobPath, int64(len("legacy manifest body")), &daramjwee.Metadata{ETag: "legacy"}))
+
+	reader, meta, err := store.GetStream(ctx, "legacy-remote")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy manifest body", string(body))
+	assert.Equal(t, "legacy", meta.ETag)
+
+	stat, err := store.Stat(ctx, "legacy-remote")
+	require.NoError(t, err)
+	assert.Equal(t, "legacy", stat.ETag)
+}
+
+func TestStore_GetStream_FallsBackToDefaultPageSizeForLegacyPagedManifest(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store.autoFlush = false
+
+	body := strings.Repeat("paged-manifest-body-", 64)
+	blobPath := joinPath(store.prefix, "segments", "legacy-paged.seg")
+	require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader(body)))
+
+	m := manifest{
+		Version:  "legacy-paged",
+		Layout:   layoutPaged,
+		BlobPath: blobPath,
+		Size:     int64(len(body)),
+		PageSize: 0,
+		Metadata: daramjwee.Metadata{ETag: "legacy-paged"},
+	}
+	encoded, err := json.Marshal(&m)
+	require.NoError(t, err)
+	require.NoError(t, bucket.Upload(ctx, store.manifestPath("legacy-paged"), strings.NewReader(string(encoded))))
+
+	reader, meta, err := store.GetStream(ctx, "legacy-paged")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(got))
+	assert.Equal(t, "legacy-paged", meta.ETag)
+}

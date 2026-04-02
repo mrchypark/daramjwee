@@ -63,11 +63,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create the underlying daramjwee cache with hot/cold stores
+	// Create the underlying daramjwee cache with ordered tiers.
 	baseCache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(memStore),   // Memory as hot store
-		daramjwee.WithColdStore(fileStore), // File as cold store
+		daramjwee.WithTiers(memStore, fileStore), // Tier 0: memory, Tier 1: file
 		daramjwee.WithDefaultTimeout(10*time.Second),
 		daramjwee.WithShutdownTimeout(5*time.Second),
 	)
@@ -216,10 +215,10 @@ func main() {
 	fmt.Println("\n7. Type Safety Demo:")
 	fmt.Println("  ✅ Compile-time type checking")
 	fmt.Println("  ✅ Automatic JSON serialization/deserialization")
-	fmt.Println("  ✅ Automatic hot/cold store utilization")
+	fmt.Println("  ✅ Automatic ordered-tier utilization")
 	fmt.Println("  ✅ All existing daramjwee features available")
 
 	fmt.Println("\n🎉 Generic Cache Demo Complete!")
-	fmt.Printf("📊 Memory Store (Hot): Fast access\n")
-	fmt.Printf("💾 File Store (Cold): Persistent storage at %s\n", baseDir)
+	fmt.Printf("📊 Tier 0 (MemStore): Fast access\n")
+	fmt.Printf("💾 Tier 1 (FileStore): Persistent storage at %s\n", baseDir)
 }

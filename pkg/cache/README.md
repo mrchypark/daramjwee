@@ -2,11 +2,13 @@
 
 The Generic Cache package provides type-safe operations on top of daramjwee.Cache, eliminating the need for manual stream handling and JSON marshaling/unmarshaling for common use cases.
 
+Because JSON unmarshaling needs the full payload, `GenericCache.Get` drains the underlying cache stream to EOF before returning. That means it preserves correctness for daramjwee's stream-through fills, but it does not preserve first-byte streaming to the caller the way the raw `daramjwee.Cache` API does.
+
 ## Features
 
 - **Type Safety**: Compile-time type checking for cached values
 - **Automatic Serialization**: JSON marshaling/unmarshaling handled automatically
-- **Hot/Cold Store Integration**: Seamlessly works with daramjwee's multi-tier caching
+- **Tier Integration**: Seamlessly works with daramjwee's ordered-tier caching model
 - **Convenience Methods**: Must*, GetOrSet, GetWithDefault patterns
 - **Zero Configuration**: Works with any existing daramjwee.Cache instance
 
@@ -26,7 +28,7 @@ import (
 memStore := memstore.New(1*1024*1024, policy.NewLRU())
 baseCache, err := daramjwee.New(
     logger,
-    daramjwee.WithHotStore(memStore),
+    daramjwee.WithTiers(memStore),
 )
 
 // Create type-safe cache for your struct
@@ -135,11 +137,10 @@ userFetcher := cache.GenericFetcher[User](func(ctx context.Context, oldMetadata 
 
 ## Error Handling
 
-The generic cache preserves all daramjwee error semantics:
+The generic cache preserves the public `daramjwee.Cache` error surface:
 
-- `daramjwee.ErrNotFound`: Key not found and fetcher couldn't retrieve it
-- `daramjwee.ErrNotModified`: Resource hasn't changed (304-like behavior)
-- `daramjwee.ErrCacheableNotFound`: Not found but this state should be cached
+- `daramjwee.ErrNotFound`: Key not found and the wrapped fetcher could not supply a value
+- Fetchers may internally return `daramjwee.ErrNotModified` or `daramjwee.ErrCacheableNotFound`, but those are normalized by the base cache before `GenericCache.Get` returns
 
 ```go
 user, err := userCache.Get(ctx, "user:1", fetcher)
@@ -151,16 +152,17 @@ if errors.Is(err, daramjwee.ErrNotFound) {
 ## Performance Considerations
 
 - JSON marshaling/unmarshaling adds overhead compared to raw streams
+- Reads are fully buffered before `json.Unmarshal`, so this wrapper is not suitable when caller-visible first-byte streaming matters
 - Best suited for small to medium-sized objects
 - For large binary data, consider using the raw daramjwee.Cache interface
 - The generic cache is optimized for developer productivity over raw performance
 
-## Integration with Hot/Cold Stores
+## Integration with Ordered Tiers
 
-The generic cache automatically works with daramjwee's multi-tier architecture:
+The generic cache automatically works with daramjwee's ordered-tier architecture:
 
 ```go
-// Setup with both memory (hot) and file (cold) stores
+// Setup with both memory (tier 0) and file (tier 1) stores
 memStore := memstore.New(1*1024*1024, policy.NewLRU())
 fileStore, err := filestore.New("/tmp/cache", logger)
 if err != nil {
@@ -169,8 +171,7 @@ if err != nil {
 
 baseCache, err := daramjwee.New(
     logger,
-    daramjwee.WithHotStore(memStore),   // Fast memory cache
-    daramjwee.WithColdStore(fileStore), // Persistent file cache
+    daramjwee.WithTiers(memStore, fileStore),
 )
 if err != nil {
     // handle error
@@ -179,7 +180,7 @@ if err != nil {
 // Generic cache automatically uses both tiers
 userCache := cache.NewGeneric[User](baseCache)
 
-// Data flows: Memory -> File -> Origin (via fetcher)
+// Data flows: Tier 0 -> Tier 1 -> Origin (via fetcher)
 user, err := userCache.Get(ctx, "user:1", fetcher)
 ```
 
@@ -188,7 +189,7 @@ user, err := userCache.Get(ctx, "user:1", fetcher)
 See `examples/generic_cache/main.go` for a complete working example demonstrating:
 
 - Multiple data types (User, Config, Product, string)
-- Hot/cold store integration
+- Ordered-tier integration
 - All convenience methods
 - Error handling patterns
 - Background operations

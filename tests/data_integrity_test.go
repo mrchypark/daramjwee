@@ -27,7 +27,7 @@ func TestGenericCache_Set_MarshalError(t *testing.T) {
 
 	baseCache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(memStore),
+		daramjwee.WithTiers(memStore),
 		daramjwee.WithCache(1*time.Minute),
 	)
 	if err != nil {
@@ -88,7 +88,7 @@ func TestGenericCache_Set_WriteError(t *testing.T) {
 
 	baseCache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(memStore),
+		daramjwee.WithTiers(memStore),
 		daramjwee.WithCache(1*time.Minute),
 	)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestGenericCache_Set_DataIntegrity(t *testing.T) {
 
 	baseCache, err := daramjwee.New(
 		logger,
-		daramjwee.WithHotStore(memStore),
+		daramjwee.WithTiers(memStore),
 		daramjwee.WithCache(1*time.Minute),
 	)
 	if err != nil {
