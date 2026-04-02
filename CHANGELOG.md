@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.4.2
+
+### 🚀 Features & Enhancements
+
+*   **Prod-like store compare harness**: Added a reusable prod-like comparison workload, baseline templates, and an azurite-aware runner for `filestore` and `objectstore` store validation.
+*   **Expanded store comparison docs**: Documented the new comparison workflow in the `filestore` and `objectstore` READMEs so perf and correctness checks are easier to reproduce.
+
+### 🐛 Bug Fixes & Refinements
+
+*   **More stable stale-refresh integration coverage**: Tightened tiering integration timing so stale-close behavior and no-promotion expectations are asserted more reliably.
+
+### 🧰 Maintenance
+
+*   **Go toolchain and workflow refresh**: Updated CI to Go `1.26.1` and refreshed module dependencies for the current toolchain.
+*   **Security dependency update**: Bumped indirect `golang.org/x/crypto` from `0.39.0` to `0.45.0`.
+
+### ✅ Verification
+
+*   `go test ./...`
+
 ## v0.4.1
 
 ### 🚀 Features & Enhancements
