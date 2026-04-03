@@ -54,9 +54,9 @@ type Store struct {
 	logger          log.Logger
 	dataDir         string
 	prefix          string
-	defaultGCGrace  time.Duration
+	gcGrace         time.Duration
 	packedThreshold int64
-	wholeThreshold  int64
+	pagedThreshold  int64
 	pageSize        int64
 	blockCache      *blockcache.Cache
 	pageCache       *pagecache.Cache
@@ -114,9 +114,9 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		logger:          logger,
 		dataDir:         dataDir,
 		prefix:          trimSlashes(cfg.prefix),
-		defaultGCGrace:  cfg.gcGrace,
+		gcGrace:         cfg.gcGrace,
 		packedThreshold: cfg.packThreshold,
-		wholeThreshold:  cfg.pagedThreshold,
+		pagedThreshold:  cfg.pagedThreshold,
 		pageSize:        cfg.pageSize,
 		blockCache:      blockcache.New(cfg.blockCacheBytes),
 		pageCache:       pagecache.New(cfg.pageCacheBytes),
@@ -364,7 +364,7 @@ func (s *Store) loadManifest(ctx context.Context, key string) (*manifest, error)
 func (s *Store) publishManifest(ctx context.Context, key, blobPath string, size int64, metadata *daramjwee.Metadata) error {
 	layout := layoutWhole
 	pageSize := int64(0)
-	if s.wholeThreshold > 0 && size > s.wholeThreshold {
+	if s.pagedThreshold > 0 && size > s.pagedThreshold {
 		layout = layoutPaged
 		pageSize = s.pageSize
 	}
