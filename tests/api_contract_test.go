@@ -37,7 +37,7 @@ func (s *nilMetadataStore) Stat(ctx context.Context, key string) (*daramjwee.Met
 func TestCache_SetPublishesOnClose(t *testing.T) {
 	hot := newMockStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -62,7 +62,7 @@ func TestCache_SetPublishesOnClose(t *testing.T) {
 func TestCache_SetDiscardsOnAbort(t *testing.T) {
 	hot := newMockStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -89,10 +89,10 @@ func TestCache_ObjectStoreTierZeroPublishesOnClose(t *testing.T) {
 	store := objectstore.New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		objectstore.WithDataDir(dataDir),
+		objectstore.WithDir(dataDir),
 	)
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(store), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(store), daramjwee.WithOpTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -117,7 +117,7 @@ func TestCache_ObjectStoreTierZeroPublishesOnClose(t *testing.T) {
 func TestCache_GetRejectsNilFetcher(t *testing.T) {
 	hot := newMockStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -129,7 +129,7 @@ func TestCache_GetRejectsNilFetcher(t *testing.T) {
 func TestCache_ScheduleRefreshRejectsNilFetcher(t *testing.T) {
 	hot := newMockStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -139,7 +139,7 @@ func TestCache_ScheduleRefreshRejectsNilFetcher(t *testing.T) {
 }
 
 func TestCache_GetReturnsErrNilMetadataForTopTierHit(t *testing.T) {
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(&nilMetadataStore{}), daramjwee.WithDefaultTimeout(time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(&nilMetadataStore{}), daramjwee.WithOpTimeout(time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 

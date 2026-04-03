@@ -89,8 +89,8 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	}
 
 	cfg := config{
-		defaultGCGrace: time.Hour,
-		pageSize:       256 << 10,
+		gcGrace:  time.Hour,
+		pageSize: 256 << 10,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -99,7 +99,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		cfg.pageSize = 256 << 10
 	}
 
-	dataDir := cfg.dataDir
+	dataDir := cfg.dir
 	var initErr error
 	if dataDir == "" {
 		dataDir, initErr = os.MkdirTemp("", "daramjwee-objectstore-*")
@@ -114,12 +114,12 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		logger:          logger,
 		dataDir:         dataDir,
 		prefix:          trimSlashes(cfg.prefix),
-		defaultGCGrace:  cfg.defaultGCGrace,
-		packedThreshold: cfg.packedObjectThreshold,
-		wholeThreshold:  cfg.wholeThreshold,
+		defaultGCGrace:  cfg.gcGrace,
+		packedThreshold: cfg.packThreshold,
+		wholeThreshold:  cfg.pagedThreshold,
 		pageSize:        cfg.pageSize,
-		blockCache:      blockcache.New(cfg.memoryBlockCacheBytes),
-		pageCache:       pagecache.New(cfg.memoryPageCacheBytes),
+		blockCache:      blockcache.New(cfg.blockCacheBytes),
+		pageCache:       pagecache.New(cfg.pageCacheBytes),
 		catalog:         cat,
 		lockManager:     newKeyLockManager(2048),
 		initErr:         initErr,
@@ -129,7 +129,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		autoFlush:       true,
 		now:             time.Now,
 	}
-	store.checkpointCache = newCheckpointCache(cfg.memoryCheckpointBytes, cfg.checkpointCacheTTL, func() time.Time {
+	store.checkpointCache = newCheckpointCache(cfg.checkpointCacheBytes, cfg.checkpointTTL, func() time.Time {
 		return store.now()
 	})
 	if store.initErr == nil {

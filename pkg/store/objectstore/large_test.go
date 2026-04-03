@@ -16,7 +16,7 @@ import (
 func TestStore_PackedObjectFlushUsesPackedSegmentPath(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()), WithPackedObjectThreshold(32))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(32))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "packed-key", &daramjwee.Metadata{ETag: "small"})
@@ -41,7 +41,7 @@ func TestStore_PackedObjectFlushUsesPackedSegmentPath(t *testing.T) {
 func TestStore_LargeObjectFlushUsesDirectBlobPath(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()), WithPackedObjectThreshold(32))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(32))
 	store.autoFlush = false
 	body := strings.Repeat("x", 128)
 
@@ -63,7 +63,7 @@ func TestStore_LargeObjectFlushUsesDirectBlobPath(t *testing.T) {
 	require.Contains(t, checkpoint.Entries, "large-key")
 	assert.Equal(t, blobObjects[0], checkpoint.Entries["large-key"].SegmentPath)
 
-	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()), WithPackedObjectThreshold(32))
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(32))
 	stream, meta, err := remoteOnly.GetStream(ctx, "large-key")
 	require.NoError(t, err)
 	defer stream.Close()
@@ -77,7 +77,7 @@ func TestStore_LargeObjectFlushUsesDirectBlobPath(t *testing.T) {
 func TestStore_LargeObjectAbortLeavesNoVisibleEntry(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()), WithPackedObjectThreshold(32))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(32))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "large-abort", &daramjwee.Metadata{ETag: "large"})

@@ -229,8 +229,8 @@ func TestCache_WithSlowColdStore(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, slowCold),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(1*time.Second),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(1*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()

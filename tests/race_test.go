@@ -22,8 +22,8 @@ func createTestCacheForRace() (daramjwee.Cache, error) {
 	return daramjwee.New(
 		logger,
 		daramjwee.WithTiers(memStore),
-		daramjwee.WithDefaultTimeout(10*time.Second),
-		daramjwee.WithCache(1*time.Minute),
+		daramjwee.WithOpTimeout(10*time.Second),
+		daramjwee.WithFreshness(1*time.Minute, 0),
 	)
 }
 

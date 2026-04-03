@@ -12,13 +12,13 @@ cache, err := daramjwee.New(
         objectstore.New(
             bucket,
             log.With(logger, "tier", "1"),
-            objectstore.WithDataDir("/var/lib/daramjwee/objectstore"),
+            objectstore.WithDir("/var/lib/daramjwee/objectstore"),
             objectstore.WithPrefix("prod/api-cache"),
-            objectstore.WithPackedObjectThreshold(1<<20),
+            objectstore.WithPackThreshold(1<<20),
             objectstore.WithPageSize(256<<10),
-            objectstore.WithMemoryBlockCache(64<<20),
-            objectstore.WithMemoryCheckpointCache(16<<20),
-            objectstore.WithCheckpointCacheTTL(2*time.Second),
+            objectstore.WithBlockCache(64<<20),
+            objectstore.WithCheckpointCache(16<<20),
+            objectstore.WithCheckpointTTL(2*time.Second),
         ),
     ),
 )
@@ -28,7 +28,7 @@ cache, err := daramjwee.New(
 
 `objectstore` is best thought of as a durable remote tier with a local write spool.
 
-- `WithDataDir(...)` is a local workspace for ingest segments and catalog state.
+- `WithDir(...)` is a local workspace for ingest segments and catalog state.
 - It is not a user-visible `FileStore` replacement and not a persistent read-cache tier.
 - If the local directory is empty but the remote checkpoint and segments exist, `objectstore` can still serve those remote entries.
 - If you want local filesystem cache hits after the first remote hit, place `FileStore` ahead of `objectstore` in `WithTiers(...)`.
@@ -44,7 +44,7 @@ That means these two setups behave differently:
 
 ## Important Options
 
-### `WithDataDir(dir string)`
+### `WithDir(dir string)`
 
 Configures the local working directory.
 
@@ -79,7 +79,7 @@ Recommended pattern:
 - `prod/api-cache`
 - `staging/search-cache`
 
-### `WithPackedObjectThreshold(threshold int64)`
+### `WithPackThreshold(threshold int64)`
 
 This is the main cost/performance knob in the current implementation.
 
@@ -125,7 +125,7 @@ Recommended starting value:
 
 - `256 KiB`
 
-### `WithMemoryBlockCache(capacityBytes int64)`
+### `WithBlockCache(capacityBytes int64)`
 
 Enables in-process block caching for packed remote reads.
 
@@ -140,7 +140,7 @@ Recommended starting values:
 - `32 MiB` when `FileStore` is already in front
 - `64 MiB ~ 128 MiB` when `objectstore` serves more remote hits directly
 
-### `WithMemoryCheckpointCache(capacityBytes int64)`
+### `WithCheckpointCache(capacityBytes int64)`
 
 Enables an in-process cache for decoded shard checkpoints such as `checkpoints/<shard>/latest.json`.
 
@@ -158,7 +158,7 @@ Recommended starting values:
 
 If your keys are very fine-grained (for example, plant/day time-series objects), do not try to cache every shard indefinitely. Keep this cache bounded and rely on the TTL.
 
-### `WithCheckpointCacheTTL(ttl time.Duration)`
+### `WithCheckpointTTL(ttl time.Duration)`
 
 Controls how long an in-memory shard checkpoint stays valid before the next read reloads it from remote storage.
 
@@ -173,13 +173,13 @@ Recommended starting values:
 - `2s` when the same shard may be updated by multiple writers
 - `5s` when writes are rare and read fan-out is high
 
-### `WithMemoryPageCache(capacityBytes int64)`
+### `WithPageCache(capacityBytes int64)`
 
 This is mainly relevant for paged manifest-backed reads.
 
-For the current packed/direct checkpoint path, `WithPackedObjectThreshold(...)` and `WithMemoryBlockCache(...)` are the knobs that usually matter first.
+For the current packed/direct checkpoint path, `WithPackThreshold(...)` and `WithBlockCache(...)` are the knobs that usually matter first.
 
-### `WithDefaultGCGrace(grace time.Duration)`
+### `WithGCGrace(grace time.Duration)`
 
 Controls the grace period used by conservative remote GC sweeps.
 
@@ -193,13 +193,13 @@ This is about remote object cleanup, not local spool size budgeting.
 objectstore.New(
     bucket,
     logger,
-    objectstore.WithDataDir("/var/lib/daramjwee/objectstore"),
+    objectstore.WithDir("/var/lib/daramjwee/objectstore"),
     objectstore.WithPrefix("prod/api-cache"),
-    objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
+    objectstore.WithPackThreshold(1<<20), // 1 MiB
     objectstore.WithPageSize(256<<10),            // 256 KiB
-    objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
-    objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
-    objectstore.WithCheckpointCacheTTL(2*time.Second),
+    objectstore.WithBlockCache(64<<20),     // 64 MiB
+    objectstore.WithCheckpointCache(16<<20), // 16 MiB
+    objectstore.WithCheckpointTTL(2*time.Second),
 )
 ```
 
@@ -209,13 +209,13 @@ objectstore.New(
 objectstore.New(
     bucket,
     logger,
-    objectstore.WithDataDir("/var/lib/daramjwee/objectstore"),
+    objectstore.WithDir("/var/lib/daramjwee/objectstore"),
     objectstore.WithPrefix("prod/cache"),
-    objectstore.WithPackedObjectThreshold(2<<20), // 2 MiB
+    objectstore.WithPackThreshold(2<<20), // 2 MiB
     objectstore.WithPageSize(256<<10),
-    objectstore.WithMemoryBlockCache(32<<20),
-    objectstore.WithMemoryCheckpointCache(8<<20), // 8 MiB
-    objectstore.WithCheckpointCacheTTL(2*time.Second),
+    objectstore.WithBlockCache(32<<20),
+    objectstore.WithCheckpointCache(8<<20), // 8 MiB
+    objectstore.WithCheckpointTTL(2*time.Second),
 )
 ```
 
@@ -225,13 +225,13 @@ objectstore.New(
 objectstore.New(
     bucket,
     logger,
-    objectstore.WithDataDir("/var/lib/daramjwee/objectstore"),
+    objectstore.WithDir("/var/lib/daramjwee/objectstore"),
     objectstore.WithPrefix("prod/media-cache"),
-    objectstore.WithPackedObjectThreshold(512<<10), // 512 KiB
+    objectstore.WithPackThreshold(512<<10), // 512 KiB
     objectstore.WithPageSize(256<<10),
-    objectstore.WithMemoryBlockCache(128<<20),
-    objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
-    objectstore.WithCheckpointCacheTTL(5*time.Second),
+    objectstore.WithBlockCache(128<<20),
+    objectstore.WithCheckpointCache(16<<20), // 16 MiB
+    objectstore.WithCheckpointTTL(5*time.Second),
 )
 ```
 

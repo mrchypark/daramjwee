@@ -22,11 +22,11 @@ func TestNew_RejectsTypedNilTier(t *testing.T) {
 }
 
 func TestNew_RejectsCopyAndTruncateFilestoreAsTierZero(t *testing.T) {
-	tier, err := filestore.New(t.TempDir(), log.NewNopLogger(), filestore.WithCopyAndTruncate())
+	tier, err := filestore.New(t.TempDir(), log.NewNopLogger(), filestore.WithCopyWrite())
 	require.NoError(t, err)
 
 	cache, err := daramjwee.New(nil, daramjwee.WithTiers(tier))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "WithCopyAndTruncate mode does not support stream-through publish semantics")
+	require.Contains(t, err.Error(), "WithCopyWrite mode does not support stream-through publish semantics")
 	require.Nil(t, cache)
 }

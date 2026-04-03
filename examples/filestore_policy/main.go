@@ -43,7 +43,7 @@ func main() {
 		tempDir,
 		logger,
 		filestore.WithCapacity(1024), // 1KB capacity
-		filestore.WithEvictionPolicy(policy.NewLRU()),
+		filestore.WithEviction(policy.NewLRU()),
 	)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create file store: %v", err))

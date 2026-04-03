@@ -50,8 +50,8 @@ func TestCache_LowerTierHitSynchronouslyFillsTopAndAsyncBackfillsIntermediate(t 
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, mid, low),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -90,8 +90,8 @@ func TestCache_LowestTierHitSynchronouslyFillsTopAndAsyncBackfillsRemainingTiers
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, mid, lowest),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -133,8 +133,8 @@ func TestCache_LowerTierStaleHitServesStaleWithoutPromotingAndSchedulesRefresh(t
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, lower),
-		daramjwee.WithTierFreshness(time.Second, time.Second),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Second, time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -186,8 +186,8 @@ func TestCache_LowerTierStaleHitNotModifiedPromotesToTopAndStopsRevalidation(t *
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, lower),
-		daramjwee.WithTierFreshness(time.Second, time.Second),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Second, time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -243,8 +243,8 @@ func TestCache_LowerTierNegativeStaleHitNotModifiedPromotesNegativeToTop(t *test
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, lower),
-		daramjwee.WithTierFreshness(time.Second, time.Second),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Second, time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -277,8 +277,8 @@ func TestCache_LowerTierHitWithZeroCachedAtSchedulesRefresh(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, lower),
-		daramjwee.WithTierFreshness(time.Second, time.Second),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Second, time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -321,8 +321,8 @@ func TestCache_LowerTierNegativeHitReturnsNotFoundAndPromotesNegativeToTop(t *te
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, lower),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -352,9 +352,9 @@ func TestCache_Get_LowerTierPositiveFreshnessOverride(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, lower),
-		daramjwee.WithTierFreshness(0, 0),
-		daramjwee.WithTierPositiveFreshness(1, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(0, 0),
+		daramjwee.WithTierFreshness(1, time.Hour, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -390,9 +390,9 @@ func TestCache_Get_LowerTierNegativeFreshnessOverride(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, lower),
-		daramjwee.WithTierFreshness(0, 0),
-		daramjwee.WithTierNegativeFreshness(1, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(0, 0),
+		daramjwee.WithTierFreshness(1, 0, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -418,7 +418,7 @@ func TestCache_Set_WritesToSingleTierConfig(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(tier),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -452,8 +452,8 @@ func TestCache_AbortPreventsFanoutAfterNonTopHit(t *testing.T) {
 				return daramjwee.New(
 					nil,
 					daramjwee.WithTiers(top, mid, lower),
-					daramjwee.WithTierFreshness(time.Hour, time.Hour),
-					daramjwee.WithDefaultTimeout(2*time.Second),
+					daramjwee.WithFreshness(time.Hour, time.Hour),
+					daramjwee.WithOpTimeout(2*time.Second),
 				)
 			},
 			expectedKey: "fanout-key",
@@ -504,8 +504,8 @@ func TestCache_MissSynchronouslyFillsTopAndAsyncBackfillsRemainingTiers(t *testi
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, mid, lowest),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -555,8 +555,8 @@ func TestCache_FanoutHandlesNonComparableTierStores(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, mid, lower),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -588,7 +588,7 @@ func TestCache_SingleTierMissPublishesToOnlyTier(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(tier),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -622,8 +622,8 @@ func TestCache_SingleTierStaleHitRefreshesOnlyTier(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(tier),
-		daramjwee.WithTierFreshness(time.Second, 0),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Second, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -662,8 +662,8 @@ func TestCache_SingleTierStaleNotModifiedRefreshesCachedAt(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(tier),
-		daramjwee.WithTierFreshness(time.Second, 0),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Second, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -714,8 +714,8 @@ func TestCache_SingleTierFilestoreStaleNotModifiedRefreshesWithoutSelfDeadlock(t
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(tier),
-		daramjwee.WithTierFreshness(time.Second, 0),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Second, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -744,8 +744,8 @@ func TestCache_SingleTierZeroCachedAtHitRefreshesOnlyTier(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(tier),
-		daramjwee.WithTierFreshness(time.Second, 0),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Second, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -780,8 +780,8 @@ func TestCache_SingleTierZeroCachedAtIsStaleWhenFreshnessIsZero(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(tier),
-		daramjwee.WithTierFreshness(0, 0),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(0, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -820,7 +820,7 @@ func TestCache_DeleteRemovesFromAllOrderedTiers(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(top, mid, lowest),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()

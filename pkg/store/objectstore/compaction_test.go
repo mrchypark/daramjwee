@@ -18,8 +18,8 @@ func TestStore_CompactReclaimsSupersededRemoteObjects(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
 	store := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(32),
+		WithDir(t.TempDir()),
+		WithPackThreshold(32),
 	)
 	store.autoFlush = false
 
@@ -47,8 +47,8 @@ func TestStore_CompactReclaimsSupersededRemoteObjects(t *testing.T) {
 	require.Len(t, after, 1)
 
 	remoteOnly := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(32),
+		WithDir(t.TempDir()),
+		WithPackThreshold(32),
 	)
 	stream, meta, err := remoteOnly.GetStream(ctx, "compact-large")
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestStore_CompactReclaimsSupersededRemoteObjects(t *testing.T) {
 func TestStore_CompactPrunesStaleCheckpointObjects(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "checkpoint-key", &daramjwee.Metadata{ETag: "v1"})
@@ -89,7 +89,7 @@ func TestStore_CompactPrunesStaleCheckpointObjects(t *testing.T) {
 func TestStore_CompactKeepsLegacyManifestBackedBlobReachable(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 
 	blobPath := store.blobPath("legacy-compact", "legacy-v1")
 	require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader("legacy body")))
@@ -99,7 +99,7 @@ func TestStore_CompactKeepsLegacyManifestBackedBlobReachable(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, stats.Deleted)
 
-	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	stream, meta, err := remoteOnly.GetStream(ctx, "legacy-compact")
 	require.NoError(t, err)
 	defer stream.Close()
@@ -115,7 +115,7 @@ func TestStore_ReclaimAutomaticallySchedulesFlushForPublishedUnflushedLocalEntri
 	bucket := objstore.NewInMemBucket()
 	dataDir := t.TempDir()
 
-	store := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
+	store := New(bucket, log.NewNopLogger(), WithDir(dataDir))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "requeue-key", &daramjwee.Metadata{ETag: "v1"})
@@ -124,9 +124,9 @@ func TestStore_ReclaimAutomaticallySchedulesFlushForPublishedUnflushedLocalEntri
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 
-	reopened := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
+	reopened := New(bucket, log.NewNopLogger(), WithDir(dataDir))
 
-	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	require.Eventually(t, func() bool {
 		stream, meta, err := remoteOnly.GetStream(ctx, "requeue-key")
 		if err != nil {

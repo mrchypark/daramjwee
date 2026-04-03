@@ -115,7 +115,7 @@ func main() {
 	cache, err := daramjwee.New(
 		logger,
 		daramjwee.WithTiers(tier0Store),
-		daramjwee.WithDefaultTimeout(5*time.Second),
+		daramjwee.WithOpTimeout(5*time.Second),
 	)
 	if err != nil {
 		panic(err)

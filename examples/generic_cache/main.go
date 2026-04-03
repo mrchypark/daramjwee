@@ -67,8 +67,8 @@ func main() {
 	baseCache, err := daramjwee.New(
 		logger,
 		daramjwee.WithTiers(memStore, fileStore), // Tier 0: memory, Tier 1: file
-		daramjwee.WithDefaultTimeout(10*time.Second),
-		daramjwee.WithShutdownTimeout(5*time.Second),
+		daramjwee.WithOpTimeout(10*time.Second),
+		daramjwee.WithCloseTimeout(5*time.Second),
 	)
 	if err != nil {
 		logger.Log("msg", "Failed to create cache", "err", err)

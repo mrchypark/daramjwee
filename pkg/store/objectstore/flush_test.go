@@ -27,16 +27,16 @@ func TestStore_FlushUsesFreshCheckpointBaseWhenMemoryCacheIsEnabled(t *testing.T
 	storeA := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithMemoryCheckpointCache(1<<20),
-		WithCheckpointCacheTTL(ttl),
+		WithDir(t.TempDir()),
+		WithCheckpointCache(1<<20),
+		WithCheckpointTTL(ttl),
 	)
 	storeB := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithMemoryCheckpointCache(1<<20),
-		WithCheckpointCacheTTL(ttl),
+		WithDir(t.TempDir()),
+		WithCheckpointCache(1<<20),
+		WithCheckpointTTL(ttl),
 	)
 	storeA.autoFlush = false
 	storeB.autoFlush = false
@@ -67,7 +67,7 @@ func TestStore_FlushUsesFreshCheckpointBaseWhenMemoryCacheIsEnabled(t *testing.T
 func TestStore_FlushUploadsSealedLocalSegmentAsRemoteSegmentObject(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "flush-key", &daramjwee.Metadata{ETag: "v1"})
@@ -91,7 +91,7 @@ func TestStore_FlushUploadsSealedLocalSegmentAsRemoteSegmentObject(t *testing.T)
 func TestStore_FlushPacksMultipleKeysIntoSingleRemoteSegment(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 	keyA, keyB := sameShardKeys("packed-key")
 
@@ -124,7 +124,7 @@ func TestStore_FlushPacksMultipleKeysIntoSingleRemoteSegment(t *testing.T) {
 func TestStore_FlushWritesShardScopedCheckpointWithoutKeyManifests(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	for _, key := range []string{"checkpoint-a", "checkpoint-b"} {
@@ -155,7 +155,7 @@ func TestStore_FlushFailureKeepsShardPendingForRetry(t *testing.T) {
 			"segments/": 1,
 		},
 	}
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "retry-key", &daramjwee.Metadata{ETag: "v1"})
@@ -177,7 +177,7 @@ func TestStore_FlushFailureKeepsShardPendingForRetry(t *testing.T) {
 func TestStore_DeleteRepublishesCheckpointWithoutDeletedKey(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 	keyA, keyB := sameShardKeys("delete-checkpoint")
 
@@ -208,7 +208,7 @@ func TestStore_FlushReclaimsLocalSegmentAfterRemoteCommit(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
+	store := New(bucket, log.NewNopLogger(), WithDir(dataDir))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "reclaim-after-flush", &daramjwee.Metadata{ETag: "v1"})
@@ -240,7 +240,7 @@ func TestStore_FlushDefersLocalSegmentReclaimUntilReaderCloses(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(dataDir))
+	store := New(bucket, log.NewNopLogger(), WithDir(dataDir))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "reclaim-after-reader-close", &daramjwee.Metadata{ETag: "v1"})

@@ -10,7 +10,7 @@ This setup is a practical pattern for an ordered-tier cache. Frequently accessed
 It also illustrates an important `objectstore` rule:
 
 - `FileStore` is the actual local filesystem cache tier.
-- `objectstore.WithDataDir(...)` is only the backend's local workspace for ingest/catalog state.
+- `objectstore.WithDir(...)` is only the backend's local workspace for ingest/catalog state.
 - If tier 0 is wiped, tier 1 can still serve remote-flushed entries and repopulate tier 0 on demand.
 
 ## Run
@@ -58,32 +58,32 @@ The example configures `objectstore` like this:
 objectstore.New(
     bucket,
     logger,
-    objectstore.WithDataDir("/tmp/.../workspace"),
+    objectstore.WithDir("/tmp/.../workspace"),
     objectstore.WithPrefix("examples/file-objstore-provider"),
-    objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
+    objectstore.WithPackThreshold(1<<20), // 1 MiB
     objectstore.WithPageSize(256<<10),            // 256 KiB
-    objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
-    objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
-    objectstore.WithCheckpointCacheTTL(2*time.Second),
+    objectstore.WithBlockCache(64<<20),     // 64 MiB
+    objectstore.WithCheckpointCache(16<<20), // 16 MiB
+    objectstore.WithCheckpointTTL(2*time.Second),
 )
 ```
 
 Why these values:
 
-- `WithPackedObjectThreshold(1<<20)`
+- `WithPackThreshold(1<<20)`
   - good starting point for a `FileStore -> objectstore` layout
   - reduces object count while keeping larger objects on a direct path
 - `WithPageSize(256<<10)`
   - reasonable default block size for packed remote reads
-- `WithMemoryBlockCache(64<<20)`
+- `WithBlockCache(64<<20)`
   - helps repeated packed remote reads inside the same process
-- `WithMemoryCheckpointCache(16<<20)`
+- `WithCheckpointCache(16<<20)`
   - caches decoded shard checkpoints for hot shards and avoids repeated `latest.json` GET/decode work
-- `WithCheckpointCacheTTL(2*time.Second)`
+- `WithCheckpointTTL(2*time.Second)`
   - keeps checkpoint metadata reasonably fresh while still cutting remote metadata traffic
 - `WithPrefix(...)`
   - keeps example objects in an isolated namespace
-- `WithDataDir(...)`
+- `WithDir(...)`
   - gives `objectstore` a stable local workspace without pretending it is a regular cache tier
 
 If you use `objectstore` without a `FileStore` in front of it, consider a lower packed threshold such as `512 KiB ~ 1 MiB` because remote reads become more directly user-facing.

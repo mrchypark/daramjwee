@@ -18,7 +18,7 @@ func TestScheduleRefresh_PersistsToCold(t *testing.T) {
 
 	cache, err := daramjwee.New(nil,
 		daramjwee.WithTiers(hot, cold),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()

@@ -160,14 +160,13 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	cfg := Config{
-		DefaultTimeout:       30 * time.Second,
-		WorkerStrategy:       "pool",
-		WorkerPoolSize:       1,
-		WorkerQueueSize:      500,
-		WorkerJobTimeout:     30 * time.Second,
-		ShutdownTimeout:      30 * time.Second,
-		TierPositiveFreshFor: 0,
-		TierNegativeFreshFor: 0,
+		OpTimeout:         30 * time.Second,
+		Workers:           1,
+		WorkerQueue:       500,
+		WorkerTimeout:     30 * time.Second,
+		CloseTimeout:      30 * time.Second,
+		PositiveFreshness: 0,
+		NegativeFreshness: 0,
 	}
 
 	for _, opt := range opts {
@@ -201,24 +200,24 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		}
 	}
 
-	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.WorkerPoolSize, cfg.WorkerQueueSize, cfg.WorkerJobTimeout)
+	workerManager, err := worker.NewManager("pool", logger, cfg.Workers, cfg.WorkerQueue, cfg.WorkerTimeout)
 	if err != nil {
 		return nil, err
 	}
 
 	c := &DaramjweeCache{
-		Logger:               logger,
-		Tiers:                append([]Store(nil), cfg.Tiers...),
-		Worker:               workerManager,
-		DefaultTimeout:       cfg.DefaultTimeout,
-		ShutdownTimeout:      cfg.ShutdownTimeout,
-		TierPositiveFreshFor: cfg.TierPositiveFreshFor,
-		TierNegativeFreshFor: cfg.TierNegativeFreshFor,
+		Logger:                 logger,
+		Tiers:                  append([]Store(nil), cfg.Tiers...),
+		Worker:                 workerManager,
+		OpTimeout:              cfg.OpTimeout,
+		CloseTimeout:           cfg.CloseTimeout,
+		PositiveFreshness:      cfg.PositiveFreshness,
+		NegativeFreshness:      cfg.NegativeFreshness,
 		TierFreshnessOverrides: cloneTierFreshnessOverrides(cfg.TierFreshnessOverrides),
-		loggingDisabled:      isNoopLogger(logger),
+		loggingDisabled:        isNoopLogger(logger),
 	}
 
-	level.Info(logger).Log("msg", "daramjwee cache initialized", "default_timeout", c.DefaultTimeout)
+	level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", c.OpTimeout)
 	return c, nil
 }
 

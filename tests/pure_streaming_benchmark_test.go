@@ -65,7 +65,7 @@ func BenchmarkCacheGet_MissPartialReadAbort(b *testing.B) {
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	buf := make([]byte, 4*1024)
 
@@ -95,7 +95,7 @@ func BenchmarkCacheGet_MissFirstRead(b *testing.B) {
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	buf := make([]byte, 1)
 	rest := bytes.Repeat([]byte("m"), benchmarkSmallPayload-1)
@@ -139,7 +139,7 @@ func BenchmarkCacheGet_LowerTierFirstRead(b *testing.B) {
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot, cold),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	buf := make([]byte, 1)
 
@@ -171,7 +171,7 @@ func benchmarkHotHitDefaultTTL(b *testing.B, payloadSize int) {
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 
 	runReadAllBenchmark(b, func(i int) (io.ReadCloser, error) {
@@ -187,8 +187,8 @@ func benchmarkHotHitFresh(b *testing.B, payloadSize int) {
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithCache(time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 
 	runReadAllBenchmark(b, func(i int) (io.ReadCloser, error) {
@@ -204,9 +204,11 @@ func benchmarkHotHitStale(b *testing.B, payloadSize int) {
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithCache(time.Nanosecond),
-		daramjwee.WithWorker("pool", 1, 1_000_000, time.Second),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Nanosecond, 0),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(1_000_000),
+		daramjwee.WithWorkerTimeout(time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
 
@@ -223,7 +225,7 @@ func benchmarkLowerTierHitStreamThrough(b *testing.B, payloadSize int) {
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot, cold),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 
 	b.ReportAllocs()
@@ -253,7 +255,7 @@ func benchmarkMissStreamThrough(b *testing.B, payloadSize int) {
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 
 	b.ReportAllocs()
@@ -287,7 +289,7 @@ func benchmarkMissStreamThroughWithFixtures(b *testing.B, payload []byte, hot da
 	cache := mustNewBenchmarkCache(
 		b,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 
 	var (

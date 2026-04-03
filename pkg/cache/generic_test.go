@@ -32,8 +32,8 @@ func createTestCache() (daramjwee.Cache, error) {
 	return daramjwee.New(
 		logger,
 		daramjwee.WithTiers(memStore),
-		daramjwee.WithDefaultTimeout(10*time.Second),
-		daramjwee.WithCache(1*time.Minute),
+		daramjwee.WithOpTimeout(10*time.Second),
+		daramjwee.WithFreshness(1*time.Minute, 0),
 	)
 }
 
@@ -44,9 +44,8 @@ func createZeroTTLTestCache() (daramjwee.Cache, error) {
 	return daramjwee.New(
 		logger,
 		daramjwee.WithTiers(memStore),
-		daramjwee.WithDefaultTimeout(10*time.Second),
-		daramjwee.WithCache(0),
-		daramjwee.WithNegativeCache(time.Minute),
+		daramjwee.WithOpTimeout(10*time.Second),
+		daramjwee.WithFreshness(0, time.Minute),
 	)
 }
 

@@ -19,16 +19,16 @@ var ErrBackgroundJobRejected = errors.New("daramjwee: background job rejected")
 
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
-	Tiers                []Store
-	Logger               log.Logger
-	Worker               *worker.Manager
-	DefaultTimeout       time.Duration
-	ShutdownTimeout      time.Duration
-	TierPositiveFreshFor time.Duration
-	TierNegativeFreshFor time.Duration
+	Tiers                  []Store
+	Logger                 log.Logger
+	Worker                 *worker.Manager
+	OpTimeout              time.Duration
+	CloseTimeout           time.Duration
+	PositiveFreshness      time.Duration
+	NegativeFreshness      time.Duration
 	TierFreshnessOverrides map[int]TierFreshnessOverride
-	loggingDisabled      bool
-	isClosed             atomic.Bool
+	loggingDisabled        bool
+	isClosed               atomic.Bool
 }
 
 var _ Cache = (*DaramjweeCache)(nil)
@@ -232,8 +232,8 @@ func (c *DaramjweeCache) isCachedStale(oldMeta *Metadata, positive, negative tim
 }
 
 func (c *DaramjweeCache) tierFreshness(index int) (time.Duration, time.Duration) {
-	positive := c.TierPositiveFreshFor
-	negative := c.TierNegativeFreshFor
+	positive := c.PositiveFreshness
+	negative := c.NegativeFreshness
 
 	override, ok := c.TierFreshnessOverrides[index]
 	if !ok {
@@ -262,7 +262,7 @@ func (c *DaramjweeCache) Close() {
 
 	if c.Worker != nil {
 		c.infoLog("msg", "shutting down daramjwee cache")
-		if err := c.Worker.Shutdown(c.ShutdownTimeout); err != nil {
+		if err := c.Worker.Shutdown(c.CloseTimeout); err != nil {
 			c.errorLog("msg", "graceful shutdown failed", "err", err)
 		} else {
 			c.infoLog("msg", "daramjwee cache shutdown complete")
@@ -554,12 +554,12 @@ func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Contex
 	return nil, ErrNotFound
 }
 
-// newCtxWithTimeout applies the default timeout to the context if no deadline is set.
+// newCtxWithTimeout applies the operation timeout to the context if no deadline is set.
 func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, c.DefaultTimeout)
+	return context.WithTimeout(ctx, c.OpTimeout)
 }
 
 func usesContextAfterGetStream(store Store) bool {

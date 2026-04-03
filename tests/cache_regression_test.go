@@ -22,8 +22,10 @@ func TestScheduleRefresh_ReturnsErrorWhenWorkerQueueIsFull(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, cold),
-		daramjwee.WithDefaultTimeout(2*time.Second),
-		daramjwee.WithWorker("pool", 1, 1, 5*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(1),
+		daramjwee.WithWorkerTimeout(5*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -53,8 +55,8 @@ func TestScheduleRefresh_PersistsToColdWhenColdEntryIsMissing(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, cold),
-		daramjwee.WithDefaultTimeout(2*time.Second),
-		daramjwee.WithTierFreshness(time.Hour, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, 0),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -87,7 +89,7 @@ func TestScheduleRefresh_DoesNotPublishPartialDataOnCopyFailure(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -130,9 +132,11 @@ func TestScheduleRefresh_WithoutColdStoreDoesNotPanicWorker(t *testing.T) {
 	cache, err := daramjwee.New(
 		logger,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithDefaultTimeout(2*time.Second),
-		daramjwee.WithCache(time.Minute),
-		daramjwee.WithWorker("pool", 1, 4, 2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Minute, 0),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 
@@ -160,8 +164,10 @@ func TestScheduleRefresh_ContinuesAfterCallerContextCancel(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot),
-		daramjwee.WithDefaultTimeout(2*time.Second),
-		daramjwee.WithWorker("pool", 1, 4, 2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()

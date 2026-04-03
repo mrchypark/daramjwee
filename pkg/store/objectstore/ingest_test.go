@@ -21,7 +21,7 @@ func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -51,7 +51,7 @@ func TestStore_AbortLeavesNoVisibleLocalEntry(t *testing.T) {
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -73,7 +73,7 @@ func TestStore_ReopenRecoversPublishedLocalEntries(t *testing.T) {
 	store := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -86,7 +86,7 @@ func TestStore_ReopenRecoversPublishedLocalEntries(t *testing.T) {
 	reopened := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	reopened.autoFlush = false
 
@@ -106,7 +106,7 @@ func TestStore_MissingLocalSegmentDoesNotRemainVisible(t *testing.T) {
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -135,7 +135,7 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 	store := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -163,7 +163,7 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 	reopened := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	reopened.autoFlush = false
 	_, reopenErr := reopened.Stat(ctx, "missing-segment-remote-fallback")
@@ -177,7 +177,7 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 	store := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -224,7 +224,7 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 	reopened := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	reopened.autoFlush = false
 
@@ -244,7 +244,7 @@ func TestStore_OverwriteRemovesPreviousPublishedLocalSegment(t *testing.T) {
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -271,7 +271,7 @@ func TestStore_FlushUpdateSkipsKeyWhenNewerLocalEntryWasPublished(t *testing.T) 
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -319,7 +319,7 @@ func TestStore_DeleteRemovesPublishedLocalSegment(t *testing.T) {
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -342,7 +342,7 @@ func TestStore_OverwriteDefersPreviousSegmentRemovalUntilReaderCloses(t *testing
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -395,7 +395,7 @@ func TestStore_DeleteDefersSegmentRemovalUntilReaderCloses(t *testing.T) {
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -435,7 +435,7 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	store := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -452,7 +452,7 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	reopened := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	reopened.autoFlush = false
 	require.NoError(t, reopened.ensureReady())
@@ -477,7 +477,7 @@ func TestStore_ReopenFailsWhenRecoveryCannotPersistCatalogRepair(t *testing.T) {
 	store := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 
@@ -501,7 +501,7 @@ func TestStore_ReopenFailsWhenRecoveryCannotPersistCatalogRepair(t *testing.T) {
 	reopened := New(
 		bucket,
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 
 	_, err = reopened.Stat(ctx, "recover-failure")
@@ -515,7 +515,7 @@ func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithDataDir(dataDir),
+		WithDir(dataDir),
 	)
 	store.autoFlush = false
 

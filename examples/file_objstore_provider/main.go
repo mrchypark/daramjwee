@@ -72,13 +72,13 @@ func main() {
 	tier1Store := objectstore.New(
 		gcsClient,
 		log.With(logger, "tier", "1"),
-		objectstore.WithDataDir(filepath.Join(tier1DataDir, "workspace")),
+		objectstore.WithDir(filepath.Join(tier1DataDir, "workspace")),
 		objectstore.WithPrefix("examples/file-objstore-provider"),
-		objectstore.WithPackedObjectThreshold(1<<20),
+		objectstore.WithPackThreshold(1<<20),
 		objectstore.WithPageSize(256<<10),
-		objectstore.WithMemoryBlockCache(64<<20),
-		objectstore.WithMemoryCheckpointCache(16<<20),
-		objectstore.WithCheckpointCacheTTL(2*time.Second),
+		objectstore.WithBlockCache(64<<20),
+		objectstore.WithCheckpointCache(16<<20),
+		objectstore.WithCheckpointTTL(2*time.Second),
 	)
 	logger.Log(
 		"level", "info",

@@ -23,7 +23,7 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
   * **Robust Storage Backends (`Store`):**
 
-      * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyAndTruncate`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**, and it is not supported as a top-tier (tier 0) store due to limitations with the stream-through publish contract.
+      * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyWrite`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**, and it is not supported as a top-tier (tier 0) store due to limitations with the stream-through publish contract.
       * **`MemStore`**: A thread-safe, high-throughput in-memory store with fully integrated capacity-based eviction logic. Its performance is optimized using `sync.Pool` to reduce memory allocations under high concurrency.
       * **`objectstore`**: A first-party `Store` for `thanos-io/objstore` providers (S3, GCS, Azure Blob Storage). It is designed for cost-efficient durable caching, especially when object count and large-object read cost matter, while still fitting into the same ordered-tier cache model as the other backends. Its local `dataDir` is an ingest/catalog workspace, not a persistent local read-cache tier. If you want durable remote backing plus local file-cache hits, place `FileStore` ahead of `objectstore` in `WithTiers(...)`. In distributed deployments, concurrent writes to the same key are still last-writer-wins unless you coordinate writers externally.
 
@@ -161,11 +161,10 @@ func main() {
 	cache, err := daramjwee.New(
 		logger,
 		daramjwee.WithTiers(tier0Store),
-		daramjwee.WithDefaultTimeout(5*time.Second),
-		// These configure the default freshness for the ordered tier chain.
-		daramjwee.WithCache(1*time.Minute),
-		daramjwee.WithNegativeCache(30*time.Second),
-		daramjwee.WithShutdownTimeout(10*time.Second),
+		daramjwee.WithOpTimeout(5*time.Second),
+		// This configures the default freshness for the ordered tier chain.
+		daramjwee.WithFreshness(1*time.Minute, 30*time.Second),
+		daramjwee.WithCloseTimeout(10*time.Second),
 	)
 	if err != nil {
 		panic(err)
@@ -202,7 +201,7 @@ http.ListenAndServe(":8080", nil)
 
 ## Freshness Configuration
 
-`WithTierFreshness(...)`, `WithCache(...)`, and `WithNegativeCache(...)` define the
+`WithFreshness(...)` defines the
 chain-wide default freshness policy for ordered tiers.
 
 If a specific tier needs a different window, override just that tier index:
@@ -211,9 +210,9 @@ If a specific tier needs a different window, override just that tier index:
 cache, err := daramjwee.New(
     logger,
     daramjwee.WithTiers(memTier, fileTier, objectTier),
-    daramjwee.WithTierFreshness(30*time.Second, 5*time.Second),
-    daramjwee.WithTierPositiveFreshness(1, 5*time.Minute),
-    daramjwee.WithTierNegativeFreshness(2, time.Minute),
+    daramjwee.WithFreshness(30*time.Second, 5*time.Second),
+    daramjwee.WithTierFreshness(1, 5*time.Minute, 5*time.Second),
+    daramjwee.WithTierFreshness(2, 30*time.Second, time.Minute),
 )
 ```
 
@@ -226,7 +225,7 @@ Tier indexes follow the order passed to `WithTiers(...)`.
 - `daramjwee.WithTiers(...)` decides where `objectstore` sits in the ordered tier chain.
 - `objectstore.With...(...)` options tune how the backend stores and reads remote objects.
 
-The most important design point is that `objectstore.WithDataDir(...)` is **not** a user-visible file-cache tier. It stores local catalog state and flush spool data so the backend can stream writes efficiently to remote object storage. If the pod restarts with an empty directory, already-flushed remote entries can still be served from the remote checkpoint/segment state. If you want local filesystem read-cache behavior after restart, put `FileStore` in front of `objectstore`.
+The most important design point is that `objectstore.WithDir(...)` is **not** a user-visible file-cache tier. It stores local catalog state and flush spool data so the backend can stream writes efficiently to remote object storage. If the pod restarts with an empty directory, already-flushed remote entries can still be served from the remote checkpoint/segment state. If you want local filesystem read-cache behavior after restart, put `FileStore` in front of `objectstore`.
 
 Typical ordered-tier layout:
 
@@ -238,13 +237,13 @@ cache, err := daramjwee.New(
         objectstore.New(
             bucket,
             log.With(logger, "tier", "1"),
-            objectstore.WithDataDir("/var/lib/daramjwee/objectstore"),
+            objectstore.WithDir("/var/lib/daramjwee/objectstore"),
             objectstore.WithPrefix("prod/api-cache"),
-            objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
+            objectstore.WithPackThreshold(1<<20), // 1 MiB
             objectstore.WithPageSize(256<<10),            // 256 KiB
-            objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
-            objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
-            objectstore.WithCheckpointCacheTTL(2*time.Second),
+            objectstore.WithBlockCache(64<<20),     // 64 MiB
+            objectstore.WithCheckpointCache(16<<20), // 16 MiB
+            objectstore.WithCheckpointTTL(2*time.Second),
         ),
     ),
 )
@@ -252,19 +251,19 @@ cache, err := daramjwee.New(
 
 Recommended starting points:
 
-- `WithPackedObjectThreshold(...)`
+- `WithPackThreshold(...)`
   - The main cost/performance knob for current `objectstore`.
   - Smaller than the threshold: packed into shared remote segment objects.
   - Larger than the threshold: uploaded as direct remote blobs.
   - Start with `512 KiB ~ 1 MiB` for `objectstore`-only tiers.
   - Start with `1 MiB ~ 2 MiB` when `FileStore` is in front and absorbs most hot reads.
-- `WithDataDir(...)`
+- `WithDir(...)`
   - Local ingest/catalog workspace for the backend.
-- `WithMemoryBlockCache(...)`
+- `WithBlockCache(...)`
   - In-process payload block cache for packed remote reads.
-- `WithMemoryCheckpointCache(...)`
+- `WithCheckpointCache(...)`
   - In-process metadata cache for decoded shard checkpoints such as `latest.json`.
-- `WithCheckpointCacheTTL(...)`
+- `WithCheckpointTTL(...)`
   - Freshness window for the checkpoint metadata cache.
 
 See [pkg/store/objectstore/README.md](pkg/store/objectstore/README.md) for a more detailed explanation of each option and suggested presets.

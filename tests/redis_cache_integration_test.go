@@ -25,8 +25,8 @@ func TestCache_Get_WithRedisHotStore_KeepsStreamUsable(t *testing.T) {
 	cache, err := daramjwee.New(
 		log.NewNopLogger(),
 		daramjwee.WithTiers(redisstore.New(client, log.NewNopLogger())),
-		daramjwee.WithDefaultTimeout(2*time.Second),
-		daramjwee.WithCache(1*time.Minute),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(1*time.Minute, 0),
 	)
 	require.NoError(t, err)
 	defer cache.Close()

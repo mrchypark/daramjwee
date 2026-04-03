@@ -53,7 +53,7 @@ func benchmarkFileStorePolicy(b *testing.B, policyName string, pol daramjwee.Evi
 			tempDir,
 			logger,
 			filestore.WithCapacity(10*1024*1024), // 10MB capacity to avoid frequent evictions
-			filestore.WithEvictionPolicy(pol),
+			filestore.WithEviction(pol),
 		)
 	} else {
 		store, err = filestore.New(tempDir, logger)
@@ -131,7 +131,7 @@ func benchmarkMixedWorkload(b *testing.B, policyName string, pol daramjwee.Evict
 		tempDir,
 		logger,
 		filestore.WithCapacity(5*1024*1024), // 5MB capacity for moderate eviction
-		filestore.WithEvictionPolicy(pol),
+		filestore.WithEviction(pol),
 	)
 	if err != nil {
 		b.Fatalf("Failed to create file store: %v", err)
