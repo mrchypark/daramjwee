@@ -19,26 +19,26 @@ func (c *DaramjweeCache) debugLog(keyvals ...any) {
 	if c.loggingDisabled {
 		return
 	}
-	_ = level.Debug(c.logger).Log(keyvals...)
+	_ = level.Debug(c.Logger).Log(keyvals...)
 }
 
 func (c *DaramjweeCache) infoLog(keyvals ...any) {
 	if c.loggingDisabled {
 		return
 	}
-	_ = level.Info(c.logger).Log(keyvals...)
+	_ = level.Info(c.Logger).Log(keyvals...)
 }
 
 func (c *DaramjweeCache) warnLog(keyvals ...any) {
 	if c.loggingDisabled {
 		return
 	}
-	_ = level.Warn(c.logger).Log(keyvals...)
+	_ = level.Warn(c.Logger).Log(keyvals...)
 }
 
 func (c *DaramjweeCache) errorLog(keyvals ...any) {
 	if c.loggingDisabled {
 		return
 	}
-	_ = level.Error(c.logger).Log(keyvals...)
+	_ = level.Error(c.Logger).Log(keyvals...)
 }

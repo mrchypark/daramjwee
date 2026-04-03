@@ -19,14 +19,14 @@ var ErrBackgroundJobRejected = errors.New("daramjwee: background job rejected")
 
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
-	tiers                  []Store
-	logger                 log.Logger
-	worker                 *worker.Manager
-	opTimeout              time.Duration
-	closeTimeout           time.Duration
-	positiveFreshness      time.Duration
-	negativeFreshness      time.Duration
-	tierFreshnessOverrides map[int]TierFreshnessOverride
+	Tiers                  []Store
+	Logger                 log.Logger
+	Worker                 *worker.Manager
+	OpTimeout              time.Duration
+	CloseTimeout           time.Duration
+	PositiveFreshness      time.Duration
+	NegativeFreshness      time.Duration
+	TierFreshnessOverrides map[int]TierFreshnessOverride
 	loggingDisabled        bool
 	isClosed               atomic.Bool
 }
@@ -44,7 +44,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, fetcher Fetcher) (
 	}
 	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 
-	for i, tier := range c.tiers {
+	for i, tier := range c.Tiers {
 		tierStream, tierMeta, err := c.getStreamFromStore(c.getStreamContextForStore(ctx, setupCtx, tier), tier, key)
 		if err == nil {
 			if i == 0 {
@@ -115,7 +115,7 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 
 	var firstErr error
 
-	for i, tier := range c.tiers {
+	for i, tier := range c.Tiers {
 		if err := c.deleteFromStore(ctx, tier, key); err != nil && !errors.Is(err, ErrNotFound) {
 			c.errorLog("msg", "failed to delete from tier", "key", key, "tier_index", i, "err", err)
 			if firstErr == nil {
@@ -145,7 +145,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 	default:
 	}
 
-	if c.worker == nil {
+	if c.Worker == nil {
 		return errors.New("worker is not configured, cannot schedule refresh")
 	}
 
@@ -209,7 +209,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		}
 	}
 
-	if !c.worker.Submit(job) {
+	if !c.Worker.Submit(job) {
 		return ErrBackgroundJobRejected
 	}
 	return nil
@@ -232,9 +232,9 @@ func (c *DaramjweeCache) isCachedStale(oldMeta *Metadata, positive, negative tim
 }
 
 func (c *DaramjweeCache) tierFreshness(index int) (time.Duration, time.Duration) {
-	override, ok := c.tierFreshnessOverrides[index]
+	override, ok := c.TierFreshnessOverrides[index]
 	if !ok {
-		return c.positiveFreshness, c.negativeFreshness
+		return c.PositiveFreshness, c.NegativeFreshness
 	}
 	return override.Positive, override.Negative
 }
@@ -251,9 +251,9 @@ func (c *DaramjweeCache) Close() {
 		return
 	}
 
-	if c.worker != nil {
+	if c.Worker != nil {
 		c.infoLog("msg", "shutting down daramjwee cache")
-		if err := c.worker.Shutdown(c.closeTimeout); err != nil {
+		if err := c.Worker.Shutdown(c.CloseTimeout); err != nil {
 			c.errorLog("msg", "graceful shutdown failed", "err", err)
 		} else {
 			c.infoLog("msg", "daramjwee cache shutdown complete")
@@ -295,7 +295,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 
 	if c.isTierCachedStale(meta, tierIndex) {
 		c.debugLog("msg", "lower tier is stale, serving stale and scheduling refresh", "key", key, "tier_index", tierIndex)
-		streamCloser := newSafeCloser(src, c.lowerTierRefreshOnCloseCallback(key, fetcher, cancel, meta, tierDestination{tierIndex: tierIndex, store: c.tiers[tierIndex]}))
+		streamCloser := newSafeCloser(src, c.lowerTierRefreshOnCloseCallback(key, fetcher, cancel, meta, tierDestination{tierIndex: tierIndex, store: c.Tiers[tierIndex]}))
 		if meta.IsNegative {
 			streamCloser.Close()
 			return nil, ErrNotFound
@@ -552,7 +552,7 @@ func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, c.opTimeout)
+	return context.WithTimeout(ctx, c.OpTimeout)
 }
 
 func usesContextAfterGetStream(store Store) bool {
@@ -636,10 +636,10 @@ func hasRealStore(store Store) bool {
 }
 
 func (c *DaramjweeCache) topWriteStore() Store {
-	if len(c.tiers) == 0 {
+	if len(c.Tiers) == 0 {
 		return nil
 	}
-	return c.tiers[0]
+	return c.Tiers[0]
 }
 
 type tierDestination struct {
@@ -648,12 +648,12 @@ type tierDestination struct {
 }
 
 func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {
-	if len(c.tiers) <= 1 {
+	if len(c.Tiers) <= 1 {
 		return nil
 	}
 
-	dests := make([]tierDestination, 0, len(c.tiers)-1)
-	for idx, tier := range c.tiers[1:] {
+	dests := make([]tierDestination, 0, len(c.Tiers)-1)
+	for idx, tier := range c.Tiers[1:] {
 		if hasRealStore(tier) {
 			dests = append(dests, tierDestination{tierIndex: idx + 1, store: tier})
 		}
@@ -667,7 +667,7 @@ func (c *DaramjweeCache) regularFanoutDestinations(sourceIndex int) []tierDestin
 	}
 
 	dests := make([]tierDestination, 0, sourceIndex-1)
-	for idx, tier := range c.tiers[1:sourceIndex] {
+	for idx, tier := range c.Tiers[1:sourceIndex] {
 		if hasRealStore(tier) {
 			dests = append(dests, tierDestination{tierIndex: idx + 1, store: tier})
 		}
@@ -680,7 +680,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(key string, destinations ...tier
 	if !hasRealStore(srcStore) || len(destinations) == 0 {
 		return
 	}
-	if c.worker == nil {
+	if c.Worker == nil {
 		c.warnLog("msg", "worker is not configured, cannot schedule persistence", "key", key)
 		return
 	}
@@ -724,7 +724,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(key string, destinations ...tier
 			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
 		}
 
-		if !c.worker.Submit(job) {
+		if !c.Worker.Submit(job) {
 			c.warnLog("msg", "background set rejected", "key", key, "dest_tier", destTierIndex)
 		}
 	}

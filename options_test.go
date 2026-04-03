@@ -273,7 +273,7 @@ func TestNew_WithWorkerStrategyAllUsesAllStrategy(t *testing.T) {
 	typedCache := cache.(*DaramjweeCache)
 	t.Cleanup(typedCache.Close)
 
-	strategyField := reflect.ValueOf(typedCache.worker).Elem().FieldByName("strategy")
+	strategyField := reflect.ValueOf(typedCache.Worker).Elem().FieldByName("strategy")
 	require.True(t, strategyField.IsValid())
 	require.False(t, strategyField.IsNil())
 
