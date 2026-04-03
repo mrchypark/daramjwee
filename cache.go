@@ -304,7 +304,8 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 	}
 
 	if meta.IsNegative {
-		writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, c.tiers[0]), c.tiers[0], key, metaToPromote)
+		target := c.topWriteStore()
+		writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, target), target, key, metaToPromote)
 		if err != nil {
 			c.warnLog("msg", "failed to acquire top-tier sink for negative promotion", "key", key, "err", err)
 			_ = src.Close()
@@ -326,7 +327,8 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 		return nil, ErrNotFound
 	}
 
-	writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, c.tiers[0]), c.tiers[0], key, metaToPromote)
+	target := c.topWriteStore()
+	writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, target), target, key, metaToPromote)
 	if err != nil {
 		c.warnLog("msg", "failed to acquire top-tier sink for promotion", "key", key, "err", err)
 		return newCancelOnCloseReadCloser(src, cancel), nil
