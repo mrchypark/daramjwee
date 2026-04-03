@@ -121,11 +121,8 @@ func WithCloseTimeout(timeout time.Duration) Option {
 // entries to be considered stale immediately.
 func WithFreshness(positive, negative time.Duration) Option {
 	return func(cfg *Config) error {
-		if positive < 0 {
-			return &ConfigError{"positive freshness cannot be a negative value"}
-		}
-		if negative < 0 {
-			return &ConfigError{"negative freshness cannot be a negative value"}
+		if err := validateFreshness(positive, negative); err != nil {
+			return err
 		}
 		cfg.PositiveFreshness = positive
 		cfg.NegativeFreshness = negative
@@ -141,11 +138,8 @@ func WithTierFreshness(index int, positive, negative time.Duration) Option {
 		if index < 0 {
 			return &ConfigError{"tier index cannot be negative"}
 		}
-		if positive < 0 {
-			return &ConfigError{"positive freshness cannot be a negative value"}
-		}
-		if negative < 0 {
-			return &ConfigError{"negative freshness cannot be a negative value"}
+		if err := validateFreshness(positive, negative); err != nil {
+			return err
 		}
 		if cfg.TierFreshnessOverrides == nil {
 			cfg.TierFreshnessOverrides = make(map[int]TierFreshnessOverride)
@@ -156,4 +150,14 @@ func WithTierFreshness(index int, positive, negative time.Duration) Option {
 		}
 		return nil
 	}
+}
+
+func validateFreshness(positive, negative time.Duration) error {
+	if positive < 0 {
+		return &ConfigError{"positive freshness cannot be a negative value"}
+	}
+	if negative < 0 {
+		return &ConfigError{"negative freshness cannot be a negative value"}
+	}
+	return nil
 }
