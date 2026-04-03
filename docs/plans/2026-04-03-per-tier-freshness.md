@@ -2,9 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+**Status:** Superseded by `2026-04-03-option-naming-redesign.md`. This plan reflects the first implementation pass; the final public API on this branch uses `WithFreshness(...)` plus `WithTierFreshness(index, ...)`.
+
 **Goal:** Add per-tier freshness overrides on top of the current chain-wide freshness defaults.
 
-**Architecture:** Keep the ordered `n-tier` cache API unchanged and preserve `WithTierFreshness(...)` as the default. Add two opt-in override options keyed by tier index, then route stale checks through a tier-aware freshness resolver so tier 0 and lower-tier reads can use different positive and negative windows.
+**Architecture:** Keep the ordered `n-tier` cache API and route stale checks through a tier-aware freshness resolver so tier 0 and lower-tier reads can use different positive and negative windows. The later naming redesign collapsed the final public API to `WithFreshness(...)` for chain defaults and `WithTierFreshness(index, ...)` for tier-specific overrides.
 
 **Tech Stack:** Go, testify, existing ordered-tier cache orchestration and option parsing.
 
@@ -19,13 +21,13 @@
 
 Add tests covering:
 
-- `WithTierPositiveFreshness(1, -time.Second)` rejects with a config error
-- `WithTierNegativeFreshness(1, -time.Second)` rejects with a config error
+- `WithTierFreshness(1, -time.Second, time.Second)` rejects with a config error
+- `WithTierFreshness(1, time.Second, -time.Second)` rejects with a config error
 - applying per-tier overrides stores the values on config/cache state
 
 **Step 2: Run test to verify it fails**
 
-Run: `go test ./... -run 'TestWithTier(Positive|Negative)Freshness|TestOptions_PerTierFreshnessOverrides'`
+Run: `go test ./... -run 'TestNew_OptionValidation|TestOptionOverrides'`
 
 Expected: FAIL because the new options and state do not exist yet.
 
@@ -34,11 +36,11 @@ Expected: FAIL because the new options and state do not exist yet.
 Implement:
 
 - per-tier override fields in config
-- the two new option helpers with validation
+- the tier-specific override helper with validation
 
 **Step 4: Run test to verify it passes**
 
-Run: `go test ./... -run 'TestWithTier(Positive|Negative)Freshness|TestOptions_PerTierFreshnessOverrides'`
+Run: `go test ./... -run 'TestNew_OptionValidation|TestOptionOverrides'`
 
 Expected: PASS
 
@@ -82,13 +84,13 @@ Expected: PASS
 
 Document:
 
-- chain-wide default freshness
-- per-tier positive/negative overrides
+- chain-wide default freshness via `WithFreshness(...)`
+- per-tier overrides via `WithTierFreshness(index, ...)`
 - tier index mapping to `WithTiers(...)`
 
 **Step 2: Run focused verification**
 
-Run: `go test ./... -run 'TestWithTier(Positive|Negative)Freshness|TestOptions_PerTierFreshnessOverrides|TestCache_Get_LowerTier(Positive|Negative)FreshnessOverride'`
+Run: `go test ./... -run 'TestNew_OptionValidation|TestOptionOverrides|TestCache_Get_LowerTier(Positive|Negative)FreshnessOverride'`
 
 Expected: PASS
 

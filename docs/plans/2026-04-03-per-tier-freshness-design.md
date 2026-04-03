@@ -2,6 +2,8 @@
 
 **Date:** 2026-04-03
 
+**Status:** Superseded by `2026-04-03-option-naming-redesign-design.md`. This document captures the first per-tier freshness design pass; the final public API on this branch is the renamed option surface.
+
 ## Goal
 
 Keep the ordered `n-tier` cache model from `v0.4.x`, but allow selected tiers to override the default positive and negative freshness policy.
@@ -10,7 +12,7 @@ Keep the ordered `n-tier` cache model from `v0.4.x`, but allow selected tiers to
 
 Current `v0.4.x` freshness is chain-wide:
 
-- `WithTierFreshness(positive, negative)` sets one default for every tier.
+- `WithFreshness(positive, negative)` sets one default for every tier.
 - `cache.go` uses the same stale check for tier 0 hits, lower-tier hits, and refresh scheduling.
 
 This is too coarse for mixed layouts such as:
@@ -25,8 +27,6 @@ Those tiers often need different staleness windows even though they all particip
 
 - Preserve the existing `n-tier` public model.
 - Preserve current behavior when no overrides are configured.
-- Allow overriding positive freshness without forcing a negative override.
-- Allow overriding negative freshness without forcing a positive override.
 - Resolve freshness by tier index because cache orchestration already reasons about tier positions.
 
 ## Rejected Approaches
@@ -49,25 +49,17 @@ Keep chain-wide defaults and add per-tier overrides.
 
 ### Public API
 
-Keep:
+Final API on this branch:
 
 ```go
-func WithTierFreshness(positive, negative time.Duration) Option
-func WithCache(freshFor time.Duration) Option
-func WithNegativeCache(freshFor time.Duration) Option
-```
-
-Add:
-
-```go
-func WithTierPositiveFreshness(index int, freshFor time.Duration) Option
-func WithTierNegativeFreshness(index int, freshFor time.Duration) Option
+func WithFreshness(positive, negative time.Duration) Option
+func WithTierFreshness(index int, positive, negative time.Duration) Option
 ```
 
 Rationale:
 
-- callers can override only the positive path
-- callers can override only the negative path
+- one short option sets the chain default
+- one short option overrides a specific tier
 - defaults remain concise
 - option composition stays predictable
 
@@ -79,16 +71,15 @@ Example shape:
 
 ```go
 type TierFreshnessOverride struct {
-	Positive *time.Duration
-	Negative *time.Duration
+	Positive time.Duration
+	Negative time.Duration
 }
 ```
 
 The cache resolves effective freshness as:
 
 1. start from chain-wide default
-2. apply per-tier positive override if present
-3. apply per-tier negative override if present
+2. replace both freshness values when a tier-specific override exists
 
 ## Cache Flow Changes
 
@@ -114,9 +105,9 @@ That resolver will be used in:
 
 ## Backward Compatibility
 
-- No override configured: behavior remains identical to current `v0.4.x`.
-- Existing callers using `WithCache`, `WithNegativeCache`, or `WithTierFreshness` continue to work unchanged.
-- Existing tests should keep passing unless they assert exact option internals.
+- No override configured: behavior remains identical to the chain-default freshness model.
+- The later naming redesign intentionally removed the earlier `WithCache` / `WithNegativeCache` naming in favor of `WithFreshness`.
+- The historical partial-override proposal in this document was not carried into the final renamed API.
 
 ## Testing
 
@@ -131,6 +122,6 @@ Add coverage for:
 
 Update README to clarify:
 
-- `WithTierFreshness(...)` is the chain-wide default
-- `WithTierPositiveFreshness(...)` and `WithTierNegativeFreshness(...)` are selective overrides
+- `WithFreshness(...)` is the chain-wide default
+- `WithTierFreshness(...)` overrides a specific tier
 - per-tier overrides are indexed by tier position in `WithTiers(...)`

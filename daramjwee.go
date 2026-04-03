@@ -237,14 +237,7 @@ func cloneTierFreshnessOverrides(src map[int]TierFreshnessOverride) map[int]Tier
 
 	cloned := make(map[int]TierFreshnessOverride, len(src))
 	for index, override := range src {
-		copied := TierFreshnessOverride{}
-		if override.Positive != nil {
-			copied.Positive = durationPtr(*override.Positive)
-		}
-		if override.Negative != nil {
-			copied.Negative = durationPtr(*override.Negative)
-		}
-		cloned[index] = copied
+		cloned[index] = override
 	}
 	return cloned
 }

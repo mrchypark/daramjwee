@@ -243,8 +243,8 @@ func TestOptionOverrides(t *testing.T) {
 	assert.Equal(t, 30*time.Minute, cfg.PositiveFreshness)
 	assert.Equal(t, 40*time.Minute, cfg.NegativeFreshness)
 	require.Len(t, cfg.TierFreshnessOverrides, 2)
-	require.NotNil(t, cfg.TierFreshnessOverrides[1].Positive)
-	require.NotNil(t, cfg.TierFreshnessOverrides[2].Negative)
-	assert.Equal(t, 50*time.Minute, *cfg.TierFreshnessOverrides[1].Positive)
-	assert.Equal(t, 60*time.Minute, *cfg.TierFreshnessOverrides[2].Negative)
+	assert.Equal(t, 50*time.Minute, cfg.TierFreshnessOverrides[1].Positive)
+	assert.Equal(t, 20*time.Minute, cfg.TierFreshnessOverrides[1].Negative)
+	assert.Equal(t, 30*time.Minute, cfg.TierFreshnessOverrides[2].Positive)
+	assert.Equal(t, 60*time.Minute, cfg.TierFreshnessOverrides[2].Negative)
 }

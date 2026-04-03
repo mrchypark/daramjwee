@@ -89,7 +89,7 @@
 *   **Configuration Options Renamed for Clarity**:
     *   `WithGracePeriod` has been renamed to `WithCache` to more clearly represent its function of setting the freshness lifetime for positive cache entries.
     *   `WithNegativeCache`'s `gracePeriod` parameter is now named `freshFor`.
-*   **New `ShutdownTimeout` Option**: A new `WithCloseTimeout` option has been added to configure the graceful shutdown period for the worker manager.
+*   **New `CloseTimeout` Option**: A new `WithCloseTimeout` option has been added to configure the graceful shutdown period for the worker manager.
 *   **Error Handling on Closed Cache**: Calling `Get`, `Set`, or `Delete` on a closed cache instance now immediately returns an `ErrCacheClosed` error, providing clearer feedback.
 
 ### 🐛 Bug Fixes & Refinements

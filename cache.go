@@ -232,20 +232,11 @@ func (c *DaramjweeCache) isCachedStale(oldMeta *Metadata, positive, negative tim
 }
 
 func (c *DaramjweeCache) tierFreshness(index int) (time.Duration, time.Duration) {
-	positive := c.PositiveFreshness
-	negative := c.NegativeFreshness
-
 	override, ok := c.TierFreshnessOverrides[index]
 	if !ok {
-		return positive, negative
+		return c.PositiveFreshness, c.NegativeFreshness
 	}
-	if override.Positive != nil {
-		positive = *override.Positive
-	}
-	if override.Negative != nil {
-		negative = *override.Negative
-	}
-	return positive, negative
+	return override.Positive, override.Negative
 }
 
 func (c *DaramjweeCache) isTierCachedStale(oldMeta *Metadata, index int) bool {

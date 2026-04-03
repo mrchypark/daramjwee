@@ -32,8 +32,8 @@ type Config struct {
 }
 
 type TierFreshnessOverride struct {
-	Positive *time.Duration
-	Negative *time.Duration
+	Positive time.Duration
+	Negative time.Duration
 }
 
 // Option is a function type that modifies the Config.
@@ -131,22 +131,13 @@ func WithTierFreshness(index int, positive, negative time.Duration) Option {
 		if negative < 0 {
 			return &ConfigError{"negative freshness cannot be a negative value"}
 		}
-		override := cfg.getOrCreateTierFreshnessOverride(index)
-		override.Positive = durationPtr(positive)
-		override.Negative = durationPtr(negative)
-		cfg.TierFreshnessOverrides[index] = override
+		if cfg.TierFreshnessOverrides == nil {
+			cfg.TierFreshnessOverrides = make(map[int]TierFreshnessOverride)
+		}
+		cfg.TierFreshnessOverrides[index] = TierFreshnessOverride{
+			Positive: positive,
+			Negative: negative,
+		}
 		return nil
 	}
-}
-
-func (cfg *Config) getOrCreateTierFreshnessOverride(index int) TierFreshnessOverride {
-	if cfg.TierFreshnessOverrides == nil {
-		cfg.TierFreshnessOverrides = make(map[int]TierFreshnessOverride)
-	}
-	return cfg.TierFreshnessOverrides[index]
-}
-
-func durationPtr(value time.Duration) *time.Duration {
-	v := value
-	return &v
 }
