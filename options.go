@@ -51,7 +51,7 @@ func WithTiers(stores ...Store) Option {
 func WithWorkers(count int) Option {
 	return func(cfg *Config) error {
 		if count <= 0 {
-			return &ConfigError{"worker pool size must be positive"}
+			return &ConfigError{"worker count must be positive"}
 		}
 		cfg.Workers = count
 		return nil

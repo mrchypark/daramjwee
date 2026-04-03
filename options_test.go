@@ -172,7 +172,7 @@ func TestNew_OptionValidation(t *testing.T) {
 				WithWorkers(0),
 			},
 			expectErr:   true,
-			expectedMsg: "worker pool size must be positive",
+			expectedMsg: "worker count must be positive",
 		},
 		{
 			name: "failure with non-positive worker queue size",
