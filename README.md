@@ -162,7 +162,7 @@ func main() {
 		logger,
 		daramjwee.WithTiers(tier0Store),
 		daramjwee.WithDefaultTimeout(5*time.Second),
-		// These configure freshness for the regular ordered tiers.
+		// These configure the default freshness for the ordered tier chain.
 		daramjwee.WithCache(1*time.Minute),
 		daramjwee.WithNegativeCache(30*time.Second),
 		daramjwee.WithShutdownTimeout(10*time.Second),
@@ -199,6 +199,25 @@ fmt.Println("Server is running on :8080")
 http.ListenAndServe(":8080", nil)
 }
 ```
+
+## Freshness Configuration
+
+`WithTierFreshness(...)`, `WithCache(...)`, and `WithNegativeCache(...)` define the
+chain-wide default freshness policy for ordered tiers.
+
+If a specific tier needs a different window, override just that tier index:
+
+```go
+cache, err := daramjwee.New(
+    logger,
+    daramjwee.WithTiers(memTier, fileTier, objectTier),
+    daramjwee.WithTierFreshness(30*time.Second, 5*time.Second),
+    daramjwee.WithTierPositiveFreshness(1, 5*time.Minute),
+    daramjwee.WithTierNegativeFreshness(2, time.Minute),
+)
+```
+
+Tier indexes follow the order passed to `WithTiers(...)`.
 
 ## objectstore Configuration
 

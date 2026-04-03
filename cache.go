@@ -26,6 +26,7 @@ type DaramjweeCache struct {
 	ShutdownTimeout      time.Duration
 	TierPositiveFreshFor time.Duration
 	TierNegativeFreshFor time.Duration
+	TierFreshnessOverrides map[int]TierFreshnessOverride
 	loggingDisabled      bool
 	isClosed             atomic.Bool
 }
@@ -230,6 +231,28 @@ func (c *DaramjweeCache) isCachedStale(oldMeta *Metadata, positive, negative tim
 	return time.Now().After(oldMeta.CachedAt.Add(freshnessLifetime))
 }
 
+func (c *DaramjweeCache) tierFreshness(index int) (time.Duration, time.Duration) {
+	positive := c.TierPositiveFreshFor
+	negative := c.TierNegativeFreshFor
+
+	override, ok := c.TierFreshnessOverrides[index]
+	if !ok {
+		return positive, negative
+	}
+	if override.Positive != nil {
+		positive = *override.Positive
+	}
+	if override.Negative != nil {
+		negative = *override.Negative
+	}
+	return positive, negative
+}
+
+func (c *DaramjweeCache) isTierCachedStale(oldMeta *Metadata, index int) bool {
+	positive, negative := c.tierFreshness(index)
+	return c.isCachedStale(oldMeta, positive, negative)
+}
+
 // Close safely shuts down the worker.
 func (c *DaramjweeCache) Close() {
 	if c.isClosed.Swap(true) {
@@ -251,7 +274,7 @@ func (c *DaramjweeCache) Close() {
 func (c *DaramjweeCache) handleTopTierHit(_ context.Context, key string, fetcher Fetcher, stream io.ReadCloser, meta *Metadata, cancel context.CancelFunc) (io.ReadCloser, error) {
 	c.debugLog("msg", "top tier hit", "key", key)
 
-	isStale := c.isCachedStale(meta, c.TierPositiveFreshFor, c.TierNegativeFreshFor)
+	isStale := c.isTierCachedStale(meta, 0)
 
 	callback := func() {
 		cancel()
@@ -279,7 +302,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 		*metaToPromote = *meta
 	}
 
-	if c.isCachedStale(meta, c.TierPositiveFreshFor, c.TierNegativeFreshFor) {
+	if c.isTierCachedStale(meta, tierIndex) {
 		c.debugLog("msg", "lower tier is stale, serving stale and scheduling refresh", "key", key, "tier_index", tierIndex)
 		streamCloser := newSafeCloser(src, c.lowerTierRefreshOnCloseCallback(key, fetcher, cancel, meta, tierDestination{tierIndex: tierIndex, store: c.Tiers[tierIndex]}))
 		if meta.IsNegative {
@@ -417,7 +440,7 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 	if currentMeta == nil {
 		return ErrNilMetadata
 	}
-	if !c.isCachedStale(currentMeta, c.TierPositiveFreshFor, c.TierNegativeFreshFor) {
+	if !c.isTierCachedStale(currentMeta, 0) {
 		return nil
 	}
 	if oldMetadata != nil {
@@ -512,7 +535,8 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 
 // handleNegativeCache processes the logic for storing a negative cache entry.
 func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Context, key string) (io.ReadCloser, error) {
-	c.debugLog("msg", "caching as negative entry", "key", key, "negative_fresh_for", c.TierNegativeFreshFor)
+	_, negativeFreshFor := c.tierFreshness(0)
+	c.debugLog("msg", "caching as negative entry", "key", key, "negative_fresh_for", negativeFreshFor)
 
 	meta := &Metadata{
 		IsNegative: true,

@@ -340,6 +340,78 @@ func TestCache_LowerTierNegativeHitReturnsNotFoundAndPromotesNegativeToTop(t *te
 	assert.True(t, meta.IsNegative)
 }
 
+func TestCache_Get_LowerTierPositiveFreshnessOverride(t *testing.T) {
+	top := newMockStore()
+	lower := newMockStore()
+	lower.setData("override-positive-key", "lower-value", &daramjwee.Metadata{
+		ETag:     "lower-etag",
+		CachedAt: time.Now(),
+	})
+	fetcher := &mockFetcher{content: "origin-value", etag: "origin-etag"}
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithTierFreshness(0, 0),
+		daramjwee.WithTierPositiveFreshness(1, time.Hour),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "override-positive-key", fetcher)
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	assert.Equal(t, "lower-value", string(body))
+
+	reader, meta, err := top.GetStream(context.Background(), "override-positive-key")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	persisted, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "lower-value", string(persisted))
+	assert.Equal(t, "lower-etag", meta.ETag)
+	assert.Zero(t, fetcher.getFetchCount())
+}
+
+func TestCache_Get_LowerTierNegativeFreshnessOverride(t *testing.T) {
+	top := newMockStore()
+	lower := newMockStore()
+	lower.setData("override-negative-key", "", &daramjwee.Metadata{
+		IsNegative: true,
+		CachedAt:   time.Now(),
+	})
+	fetcher := &mockFetcher{content: "origin-value", etag: "origin-etag"}
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithTierFreshness(0, 0),
+		daramjwee.WithTierNegativeFreshness(1, time.Hour),
+		daramjwee.WithDefaultTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(context.Background(), "override-negative-key", fetcher)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	require.Nil(t, stream)
+
+	reader, meta, err := top.GetStream(context.Background(), "override-negative-key")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Empty(t, body)
+	assert.True(t, meta.IsNegative)
+	assert.Zero(t, fetcher.getFetchCount())
+}
+
 func TestCache_Set_WritesToSingleTierConfig(t *testing.T) {
 	tier := newMockStore()
 

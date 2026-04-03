@@ -29,6 +29,12 @@ type Config struct {
 
 	TierPositiveFreshFor time.Duration
 	TierNegativeFreshFor time.Duration
+	TierFreshnessOverrides map[int]TierFreshnessOverride
+}
+
+type TierFreshnessOverride struct {
+	Positive *time.Duration
+	Negative *time.Duration
 }
 
 // Option is a function type that modifies the Config.
@@ -101,6 +107,40 @@ func WithTierFreshness(positive, negative time.Duration) Option {
 	}
 }
 
+// WithTierPositiveFreshness overrides the positive freshness duration for a
+// specific tier index. The configured value overrides the chain-wide default.
+func WithTierPositiveFreshness(index int, freshFor time.Duration) Option {
+	return func(cfg *Config) error {
+		if index < 0 {
+			return &ConfigError{"tier index cannot be negative"}
+		}
+		if freshFor < 0 {
+			return &ConfigError{"tier positive cache TTL cannot be a negative value"}
+		}
+		override := cfg.getOrCreateTierFreshnessOverride(index)
+		override.Positive = durationPtr(freshFor)
+		cfg.TierFreshnessOverrides[index] = override
+		return nil
+	}
+}
+
+// WithTierNegativeFreshness overrides the negative freshness duration for a
+// specific tier index. The configured value overrides the chain-wide default.
+func WithTierNegativeFreshness(index int, freshFor time.Duration) Option {
+	return func(cfg *Config) error {
+		if index < 0 {
+			return &ConfigError{"tier index cannot be negative"}
+		}
+		if freshFor < 0 {
+			return &ConfigError{"tier negative cache TTL cannot be a negative value"}
+		}
+		override := cfg.getOrCreateTierFreshnessOverride(index)
+		override.Negative = durationPtr(freshFor)
+		cfg.TierFreshnessOverrides[index] = override
+		return nil
+	}
+}
+
 // WithCache sets the positive freshness duration across the whole tier chain.
 // If freshFor is 0, the cache entry is considered stale immediately.
 func WithCache(freshFor time.Duration) Option {
@@ -123,4 +163,16 @@ func WithNegativeCache(freshFor time.Duration) Option {
 		cfg.TierNegativeFreshFor = freshFor
 		return nil
 	}
+}
+
+func (cfg *Config) getOrCreateTierFreshnessOverride(index int) TierFreshnessOverride {
+	if cfg.TierFreshnessOverrides == nil {
+		cfg.TierFreshnessOverrides = make(map[int]TierFreshnessOverride)
+	}
+	return cfg.TierFreshnessOverrides[index]
+}
+
+func durationPtr(value time.Duration) *time.Duration {
+	v := value
+	return &v
 }

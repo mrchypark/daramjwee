@@ -134,6 +134,24 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectedMsg: "tier positive cache TTL cannot be a negative value",
 		},
 		{
+			name: "failure with negative per-tier positive freshness",
+			options: []Option{
+				WithTiers(regularA),
+				WithTierPositiveFreshness(1, -time.Second),
+			},
+			expectErr:   true,
+			expectedMsg: "tier positive cache TTL cannot be a negative value",
+		},
+		{
+			name: "failure with negative per-tier negative freshness",
+			options: []Option{
+				WithTiers(regularA),
+				WithTierNegativeFreshness(1, -time.Second),
+			},
+			expectErr:   true,
+			expectedMsg: "tier negative cache TTL cannot be a negative value",
+		},
+		{
 			name: "success with worker and freshness options",
 			options: []Option{
 				WithTiers(regularA, durable),
@@ -218,8 +236,15 @@ func TestOptionOverrides(t *testing.T) {
 	require.NoError(t, WithTierFreshness(10*time.Minute, 20*time.Minute)(&cfg))
 	require.NoError(t, WithCache(30*time.Minute)(&cfg))
 	require.NoError(t, WithNegativeCache(40*time.Minute)(&cfg))
+	require.NoError(t, WithTierPositiveFreshness(1, 50*time.Minute)(&cfg))
+	require.NoError(t, WithTierNegativeFreshness(2, 60*time.Minute)(&cfg))
 
 	assert.Equal(t, 15*time.Second, cfg.DefaultTimeout)
 	assert.Equal(t, 30*time.Minute, cfg.TierPositiveFreshFor)
 	assert.Equal(t, 40*time.Minute, cfg.TierNegativeFreshFor)
+	require.Len(t, cfg.TierFreshnessOverrides, 2)
+	require.NotNil(t, cfg.TierFreshnessOverrides[1].Positive)
+	require.NotNil(t, cfg.TierFreshnessOverrides[2].Negative)
+	assert.Equal(t, 50*time.Minute, *cfg.TierFreshnessOverrides[1].Positive)
+	assert.Equal(t, 60*time.Minute, *cfg.TierFreshnessOverrides[2].Negative)
 }

@@ -195,6 +195,11 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		}
 		seen = append(seen, tier)
 	}
+	for idx := range cfg.TierFreshnessOverrides {
+		if idx >= len(cfg.Tiers) {
+			return nil, &ConfigError{fmt.Sprintf("tier freshness override index %d is out of range", idx)}
+		}
+	}
 
 	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.WorkerPoolSize, cfg.WorkerQueueSize, cfg.WorkerJobTimeout)
 	if err != nil {
@@ -209,6 +214,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		ShutdownTimeout:      cfg.ShutdownTimeout,
 		TierPositiveFreshFor: cfg.TierPositiveFreshFor,
 		TierNegativeFreshFor: cfg.TierNegativeFreshFor,
+		TierFreshnessOverrides: cloneTierFreshnessOverrides(cfg.TierFreshnessOverrides),
 		loggingDisabled:      isNoopLogger(logger),
 	}
 
@@ -223,6 +229,25 @@ func containsSameStore(stores []Store, candidate Store) bool {
 		}
 	}
 	return false
+}
+
+func cloneTierFreshnessOverrides(src map[int]TierFreshnessOverride) map[int]TierFreshnessOverride {
+	if len(src) == 0 {
+		return nil
+	}
+
+	cloned := make(map[int]TierFreshnessOverride, len(src))
+	for index, override := range src {
+		copied := TierFreshnessOverride{}
+		if override.Positive != nil {
+			copied.Positive = durationPtr(*override.Positive)
+		}
+		if override.Negative != nil {
+			copied.Negative = durationPtr(*override.Negative)
+		}
+		cloned[index] = copied
+	}
+	return cloned
 }
 
 func sameStoreInstance(a, b Store) bool {
