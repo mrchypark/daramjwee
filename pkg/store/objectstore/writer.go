@@ -1,7 +1,6 @@
 package objectstore
 
 import (
-	"context"
 	"io"
 	"sync"
 
@@ -9,7 +8,6 @@ import (
 )
 
 type writer struct {
-	ctx     context.Context
 	store   *Store
 	key     string
 	segment interface {
