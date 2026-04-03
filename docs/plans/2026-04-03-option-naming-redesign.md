@@ -25,6 +25,7 @@ Add or update tests to require:
 - `WithTierFreshness(index, positive, negative)`
 - `WithOpTimeout(...)`
 - `WithCloseTimeout(...)`
+- `WithWorkerStrategy(...)`
 - `WithWorkers(...)`
 - `WithWorkerQueue(...)`
 - `WithWorkerTimeout(...)`

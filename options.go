@@ -19,9 +19,10 @@ func (e *ConfigError) Error() string {
 type Config struct {
 	Tiers []Store
 
-	Workers       int
-	WorkerQueue   int
-	WorkerTimeout time.Duration
+	WorkerStrategy string
+	Workers        int
+	WorkerQueue    int
+	WorkerTimeout  time.Duration
 
 	OpTimeout    time.Duration
 	CloseTimeout time.Duration
@@ -45,6 +46,17 @@ type Option func(cfg *Config) error
 func WithTiers(stores ...Store) Option {
 	return func(cfg *Config) error {
 		cfg.Tiers = append([]Store(nil), stores...)
+		return nil
+	}
+}
+
+// WithWorkerStrategy sets the background worker strategy.
+func WithWorkerStrategy(strategy string) Option {
+	return func(cfg *Config) error {
+		if strategy == "" {
+			return &ConfigError{"worker strategy cannot be empty"}
+		}
+		cfg.WorkerStrategy = strategy
 		return nil
 	}
 }

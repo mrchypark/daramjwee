@@ -55,6 +55,7 @@ WithTierFreshness(index, positive, negative)
 WithOpTimeout(d)
 WithCloseTimeout(d)
 
+WithWorkerStrategy(kind)
 WithWorkers(n)
 WithWorkerQueue(n)
 WithWorkerTimeout(d)
@@ -78,6 +79,7 @@ Rationale:
 - `WithFreshness(...)` is short and correctly reads as the chain default.
 - `WithTierFreshness(...)` makes the per-tier override explicit by including the tier index.
 - `WithOpTimeout(...)` is closer to actual code semantics than `WithDefaultTimeout(...)`.
+- `WithWorkerStrategy(...)` keeps the worker backend choice explicit without overloading `WithWorkers(...)`.
 - Worker settings become individually readable at call sites.
 
 ### filestore

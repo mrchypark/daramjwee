@@ -3,6 +3,7 @@ package daramjwee
 import (
 	"context"
 	"io"
+	"reflect"
 	"testing"
 	"time"
 
@@ -155,6 +156,7 @@ func TestNew_OptionValidation(t *testing.T) {
 			name: "success with worker and freshness options",
 			options: []Option{
 				WithTiers(regularA, durable),
+				WithWorkerStrategy("all"),
 				WithWorkers(10),
 				WithWorkerQueue(100),
 				WithWorkerTimeout(5 * time.Second),
@@ -164,6 +166,15 @@ func TestNew_OptionValidation(t *testing.T) {
 				WithTierFreshness(1, 2*time.Minute, 3*time.Minute),
 			},
 			expectErr: false,
+		},
+		{
+			name: "failure with empty worker strategy",
+			options: []Option{
+				WithTiers(regularA),
+				WithWorkerStrategy(""),
+			},
+			expectErr:   true,
+			expectedMsg: "worker strategy cannot be empty",
 		},
 		{
 			name: "failure with non-positive workers",
@@ -232,6 +243,8 @@ func TestNew_OptionValidation(t *testing.T) {
 func TestOptionOverrides(t *testing.T) {
 	cfg := Config{}
 
+	require.NoError(t, WithWorkerStrategy("pool")(&cfg))
+	require.NoError(t, WithWorkerStrategy("all")(&cfg))
 	require.NoError(t, WithOpTimeout(5*time.Second)(&cfg))
 	require.NoError(t, WithOpTimeout(15*time.Second)(&cfg))
 	require.NoError(t, WithFreshness(10*time.Minute, 20*time.Minute)(&cfg))
@@ -239,6 +252,7 @@ func TestOptionOverrides(t *testing.T) {
 	require.NoError(t, WithTierFreshness(1, 50*time.Minute, 20*time.Minute)(&cfg))
 	require.NoError(t, WithTierFreshness(2, 30*time.Minute, 60*time.Minute)(&cfg))
 
+	assert.Equal(t, "all", cfg.WorkerStrategy)
 	assert.Equal(t, 15*time.Second, cfg.OpTimeout)
 	assert.Equal(t, 30*time.Minute, cfg.PositiveFreshness)
 	assert.Equal(t, 40*time.Minute, cfg.NegativeFreshness)
@@ -247,4 +261,23 @@ func TestOptionOverrides(t *testing.T) {
 	assert.Equal(t, 20*time.Minute, cfg.TierFreshnessOverrides[1].Negative)
 	assert.Equal(t, 30*time.Minute, cfg.TierFreshnessOverrides[2].Positive)
 	assert.Equal(t, 60*time.Minute, cfg.TierFreshnessOverrides[2].Negative)
+}
+
+func TestNew_WithWorkerStrategyAllUsesAllStrategy(t *testing.T) {
+	cache, err := New(nil,
+		WithTiers(&optionsTestMockStore{id: 1}),
+		WithWorkerStrategy("all"),
+	)
+	require.NoError(t, err)
+	typedCache := cache.(*DaramjweeCache)
+	t.Cleanup(typedCache.Close)
+
+	strategyField := reflect.ValueOf(typedCache.Worker).Elem().FieldByName("strategy")
+	require.True(t, strategyField.IsValid())
+	require.False(t, strategyField.IsNil())
+
+	strategyType := strategyField.Elem().Type()
+	require.Equal(t, reflect.Ptr, strategyType.Kind())
+	assert.Equal(t, "AllStrategy", strategyType.Elem().Name())
+	assert.Equal(t, "github.com/mrchypark/daramjwee/internal/worker", strategyType.Elem().PkgPath())
 }

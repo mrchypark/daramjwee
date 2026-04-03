@@ -221,6 +221,10 @@ Because `WithTiers(...)` replaces the whole chain, it is best to define the
 final tier list and any `WithTierFreshness(...)` overrides together in the same
 `daramjwee.New(...)` call.
 
+Background refresh jobs use the `"pool"` worker strategy by default. If you
+need the old fire-one-goroutine-per-job behavior, set
+`WithWorkerStrategy("all")` explicitly.
+
 ## objectstore Configuration
 
 `objectstore` exposes its behavior entirely through constructor options. There are two separate configuration layers:

@@ -160,6 +160,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	cfg := Config{
+		WorkerStrategy:    "pool",
 		OpTimeout:         30 * time.Second,
 		Workers:           1,
 		WorkerQueue:       500,
@@ -200,7 +201,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		}
 	}
 
-	workerManager, err := worker.NewManager("pool", logger, cfg.Workers, cfg.WorkerQueue, cfg.WorkerTimeout)
+	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.Workers, cfg.WorkerQueue, cfg.WorkerTimeout)
 	if err != nil {
 		return nil, err
 	}
