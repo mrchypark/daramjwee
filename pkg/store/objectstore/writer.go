@@ -30,6 +30,9 @@ func (w *writer) Write(p []byte) (int, error) {
 	if done {
 		return 0, io.ErrClosedPipe
 	}
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
 
 	return w.segment.Write(p)
 }
@@ -39,6 +42,10 @@ func (w *writer) Close() error {
 		return nil
 	}
 	defer w.store.lockManager.Unlock(w.key)
+	if err := w.ctx.Err(); err != nil {
+		_ = w.segment.Abort()
+		return err
+	}
 
 	sealedPath, size, err := w.segment.Seal()
 	if err != nil {

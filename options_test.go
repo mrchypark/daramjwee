@@ -3,9 +3,11 @@ package daramjwee
 import (
 	"context"
 	"io"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/mrchypark/daramjwee/internal/worker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -128,21 +130,41 @@ func TestNew_OptionValidation(t *testing.T) {
 			name: "failure with negative tier freshness",
 			options: []Option{
 				WithTiers(regularA),
-				WithTierFreshness(-time.Second, time.Second),
+				WithFreshness(-time.Second, time.Second),
 			},
 			expectErr:   true,
-			expectedMsg: "tier positive cache TTL cannot be a negative value",
+			expectedMsg: "positive freshness cannot be a negative value",
+		},
+		{
+			name: "failure with negative per-tier freshness",
+			options: []Option{
+				WithTiers(regularA),
+				WithTierFreshness(1, -time.Second, time.Second),
+			},
+			expectErr:   true,
+			expectedMsg: "positive freshness cannot be a negative value",
+		},
+		{
+			name: "failure with negative per-tier negative freshness",
+			options: []Option{
+				WithTiers(regularA),
+				WithTierFreshness(1, time.Second, -time.Second),
+			},
+			expectErr:   true,
+			expectedMsg: "negative freshness cannot be a negative value",
 		},
 		{
 			name: "success with worker and freshness options",
 			options: []Option{
 				WithTiers(regularA, durable),
-				WithWorker("pool", 10, 100, 5*time.Second),
-				WithDefaultTimeout(10 * time.Second),
-				WithShutdownTimeout(20 * time.Second),
-				WithCache(time.Minute),
-				WithNegativeCache(5 * time.Minute),
-				WithTierFreshness(2*time.Minute, 3*time.Minute),
+				WithWorkerStrategy("all"),
+				WithWorkers(10),
+				WithWorkerQueue(100),
+				WithWorkerTimeout(5 * time.Second),
+				WithOpTimeout(10 * time.Second),
+				WithCloseTimeout(20 * time.Second),
+				WithFreshness(time.Minute, 5*time.Minute),
+				WithTierFreshness(1, 2*time.Minute, 3*time.Minute),
 			},
 			expectErr: false,
 		},
@@ -150,46 +172,55 @@ func TestNew_OptionValidation(t *testing.T) {
 			name: "failure with empty worker strategy",
 			options: []Option{
 				WithTiers(regularA),
-				WithWorker("", 10, 100, 5*time.Second),
+				WithWorkerStrategy(""),
 			},
 			expectErr:   true,
-			expectedMsg: "worker strategy type cannot be empty",
+			expectedMsg: "worker strategy cannot be empty",
 		},
 		{
-			name: "failure with non-positive worker pool size",
+			name: "failure with non-positive workers",
 			options: []Option{
 				WithTiers(regularA),
-				WithWorker("pool", 0, 100, 5*time.Second),
+				WithWorkers(0),
 			},
 			expectErr:   true,
-			expectedMsg: "worker pool size must be positive",
+			expectedMsg: "worker count must be positive",
+		},
+		{
+			name: "failure with non-positive worker queue size",
+			options: []Option{
+				WithTiers(regularA),
+				WithWorkerQueue(0),
+			},
+			expectErr:   true,
+			expectedMsg: "worker queue size must be positive",
 		},
 		{
 			name: "failure with non-positive worker timeout",
 			options: []Option{
 				WithTiers(regularA),
-				WithWorker("pool", 1, 100, 0),
+				WithWorkerTimeout(0),
 			},
 			expectErr:   true,
 			expectedMsg: "worker job timeout must be positive",
 		},
 		{
-			name: "failure with non-positive default timeout",
+			name: "failure with non-positive op timeout",
 			options: []Option{
 				WithTiers(regularA),
-				WithDefaultTimeout(0),
+				WithOpTimeout(0),
 			},
 			expectErr:   true,
-			expectedMsg: "default timeout must be positive",
+			expectedMsg: "operation timeout must be positive",
 		},
 		{
-			name: "failure with non-positive shutdown timeout",
+			name: "failure with non-positive close timeout",
 			options: []Option{
 				WithTiers(regularA),
-				WithShutdownTimeout(0),
+				WithCloseTimeout(0),
 			},
 			expectErr:   true,
-			expectedMsg: "Shutdown timeout must be positive",
+			expectedMsg: "close timeout must be positive",
 		},
 	}
 
@@ -213,13 +244,55 @@ func TestNew_OptionValidation(t *testing.T) {
 func TestOptionOverrides(t *testing.T) {
 	cfg := Config{}
 
-	require.NoError(t, WithDefaultTimeout(5*time.Second)(&cfg))
-	require.NoError(t, WithDefaultTimeout(15*time.Second)(&cfg))
-	require.NoError(t, WithTierFreshness(10*time.Minute, 20*time.Minute)(&cfg))
-	require.NoError(t, WithCache(30*time.Minute)(&cfg))
-	require.NoError(t, WithNegativeCache(40*time.Minute)(&cfg))
+	require.NoError(t, WithWorkerStrategy("pool")(&cfg))
+	require.NoError(t, WithWorkerStrategy("all")(&cfg))
+	require.NoError(t, WithOpTimeout(5*time.Second)(&cfg))
+	require.NoError(t, WithOpTimeout(15*time.Second)(&cfg))
+	require.NoError(t, WithFreshness(10*time.Minute, 20*time.Minute)(&cfg))
+	require.NoError(t, WithFreshness(30*time.Minute, 40*time.Minute)(&cfg))
+	require.NoError(t, WithTierFreshness(1, 50*time.Minute, 20*time.Minute)(&cfg))
+	require.NoError(t, WithTierFreshness(2, 30*time.Minute, 60*time.Minute)(&cfg))
 
-	assert.Equal(t, 15*time.Second, cfg.DefaultTimeout)
-	assert.Equal(t, 30*time.Minute, cfg.TierPositiveFreshFor)
-	assert.Equal(t, 40*time.Minute, cfg.TierNegativeFreshFor)
+	assert.Equal(t, "all", cfg.WorkerStrategy)
+	assert.Equal(t, 15*time.Second, cfg.OpTimeout)
+	assert.Equal(t, 30*time.Minute, cfg.PositiveFreshness)
+	assert.Equal(t, 40*time.Minute, cfg.NegativeFreshness)
+	require.Len(t, cfg.TierFreshnessOverrides, 2)
+	assert.Equal(t, 50*time.Minute, cfg.TierFreshnessOverrides[1].Positive)
+	assert.Equal(t, 20*time.Minute, cfg.TierFreshnessOverrides[1].Negative)
+	assert.Equal(t, 30*time.Minute, cfg.TierFreshnessOverrides[2].Positive)
+	assert.Equal(t, 60*time.Minute, cfg.TierFreshnessOverrides[2].Negative)
+}
+
+func TestNew_WithWorkerStrategyAllUsesAllStrategy(t *testing.T) {
+	cache, err := New(nil,
+		WithTiers(&optionsTestMockStore{id: 1}),
+		WithWorkerStrategy("all"),
+	)
+	require.NoError(t, err)
+	typedCache := cache.(*DaramjweeCache)
+	t.Cleanup(typedCache.Close)
+
+	strategyField := reflect.ValueOf(typedCache.Worker).Elem().FieldByName("strategy")
+	require.True(t, strategyField.IsValid())
+	require.False(t, strategyField.IsNil())
+
+	strategyType := strategyField.Elem().Type()
+	assert.Equal(t, reflect.TypeOf((*worker.AllStrategy)(nil)), strategyType)
+}
+
+func TestNew_WithManualNegativeTierFreshnessOverrideFails(t *testing.T) {
+	cache, err := New(nil,
+		WithTiers(&optionsTestMockStore{id: 1}),
+		func(cfg *Config) error {
+			cfg.TierFreshnessOverrides = map[int]TierFreshnessOverride{
+				-1: {Positive: time.Second, Negative: time.Second},
+			}
+			return nil
+		},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tier freshness override index -1 is out of range")
+	assert.Nil(t, cache)
 }

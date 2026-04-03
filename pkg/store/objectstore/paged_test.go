@@ -18,7 +18,7 @@ func TestStore_PagedReadRoundTrip(t *testing.T) {
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithWholeObjectThreshold(16),
+		WithPagedThreshold(16),
 		WithPageSize(8),
 	)
 
@@ -44,7 +44,7 @@ func TestStore_NonPositivePageSizeFallsBackToDefaultForPagedReads(t *testing.T) 
 	store := New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		WithWholeObjectThreshold(4),
+		WithPagedThreshold(4),
 		WithPageSize(0),
 	)
 

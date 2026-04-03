@@ -39,9 +39,9 @@ func BenchmarkStore_ReadRemotePackedWarm(b *testing.B) {
 
 func benchmarkLocalPublishedStore(b *testing.B) *Store {
 	store := New(objstore.NewInMemBucket(), log.NewNopLogger(),
-		WithPackedObjectThreshold(1<<20),
+		WithPackThreshold(1<<20),
 		WithPageSize(32<<10),
-		WithDataDir(b.TempDir()),
+		WithDir(b.TempDir()),
 	)
 	store.autoFlush = false
 	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{ETag: "bench"})
@@ -60,12 +60,12 @@ func benchmarkLocalPublishedStore(b *testing.B) *Store {
 func benchmarkRemotePackedStore(b *testing.B, enableCache bool) *Store {
 	bucket := objstore.NewInMemBucket()
 	opts := []Option{
-		WithPackedObjectThreshold(1 << 20),
+		WithPackThreshold(1 << 20),
 		WithPageSize(32 << 10),
-		WithDataDir(b.TempDir()),
+		WithDir(b.TempDir()),
 	}
 	if enableCache {
-		opts = append(opts, WithMemoryBlockCache(4<<20))
+		opts = append(opts, WithBlockCache(4<<20))
 	}
 
 	store := New(bucket, log.NewNopLogger(), opts...)
@@ -85,12 +85,12 @@ func benchmarkRemotePackedStore(b *testing.B, enableCache bool) *Store {
 	}
 
 	remoteOpts := []Option{
-		WithPackedObjectThreshold(1 << 20),
+		WithPackThreshold(1 << 20),
 		WithPageSize(32 << 10),
-		WithDataDir(b.TempDir()),
+		WithDir(b.TempDir()),
 	}
 	if enableCache {
-		remoteOpts = append(remoteOpts, WithMemoryBlockCache(4<<20))
+		remoteOpts = append(remoteOpts, WithBlockCache(4<<20))
 	}
 	remote := New(bucket, log.NewNopLogger(), remoteOpts...)
 	remote.autoFlush = false

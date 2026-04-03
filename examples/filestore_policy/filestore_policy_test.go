@@ -27,7 +27,7 @@ func TestFileStoreWithLRUPolicy(t *testing.T) {
 		tempDir,
 		logger,
 		filestore.WithCapacity(1000), // Capacity to hold file1+file2, but not all three.
-		filestore.WithEvictionPolicy(policy.NewLRU()),
+		filestore.WithEviction(policy.NewLRU()),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create file store: %v", err)
@@ -119,7 +119,7 @@ func TestFileStoreWithS3FIFOPolicy(t *testing.T) {
 		tempDir,
 		logger,
 		filestore.WithCapacity(1024),
-		filestore.WithEvictionPolicy(policy.NewS3FIFO(1024, 20)), // 20% for small queue
+		filestore.WithEviction(policy.NewS3FIFO(1024, 20)), // 20% for small queue
 	)
 	if err != nil {
 		t.Fatalf("Failed to create file store: %v", err)
@@ -181,7 +181,7 @@ func TestFileStoreWithSIEVEPolicy(t *testing.T) {
 		tempDir,
 		logger,
 		filestore.WithCapacity(500),
-		filestore.WithEvictionPolicy(policy.NewSieve()),
+		filestore.WithEviction(policy.NewSieve()),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create file store: %v", err)

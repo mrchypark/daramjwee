@@ -170,7 +170,7 @@ func TestFileStore_DeleteWaitsForPathLockBeforeUpdatingTracking(t *testing.T) {
 }
 
 func TestFileStore_EvictionDoesNotDropTrackingBeforeFileRemoval(t *testing.T) {
-	fs := setupTestStore(t, WithEvictionPolicy(policy.NewLRU()))
+	fs := setupTestStore(t, WithEviction(policy.NewLRU()))
 	ctx := context.Background()
 
 	keys := []string{"evict-victim", ""}
@@ -454,9 +454,9 @@ func TestFileStore_PathSafety(t *testing.T) {
 	}
 }
 
-// TestFileStore_SetWithCopyAndTruncate tests the copy-and-truncate strategy.
-func TestFileStore_SetWithCopyAndTruncate(t *testing.T) {
-	fs := setupTestStore(t, WithCopyAndTruncate())
+// TestFileStore_SetWithCopyWrite tests the copy-and-truncate strategy.
+func TestFileStore_SetWithCopyWrite(t *testing.T) {
+	fs := setupTestStore(t, WithCopyWrite())
 	ctx := context.Background()
 	key := "copy-test"
 	content := "data for copy"
@@ -510,7 +510,7 @@ func TestFileStore_Set_ErrorOnFinalize_Rename(t *testing.T) {
 
 // TestFileStore_Set_ErrorOnFinalize_Copy tests that an error during copy cleans up the temp file.
 func TestFileStore_Set_ErrorOnFinalize_Copy(t *testing.T) {
-	fs := setupTestStore(t, WithCopyAndTruncate())
+	fs := setupTestStore(t, WithCopyWrite())
 	ctx := context.Background()
 	key := "copy-fail-key"
 	dataPath := fs.toDataPath(key)
@@ -1009,7 +1009,7 @@ func BenchmarkFileStore_Set_RenameStrategy(b *testing.B) {
 
 // BenchmarkFileStore_Set_CopyStrategy benchmarks the Set operation using the copy-and-truncate strategy.
 func BenchmarkFileStore_Set_CopyStrategy(b *testing.B) {
-	store := setupBenchmarkStore(b, WithCopyAndTruncate())
+	store := setupBenchmarkStore(b, WithCopyWrite())
 	benchmarkFileStoreSet(b, store)
 }
 
@@ -1063,6 +1063,6 @@ func BenchmarkFileStore_Get_RenameStrategy(b *testing.B) {
 
 // BenchmarkFileStore_Get_CopyStrategy benchmarks the Get operation using the copy-and-truncate strategy.
 func BenchmarkFileStore_Get_CopyStrategy(b *testing.B) {
-	store := setupBenchmarkStore(b, WithCopyAndTruncate())
+	store := setupBenchmarkStore(b, WithCopyWrite())
 	benchmarkFileStoreGet(b, store)
 }

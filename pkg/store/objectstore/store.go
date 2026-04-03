@@ -54,9 +54,9 @@ type Store struct {
 	logger          log.Logger
 	dataDir         string
 	prefix          string
-	defaultGCGrace  time.Duration
-	packedThreshold int64
-	wholeThreshold  int64
+	gcGrace         time.Duration
+	packThreshold   int64
+	pagedThreshold  int64
 	pageSize        int64
 	blockCache      *blockcache.Cache
 	pageCache       *pagecache.Cache
@@ -80,6 +80,8 @@ type Store struct {
 
 func (s *Store) GetStreamUsesContext() bool { return true }
 
+func (s *Store) BeginSetUsesContext() bool { return true }
+
 var _ daramjwee.Store = (*Store)(nil)
 
 // New creates a new object storage backend.
@@ -89,8 +91,8 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	}
 
 	cfg := config{
-		defaultGCGrace: time.Hour,
-		pageSize:       256 << 10,
+		gcGrace:  time.Hour,
+		pageSize: 256 << 10,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -99,7 +101,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		cfg.pageSize = 256 << 10
 	}
 
-	dataDir := cfg.dataDir
+	dataDir := cfg.dir
 	var initErr error
 	if dataDir == "" {
 		dataDir, initErr = os.MkdirTemp("", "daramjwee-objectstore-*")
@@ -114,12 +116,12 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		logger:          logger,
 		dataDir:         dataDir,
 		prefix:          trimSlashes(cfg.prefix),
-		defaultGCGrace:  cfg.defaultGCGrace,
-		packedThreshold: cfg.packedObjectThreshold,
-		wholeThreshold:  cfg.wholeThreshold,
+		gcGrace:         cfg.gcGrace,
+		packThreshold:   cfg.packThreshold,
+		pagedThreshold:  cfg.pagedThreshold,
 		pageSize:        cfg.pageSize,
-		blockCache:      blockcache.New(cfg.memoryBlockCacheBytes),
-		pageCache:       pagecache.New(cfg.memoryPageCacheBytes),
+		blockCache:      blockcache.New(cfg.blockCacheBytes),
+		pageCache:       pagecache.New(cfg.pageCacheBytes),
 		catalog:         cat,
 		lockManager:     newKeyLockManager(2048),
 		initErr:         initErr,
@@ -129,7 +131,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		autoFlush:       true,
 		now:             time.Now,
 	}
-	store.checkpointCache = newCheckpointCache(cfg.memoryCheckpointBytes, cfg.checkpointCacheTTL, func() time.Time {
+	store.checkpointCache = newCheckpointCache(cfg.checkpointCacheBytes, cfg.checkpointTTL, func() time.Time {
 		return store.now()
 	})
 	if store.initErr == nil {
@@ -250,6 +252,9 @@ func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Me
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.lockManager.Lock(key)
 
 	segmentID := s.nextVersion()
@@ -364,7 +369,7 @@ func (s *Store) loadManifest(ctx context.Context, key string) (*manifest, error)
 func (s *Store) publishManifest(ctx context.Context, key, blobPath string, size int64, metadata *daramjwee.Metadata) error {
 	layout := layoutWhole
 	pageSize := int64(0)
-	if s.wholeThreshold > 0 && size > s.wholeThreshold {
+	if s.pagedThreshold > 0 && size > s.pagedThreshold {
 		layout = layoutPaged
 		pageSize = s.pageSize
 	}

@@ -21,10 +21,10 @@ func TestStore_BlockCacheWarmHitAvoidsRemoteRangeRead(t *testing.T) {
 	seedRemotePackedStore(t, ctx, bucket, "warm-key", strings.Repeat("a", 96))
 
 	store := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1024),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1024),
 		WithPageSize(64),
-		WithMemoryBlockCache(1<<20),
+		WithBlockCache(1<<20),
 	)
 	store.autoFlush = false
 
@@ -45,10 +45,10 @@ func TestStore_BlockCacheCoalescesConcurrentSameBlockMisses(t *testing.T) {
 	seedRemotePackedStore(t, ctx, bucket, "coalesce-key", strings.Repeat("b", 32))
 
 	store := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1024),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1024),
 		WithPageSize(64),
-		WithMemoryBlockCache(1<<20),
+		WithBlockCache(1<<20),
 	)
 	store.autoFlush = false
 
@@ -85,8 +85,8 @@ func TestStore_BlockCacheUsesSegmentPathAndBlockIndexNotLogicalKey(t *testing.T)
 	ctx := context.Background()
 	bucket := &countingRangeBucket{Bucket: objstore.NewInMemBucket()}
 	flushed := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1024),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1024),
 		WithPageSize(64),
 	)
 	flushed.autoFlush = false
@@ -108,10 +108,10 @@ func TestStore_BlockCacheUsesSegmentPathAndBlockIndexNotLogicalKey(t *testing.T)
 	require.NoError(t, flushed.flushPending(ctx))
 
 	store := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1024),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1024),
 		WithPageSize(64),
-		WithMemoryBlockCache(1<<20),
+		WithBlockCache(1<<20),
 	)
 	store.autoFlush = false
 
@@ -125,8 +125,8 @@ func TestStore_BlockCacheUsesSegmentPathAndBlockIndexNotLogicalKey(t *testing.T)
 func seedRemotePackedStore(t *testing.T, ctx context.Context, bucket objstore.Bucket, key, body string) {
 	t.Helper()
 	store := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1024),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1024),
 		WithPageSize(64),
 	)
 	store.autoFlush = false

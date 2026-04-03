@@ -19,15 +19,16 @@ var ErrBackgroundJobRejected = errors.New("daramjwee: background job rejected")
 
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
-	Tiers                []Store
-	Logger               log.Logger
-	Worker               *worker.Manager
-	DefaultTimeout       time.Duration
-	ShutdownTimeout      time.Duration
-	TierPositiveFreshFor time.Duration
-	TierNegativeFreshFor time.Duration
-	loggingDisabled      bool
-	isClosed             atomic.Bool
+	Tiers                  []Store
+	Logger                 log.Logger
+	Worker                 *worker.Manager
+	OpTimeout              time.Duration
+	CloseTimeout           time.Duration
+	PositiveFreshness      time.Duration
+	NegativeFreshness      time.Duration
+	TierFreshnessOverrides map[int]TierFreshnessOverride
+	loggingDisabled        bool
+	isClosed               atomic.Bool
 }
 
 var _ Cache = (*DaramjweeCache)(nil)
@@ -230,6 +231,19 @@ func (c *DaramjweeCache) isCachedStale(oldMeta *Metadata, positive, negative tim
 	return time.Now().After(oldMeta.CachedAt.Add(freshnessLifetime))
 }
 
+func (c *DaramjweeCache) tierFreshness(index int) (time.Duration, time.Duration) {
+	override, ok := c.TierFreshnessOverrides[index]
+	if !ok {
+		return c.PositiveFreshness, c.NegativeFreshness
+	}
+	return override.Positive, override.Negative
+}
+
+func (c *DaramjweeCache) isTierCachedStale(oldMeta *Metadata, index int) bool {
+	positive, negative := c.tierFreshness(index)
+	return c.isCachedStale(oldMeta, positive, negative)
+}
+
 // Close safely shuts down the worker.
 func (c *DaramjweeCache) Close() {
 	if c.isClosed.Swap(true) {
@@ -239,7 +253,7 @@ func (c *DaramjweeCache) Close() {
 
 	if c.Worker != nil {
 		c.infoLog("msg", "shutting down daramjwee cache")
-		if err := c.Worker.Shutdown(c.ShutdownTimeout); err != nil {
+		if err := c.Worker.Shutdown(c.CloseTimeout); err != nil {
 			c.errorLog("msg", "graceful shutdown failed", "err", err)
 		} else {
 			c.infoLog("msg", "daramjwee cache shutdown complete")
@@ -251,7 +265,7 @@ func (c *DaramjweeCache) Close() {
 func (c *DaramjweeCache) handleTopTierHit(_ context.Context, key string, fetcher Fetcher, stream io.ReadCloser, meta *Metadata, cancel context.CancelFunc) (io.ReadCloser, error) {
 	c.debugLog("msg", "top tier hit", "key", key)
 
-	isStale := c.isCachedStale(meta, c.TierPositiveFreshFor, c.TierNegativeFreshFor)
+	isStale := c.isTierCachedStale(meta, 0)
 
 	callback := func() {
 		cancel()
@@ -279,7 +293,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 		*metaToPromote = *meta
 	}
 
-	if c.isCachedStale(meta, c.TierPositiveFreshFor, c.TierNegativeFreshFor) {
+	if c.isTierCachedStale(meta, tierIndex) {
 		c.debugLog("msg", "lower tier is stale, serving stale and scheduling refresh", "key", key, "tier_index", tierIndex)
 		streamCloser := newSafeCloser(src, c.lowerTierRefreshOnCloseCallback(key, fetcher, cancel, meta, tierDestination{tierIndex: tierIndex, store: c.Tiers[tierIndex]}))
 		if meta.IsNegative {
@@ -290,7 +304,8 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 	}
 
 	if meta.IsNegative {
-		writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, c.Tiers[0]), c.Tiers[0], key, metaToPromote)
+		target := c.topWriteStore()
+		writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, target), target, key, metaToPromote)
 		if err != nil {
 			c.warnLog("msg", "failed to acquire top-tier sink for negative promotion", "key", key, "err", err)
 			_ = src.Close()
@@ -312,7 +327,8 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 		return nil, ErrNotFound
 	}
 
-	writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, c.Tiers[0]), c.Tiers[0], key, metaToPromote)
+	target := c.topWriteStore()
+	writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, target), target, key, metaToPromote)
 	if err != nil {
 		c.warnLog("msg", "failed to acquire top-tier sink for promotion", "key", key, "err", err)
 		return newCancelOnCloseReadCloser(src, cancel), nil
@@ -417,7 +433,7 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 	if currentMeta == nil {
 		return ErrNilMetadata
 	}
-	if !c.isCachedStale(currentMeta, c.TierPositiveFreshFor, c.TierNegativeFreshFor) {
+	if !c.isTierCachedStale(currentMeta, 0) {
 		return nil
 	}
 	if oldMetadata != nil {
@@ -512,7 +528,8 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 
 // handleNegativeCache processes the logic for storing a negative cache entry.
 func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Context, key string) (io.ReadCloser, error) {
-	c.debugLog("msg", "caching as negative entry", "key", key, "negative_fresh_for", c.TierNegativeFreshFor)
+	_, negativeFreshFor := c.tierFreshness(0)
+	c.debugLog("msg", "caching as negative entry", "key", key, "negative_fresh_for", negativeFreshFor)
 
 	meta := &Metadata{
 		IsNegative: true,
@@ -530,12 +547,12 @@ func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Contex
 	return nil, ErrNotFound
 }
 
-// newCtxWithTimeout applies the default timeout to the context if no deadline is set.
+// newCtxWithTimeout applies the operation timeout to the context if no deadline is set.
 func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, c.DefaultTimeout)
+	return context.WithTimeout(ctx, c.OpTimeout)
 }
 
 func usesContextAfterGetStream(store Store) bool {

@@ -9,7 +9,7 @@ It demonstrates the main intended split of responsibilities:
 
 - `FileStore` is the user-visible local filesystem cache tier.
 - `objectstore` is the larger remote backing tier.
-- `objectstore.WithDataDir(...)` is a local workspace for ingest/catalog state, not a replacement for `FileStore`.
+- `objectstore.WithDir(...)` is a local workspace for ingest/catalog state, not a replacement for `FileStore`.
 
 ## Why this layout is useful
 
@@ -70,33 +70,33 @@ The example uses these `objectstore` options:
 objectstore.New(
     bucket,
     logger,
-    objectstore.WithDataDir("/tmp/.../workspace"),
+    objectstore.WithDir("/tmp/.../workspace"),
     objectstore.WithPrefix("examples/file-objstore"),
-    objectstore.WithPackedObjectThreshold(1<<20), // 1 MiB
+    objectstore.WithPackThreshold(1<<20), // 1 MiB
     objectstore.WithPageSize(256<<10),            // 256 KiB
-    objectstore.WithMemoryBlockCache(64<<20),     // 64 MiB
-    objectstore.WithMemoryCheckpointCache(16<<20), // 16 MiB
-    objectstore.WithCheckpointCacheTTL(2*time.Second),
+    objectstore.WithBlockCache(64<<20),     // 64 MiB
+    objectstore.WithCheckpointCache(16<<20), // 16 MiB
+    objectstore.WithCheckpointTTL(2*time.Second),
 )
 ```
 
 What they mean:
 
-- `WithDataDir(...)`
+- `WithDir(...)`
   - local workspace for ingest and catalog state
   - not a local `FileStore` replacement
 - `WithPrefix(...)`
   - isolates this example's remote objects under one bucket namespace
-- `WithPackedObjectThreshold(1<<20)`
+- `WithPackThreshold(1<<20)`
   - packs objects up to 1 MiB into shared remote segments
   - larger objects use direct remote blobs
 - `WithPageSize(256<<10)`
   - packed remote reads use 256 KiB blocks
-- `WithMemoryBlockCache(64<<20)`
+- `WithBlockCache(64<<20)`
   - repeated packed remote reads are cached in process memory
-- `WithMemoryCheckpointCache(16<<20)`
+- `WithCheckpointCache(16<<20)`
   - hot shard checkpoint metadata stays in memory, so repeated remote hits do not re-fetch and re-decode `latest.json` every time
-- `WithCheckpointCacheTTL(2*time.Second)`
+- `WithCheckpointTTL(2*time.Second)`
   - keeps checkpoint metadata fresh enough for distributed writers while still reducing metadata traffic
 
 ## When to use a different layout

@@ -21,10 +21,10 @@ import (
 
 // FileStore is a disk-based implementation of the daramjwee.Store.
 type FileStore struct {
-	baseDir            string
-	logger             log.Logger
-	lockManager        *FileLockManager
-	useCopyAndTruncate bool // useCopyAndTruncate, if true, uses a copy-and-truncate strategy for writing files.
+	baseDir      string
+	logger       log.Logger
+	lockManager  *FileLockManager
+	useCopyWrite bool // useCopyWrite, if true, uses a copy-based write strategy instead of atomic rename.
 
 	// Policy-related fields
 	mu          sync.RWMutex
@@ -53,12 +53,13 @@ type storedMetadata struct {
 // Option configures the FileStore.
 type Option func(*FileStore)
 
-// WithCopyAndTruncate sets the store to use a copy-and-truncate strategy
+// WithCopyWrite sets the store to use a copy-and-truncate strategy
 // instead of an atomic rename. This can be necessary for compatibility with
-// some network filesystems like NFS.
-func WithCopyAndTruncate() Option {
+// some network filesystems like NFS, but it is non-atomic and may leave
+// partial or orphaned files behind if a write fails.
+func WithCopyWrite() Option {
 	return func(fs *FileStore) {
-		fs.useCopyAndTruncate = true
+		fs.useCopyWrite = true
 	}
 }
 
@@ -71,9 +72,9 @@ func WithCapacity(capacity int64) Option {
 	}
 }
 
-// WithEvictionPolicy sets the eviction policy for the store.
+// WithEviction sets the eviction policy for the store.
 // If policy is nil, a no-op policy is used (no eviction).
-func WithEvictionPolicy(policy daramjwee.EvictionPolicy) Option {
+func WithEviction(policy daramjwee.EvictionPolicy) Option {
 	return func(fs *FileStore) {
 		fs.policy = policy
 	}
@@ -114,8 +115,8 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 // ValidateTier rejects tier positions that would weaken the stream-through
 // publish contract expected from the ordered tier chain.
 func (fs *FileStore) ValidateTier(index int) error {
-	if index == 0 && fs.useCopyAndTruncate {
-		return errors.New("filestore: WithCopyAndTruncate mode does not support stream-through publish semantics and cannot be used as tier 0")
+	if index == 0 && fs.useCopyWrite {
+		return errors.New("filestore: WithCopyWrite mode does not support stream-through publish semantics and cannot be used as tier 0")
 	}
 	return nil
 }
@@ -165,7 +166,7 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 
 // BeginSet returns a sink that streams data to the store.
 // The data is written to a temporary file and then atomically moved to the final location
-// upon closing the writer, or copied if WithCopyAndTruncate option is used.
+// upon closing the writer, or copied if WithCopyWrite option is used.
 func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	path := fs.toDataPath(key)
 	fs.lockManager.Lock(path)
@@ -219,7 +220,7 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 			}
 		}()
 
-		if fs.useCopyAndTruncate {
+		if fs.useCopyWrite {
 			// Non-atomic copy strategy for NFS compatibility.
 			if err := copyFile(tmpFile.Name(), path); err != nil {
 				return fmt.Errorf("failed to copy temp file to final path: %w", err)

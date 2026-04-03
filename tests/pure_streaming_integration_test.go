@@ -19,7 +19,7 @@ func TestCache_MissReturnsStreamBeforeSourceEOF(t *testing.T) {
 	source := newBlockingReadCloser([]byte("hello"), []byte(" world"))
 	fetcher := &blockingSourceFetcher{source: source, metadata: &daramjwee.Metadata{ETag: "v1"}}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(2*time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(2*time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -74,8 +74,8 @@ func TestCache_ColdHitReturnsStreamBeforeSourceEOF(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, cold),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -125,7 +125,7 @@ func TestCache_MissBeginSetFailureFallsBackToPassthrough(t *testing.T) {
 	hot.forceSetError = true
 	fetcher := &mockFetcher{content: "passthrough", etag: "v1"}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(2*time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(2*time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -145,7 +145,7 @@ func TestCache_PartialMissReadCloseDoesNotPublishToHot(t *testing.T) {
 	hot := newMockStore()
 	fetcher := &mockFetcher{content: "partial-value", etag: "v1"}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(2*time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(2*time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -170,8 +170,8 @@ func TestCache_PartialColdHitReadCloseDoesNotPublishToHot(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, cold),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -197,7 +197,7 @@ func TestCache_PublishFailureDoesNotScheduleColdPersist(t *testing.T) {
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, cold),
-		daramjwee.WithDefaultTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -227,7 +227,7 @@ func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
 	}
 	fetcher := &errFetcher{err: daramjwee.ErrNotModified}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(2*time.Second))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(2*time.Second))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -243,11 +243,11 @@ func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
 	assert.Equal(t, 1, hot.closeCount(), "explicit close should close the underlying hot stream exactly once")
 }
 
-func TestCache_MissStreamIgnoresDefaultTimeoutAfterFetchReturns(t *testing.T) {
+func TestCache_MissStreamIgnoresOpTimeoutAfterFetchReturns(t *testing.T) {
 	hot := newContextBoundStore()
 	fetcher := &contextBoundFetcher{body: []byte("timeout-safe-miss"), metadata: &daramjwee.Metadata{ETag: "v1"}}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(20*time.Millisecond))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(20*time.Millisecond))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -271,11 +271,11 @@ func TestCache_MissStreamIgnoresDefaultTimeoutAfterFetchReturns(t *testing.T) {
 	assert.Equal(t, "v1", meta.ETag)
 }
 
-func TestCache_MissUsesDefaultTimeoutForFetchSetup(t *testing.T) {
+func TestCache_MissUsesOpTimeoutForFetchSetup(t *testing.T) {
 	hot := newMockStore()
 	fetcher := &mockFetcher{content: "timeout-safe-miss", etag: "v1", fetchDelay: 100 * time.Millisecond}
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(20*time.Millisecond))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(20*time.Millisecond))
 	require.NoError(t, err)
 	defer cache.Close()
 
@@ -285,7 +285,7 @@ func TestCache_MissUsesDefaultTimeoutForFetchSetup(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestCache_LowerTierStreamIgnoresDefaultTimeoutAfterGetReturns(t *testing.T) {
+func TestCache_LowerTierStreamIgnoresOpTimeoutAfterGetReturns(t *testing.T) {
 	hot := newContextBoundStore()
 	lower := newContextBoundStore()
 	lower.set("lower-timeout-key", []byte("lower-timeout-value"), &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
@@ -293,8 +293,8 @@ func TestCache_LowerTierStreamIgnoresDefaultTimeoutAfterGetReturns(t *testing.T)
 	cache, err := daramjwee.New(
 		nil,
 		daramjwee.WithTiers(hot, lower),
-		daramjwee.WithTierFreshness(time.Hour, time.Hour),
-		daramjwee.WithDefaultTimeout(20*time.Millisecond),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(20*time.Millisecond),
 	)
 	require.NoError(t, err)
 	defer cache.Close()
@@ -319,10 +319,10 @@ func TestCache_LowerTierStreamIgnoresDefaultTimeoutAfterGetReturns(t *testing.T)
 	assert.Equal(t, "v1", meta.ETag)
 }
 
-func TestCache_SetSinkIgnoresDefaultTimeoutAfterBeginSetReturns(t *testing.T) {
+func TestCache_SetSinkIgnoresOpTimeoutAfterBeginSetReturns(t *testing.T) {
 	hot := newContextBoundStore()
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithDefaultTimeout(20*time.Millisecond))
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(20*time.Millisecond))
 	require.NoError(t, err)
 	defer cache.Close()
 

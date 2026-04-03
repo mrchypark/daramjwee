@@ -19,22 +19,30 @@ func (e *ConfigError) Error() string {
 type Config struct {
 	Tiers []Store
 
-	WorkerStrategy   string
-	WorkerPoolSize   int
-	WorkerQueueSize  int
-	WorkerJobTimeout time.Duration
+	WorkerStrategy string
+	Workers        int
+	WorkerQueue    int
+	WorkerTimeout  time.Duration
 
-	DefaultTimeout  time.Duration
-	ShutdownTimeout time.Duration
+	OpTimeout    time.Duration
+	CloseTimeout time.Duration
 
-	TierPositiveFreshFor time.Duration
-	TierNegativeFreshFor time.Duration
+	PositiveFreshness      time.Duration
+	NegativeFreshness      time.Duration
+	TierFreshnessOverrides map[int]TierFreshnessOverride
+}
+
+type TierFreshnessOverride struct {
+	Positive time.Duration
+	Negative time.Duration
 }
 
 // Option is a function type that modifies the Config.
 type Option func(cfg *Config) error
 
 // WithTiers sets the regular cache tiers in top-to-bottom order.
+// It replaces the entire tier chain, so any WithTierFreshness override indices
+// are validated against the final order during cache initialization.
 func WithTiers(stores ...Store) Option {
 	return func(cfg *Config) error {
 		cfg.Tiers = append([]Store(nil), stores...)
@@ -42,85 +50,114 @@ func WithTiers(stores ...Store) Option {
 	}
 }
 
-// WithWorker specifies the worker strategy and detailed settings for background tasks.
-// If not set, the defaults are strategy "pool", size 1, queue size 500.
-func WithWorker(strategyType string, poolSize int, queueSize int, jobTimeout time.Duration) Option {
+// WithWorkerStrategy sets the background worker strategy.
+func WithWorkerStrategy(strategy string) Option {
 	return func(cfg *Config) error {
-		if strategyType == "" {
-			return &ConfigError{"worker strategy type cannot be empty"}
+		if strategy == "" {
+			return &ConfigError{"worker strategy cannot be empty"}
 		}
-		if poolSize <= 0 {
-			return &ConfigError{"worker pool size must be positive"}
+		cfg.WorkerStrategy = strategy
+		return nil
+	}
+}
+
+// WithWorkers sets the number of background workers used for async jobs.
+func WithWorkers(count int) Option {
+	return func(cfg *Config) error {
+		if count <= 0 {
+			return &ConfigError{"worker count must be positive"}
 		}
-		if jobTimeout <= 0 {
+		cfg.Workers = count
+		return nil
+	}
+}
+
+// WithWorkerQueue sets the queue capacity used for async background jobs.
+func WithWorkerQueue(size int) Option {
+	return func(cfg *Config) error {
+		if size <= 0 {
+			return &ConfigError{"worker queue size must be positive"}
+		}
+		cfg.WorkerQueue = size
+		return nil
+	}
+}
+
+// WithWorkerTimeout sets the timeout applied to each background job.
+func WithWorkerTimeout(timeout time.Duration) Option {
+	return func(cfg *Config) error {
+		if timeout <= 0 {
 			return &ConfigError{"worker job timeout must be positive"}
 		}
-		cfg.WorkerStrategy = strategyType
-		cfg.WorkerPoolSize = poolSize
-		cfg.WorkerQueueSize = queueSize
-		cfg.WorkerJobTimeout = jobTimeout
+		cfg.WorkerTimeout = timeout
 		return nil
 	}
 }
 
-// WithDefaultTimeout sets the default timeout for cache operations like Get and Set.
-func WithDefaultTimeout(timeout time.Duration) Option {
+// WithOpTimeout sets the setup-stage timeout for cache operations like Get and Set.
+func WithOpTimeout(timeout time.Duration) Option {
 	return func(cfg *Config) error {
 		if timeout <= 0 {
-			return &ConfigError{"default timeout must be positive"}
+			return &ConfigError{"operation timeout must be positive"}
 		}
-		cfg.DefaultTimeout = timeout
+		cfg.OpTimeout = timeout
 		return nil
 	}
 }
 
-// WithShutdownTimeout sets the timeout for graceful shutdown of the cache.
-func WithShutdownTimeout(timeout time.Duration) Option {
+// WithCloseTimeout sets the timeout for graceful shutdown of the cache.
+func WithCloseTimeout(timeout time.Duration) Option {
 	return func(cfg *Config) error {
 		if timeout <= 0 {
-			return &ConfigError{"Shutdown timeout must be positive"}
+			return &ConfigError{"close timeout must be positive"}
 		}
-		cfg.ShutdownTimeout = timeout
+		cfg.CloseTimeout = timeout
 		return nil
 	}
 }
 
-// WithTierFreshness sets the freshness duration for positive and negative
-// cache entries across the whole ordered tier chain.
-func WithTierFreshness(positive, negative time.Duration) Option {
+// WithFreshness sets the chain-wide default freshness duration for positive and
+// negative cache entries across the ordered tier chain. A duration of 0 causes
+// entries to be considered stale immediately.
+func WithFreshness(positive, negative time.Duration) Option {
 	return func(cfg *Config) error {
-		if positive < 0 {
-			return &ConfigError{"tier positive cache TTL cannot be a negative value"}
+		if err := validateFreshness(positive, negative); err != nil {
+			return err
 		}
-		if negative < 0 {
-			return &ConfigError{"tier negative cache TTL cannot be a negative value"}
-		}
-		cfg.TierPositiveFreshFor = positive
-		cfg.TierNegativeFreshFor = negative
+		cfg.PositiveFreshness = positive
+		cfg.NegativeFreshness = negative
 		return nil
 	}
 }
 
-// WithCache sets the positive freshness duration across the whole tier chain.
-// If freshFor is 0, the cache entry is considered stale immediately.
-func WithCache(freshFor time.Duration) Option {
+// WithTierFreshness overrides the positive and negative freshness durations for
+// a specific tier index. The configured values override the chain-wide default.
+// A duration of 0 causes entries to be considered stale immediately.
+func WithTierFreshness(index int, positive, negative time.Duration) Option {
 	return func(cfg *Config) error {
-		if freshFor < 0 {
-			return &ConfigError{"positive cache TTL cannot be a negative value"}
+		if index < 0 {
+			return &ConfigError{"tier index cannot be negative"}
 		}
-		cfg.TierPositiveFreshFor = freshFor
+		if err := validateFreshness(positive, negative); err != nil {
+			return err
+		}
+		if cfg.TierFreshnessOverrides == nil {
+			cfg.TierFreshnessOverrides = make(map[int]TierFreshnessOverride)
+		}
+		cfg.TierFreshnessOverrides[index] = TierFreshnessOverride{
+			Positive: positive,
+			Negative: negative,
+		}
 		return nil
 	}
 }
 
-// WithNegativeCache sets the negative freshness duration across the whole tier chain.
-// If freshFor is 0, the cache entry is considered stale immediately.
-func WithNegativeCache(freshFor time.Duration) Option {
-	return func(cfg *Config) error {
-		if freshFor < 0 {
-			return &ConfigError{"negative cache TTL cannot be a negative value"}
-		}
-		cfg.TierNegativeFreshFor = freshFor
-		return nil
+func validateFreshness(positive, negative time.Duration) error {
+	if positive < 0 {
+		return &ConfigError{"positive freshness cannot be a negative value"}
 	}
+	if negative < 0 {
+		return &ConfigError{"negative freshness cannot be a negative value"}
+	}
+	return nil
 }

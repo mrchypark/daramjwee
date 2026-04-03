@@ -21,5 +21,5 @@ func (s *Store) Sweep(ctx context.Context, olderThan time.Duration) (SweepStats,
 
 // SweepStale deletes unreachable remote objects using the store default grace period.
 func (s *Store) SweepStale(ctx context.Context) (SweepStats, error) {
-	return s.Sweep(ctx, s.defaultGCGrace)
+	return s.Sweep(ctx, s.gcGrace)
 }

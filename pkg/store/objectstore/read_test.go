@@ -20,7 +20,7 @@ import (
 
 func TestStore_GetStream_LocalPublishedHitReadsFromLocalSegment(t *testing.T) {
 	ctx := context.Background()
-	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "local-read", &daramjwee.Metadata{ETag: "v1"})
@@ -42,7 +42,7 @@ func TestStore_GetStream_LocalPublishedHitReadsFromLocalSegment(t *testing.T) {
 func TestStore_GetStream_RemoteOnlyHitResolvesThroughShardCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
 
 	writer, err := flushed.BeginSet(ctx, "remote-only", &daramjwee.Metadata{ETag: "v1"})
@@ -52,7 +52,7 @@ func TestStore_GetStream_RemoteOnlyHitResolvesThroughShardCheckpoint(t *testing.
 	require.NoError(t, writer.Close())
 	require.NoError(t, flushed.flushPending(ctx))
 
-	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	remoteOnly.autoFlush = false
 
 	stream, meta, err := remoteOnly.GetStream(ctx, "remote-only")
@@ -69,8 +69,8 @@ func TestStore_GetStream_RemoteCheckpointCacheAvoidsRepeatedCheckpointFetch(t *t
 	ctx := context.Background()
 	bucket := &countingCheckpointBucket{Bucket: objstore.NewInMemBucket()}
 	flushed := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1),
 	)
 	flushed.autoFlush = false
 
@@ -82,10 +82,10 @@ func TestStore_GetStream_RemoteCheckpointCacheAvoidsRepeatedCheckpointFetch(t *t
 	require.NoError(t, flushed.flushPending(ctx))
 
 	remoteOnly := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1),
-		WithMemoryCheckpointCache(1<<20),
-		WithCheckpointCacheTTL(5*time.Second),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1),
+		WithCheckpointCache(1<<20),
+		WithCheckpointTTL(5*time.Second),
 	)
 	remoteOnly.autoFlush = false
 
@@ -104,8 +104,8 @@ func TestStore_GetStream_RemoteCheckpointCacheReloadsAfterTTL(t *testing.T) {
 	ctx := context.Background()
 	bucket := &countingCheckpointBucket{Bucket: objstore.NewInMemBucket()}
 	flushed := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1),
 	)
 	flushed.autoFlush = false
 
@@ -118,10 +118,10 @@ func TestStore_GetStream_RemoteCheckpointCacheReloadsAfterTTL(t *testing.T) {
 
 	now := time.Unix(1_000, 0)
 	remoteOnly := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(1),
-		WithMemoryCheckpointCache(1<<20),
-		WithCheckpointCacheTTL(time.Second),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1),
+		WithCheckpointCache(1<<20),
+		WithCheckpointTTL(time.Second),
 	)
 	remoteOnly.autoFlush = false
 	remoteOnly.now = func() time.Time { return now }
@@ -146,9 +146,9 @@ func TestStore_PublishCheckpointRefreshesCheckpointCache(t *testing.T) {
 	ctx := context.Background()
 	bucket := &countingCheckpointBucket{Bucket: objstore.NewInMemBucket()}
 	store := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithMemoryCheckpointCache(1<<20),
-		WithCheckpointCacheTTL(5*time.Second),
+		WithDir(t.TempDir()),
+		WithCheckpointCache(1<<20),
+		WithCheckpointTTL(5*time.Second),
 	)
 	store.autoFlush = false
 
@@ -189,7 +189,7 @@ func TestStore_PublishCheckpointRefreshesCheckpointCache(t *testing.T) {
 func TestStore_GetStream_RemotePackedRecordReturnsExactLogicalObject(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
 	keyA, keyB := sameShardKeys("packed-read")
 
@@ -209,7 +209,7 @@ func TestStore_GetStream_RemotePackedRecordReturnsExactLogicalObject(t *testing.
 	}
 	require.NoError(t, flushed.flushPending(ctx))
 
-	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	remoteOnly.autoFlush = false
 
 	stream, meta, err := remoteOnly.GetStream(ctx, keyB)
@@ -225,7 +225,7 @@ func TestStore_GetStream_RemotePackedRecordReturnsExactLogicalObject(t *testing.
 func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "local-disappears-remote-live", &daramjwee.Metadata{ETag: "v1"})
@@ -276,7 +276,7 @@ func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappe
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
 
-	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
 	writer, err := flushed.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -285,7 +285,7 @@ func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappe
 	require.NoError(t, writer.Close())
 	require.NoError(t, flushed.flushPending(ctx))
 
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 	writer, err = store.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{ETag: "v2"})
 	require.NoError(t, err)
@@ -310,7 +310,7 @@ func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
 
-	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
 	writer, err := flushed.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -319,7 +319,7 @@ func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *
 	require.NoError(t, writer.Close())
 	require.NoError(t, flushed.flushPending(ctx))
 
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 	writer, err = store.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{ETag: "v2"})
 	require.NoError(t, err)
@@ -365,7 +365,7 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
 
-	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
 	writer, err := flushed.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{ETag: "v1"})
 	require.NoError(t, err)
@@ -374,7 +374,7 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 	require.NoError(t, writer.Close())
 	require.NoError(t, flushed.flushPending(ctx))
 
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 	writer, err = store.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{ETag: "v2"})
 	require.NoError(t, err)
@@ -432,7 +432,7 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	remotePath := joinPath(store.prefix, "segments", "packed-short.seg")
@@ -480,7 +480,7 @@ func (b *countingCheckpointBucket) checkpointCalls() int {
 func TestStore_DeleteTombstoneHidesOlderPackedRecord(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "delete-tombstone", &daramjwee.Metadata{ETag: "v1"})
@@ -502,7 +502,7 @@ func TestStore_DeleteTombstoneHidesOlderPackedRecord(t *testing.T) {
 func TestStore_DeleteRemoteOnlyKeyPreservesOtherCheckpointEntriesInSameShard(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	flushed := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
 	keyA, keyB := sameShardKeys("remote-delete-restart")
 
@@ -522,12 +522,12 @@ func TestStore_DeleteRemoteOnlyKeyPreservesOtherCheckpointEntriesInSameShard(t *
 	}
 	require.NoError(t, flushed.flushPending(ctx))
 
-	remoteOnly := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	remoteOnly.autoFlush = false
 
 	require.NoError(t, remoteOnly.Delete(ctx, keyA))
 
-	observer := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	observer := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	observer.autoFlush = false
 
 	_, _, err := observer.GetStream(ctx, keyA)
@@ -552,7 +552,7 @@ func TestStore_DeleteRemoteOnlyKeyPreservesOtherCheckpointEntriesInSameShard(t *
 func TestStore_GetStream_FallsBackToLegacyManifestRemoteData(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	blobPath := store.blobPath("legacy-remote", "v1")
@@ -576,7 +576,7 @@ func TestStore_GetStream_FallsBackToLegacyManifestRemoteData(t *testing.T) {
 func TestStore_GetStream_FallsBackToDefaultPageSizeForLegacyPagedManifest(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	store := New(bucket, log.NewNopLogger(), WithDataDir(t.TempDir()))
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
 	body := strings.Repeat("paged-manifest-body-", 64)

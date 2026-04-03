@@ -36,7 +36,7 @@ func (s *Store) Compact(ctx context.Context, olderThan time.Duration) (SweepStat
 }
 
 func (s *Store) CompactStale(ctx context.Context) (SweepStats, error) {
-	return s.Compact(ctx, s.defaultGCGrace)
+	return s.Compact(ctx, s.gcGrace)
 }
 
 func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepStats) (map[string]struct{}, error) {

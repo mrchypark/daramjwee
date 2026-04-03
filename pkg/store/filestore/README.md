@@ -28,15 +28,15 @@ store, err := filestore.New(
     "/path/to/cache",
     logger,
     filestore.WithCapacity(1024*1024), // 1MB capacity
-    filestore.WithEvictionPolicy(policy.NewLRU()),
+    filestore.WithEviction(policy.NewLRU()),
 )
 ```
 
 ### Available Options
 
 - `WithCapacity(capacity int64)`: 최대 용량 설정 (바이트 단위)
-- `WithEvictionPolicy(policy daramjwee.EvictionPolicy)`: eviction 정책 설정
-- `WithCopyAndTruncate()`: NFS 호환성을 위한 copy-and-truncate 전략 사용
+- `WithEviction(policy daramjwee.EvictionPolicy)`: eviction 정책 설정
+- `WithCopyWrite()`: NFS 호환성을 위한 copy-and-truncate 전략 사용
 
 ### Supported Eviction Policies
 

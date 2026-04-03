@@ -91,7 +91,7 @@ func testPolicy(logger log.Logger, policyName string, pol daramjwee.EvictionPoli
 		tempDir,
 		logger,
 		filestore.WithCapacity(800), // 800 bytes capacity
-		filestore.WithEvictionPolicy(pol),
+		filestore.WithEviction(pol),
 	)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create file store: %v", err))

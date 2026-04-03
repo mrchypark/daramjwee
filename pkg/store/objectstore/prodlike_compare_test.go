@@ -83,12 +83,12 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 
 	writeDir := t.TempDir()
 	store := New(bucket, log.NewNopLogger(),
-		WithDataDir(writeDir),
-		WithPackedObjectThreshold(packedThreshold),
+		WithDir(writeDir),
+		WithPackThreshold(packedThreshold),
 		WithPageSize(pageSize),
-		WithMemoryBlockCache(blockCacheBytes),
-		WithMemoryCheckpointCache(checkpointCacheBytes),
-		WithCheckpointCacheTTL(checkpointCacheTTL),
+		WithBlockCache(blockCacheBytes),
+		WithCheckpointCache(checkpointCacheBytes),
+		WithCheckpointTTL(checkpointCacheTTL),
 	)
 	store.autoFlush = false
 
@@ -113,12 +113,12 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 	bucket.reset()
 
 	coldStore := New(bucket, log.NewNopLogger(),
-		WithDataDir(t.TempDir()),
-		WithPackedObjectThreshold(packedThreshold),
+		WithDir(t.TempDir()),
+		WithPackThreshold(packedThreshold),
 		WithPageSize(pageSize),
-		WithMemoryBlockCache(blockCacheBytes),
-		WithMemoryCheckpointCache(checkpointCacheBytes),
-		WithCheckpointCacheTTL(checkpointCacheTTL),
+		WithBlockCache(blockCacheBytes),
+		WithCheckpointCache(checkpointCacheBytes),
+		WithCheckpointTTL(checkpointCacheTTL),
 	)
 	coldStore.autoFlush = false
 
@@ -233,10 +233,10 @@ func defaultAzuriteConnectionString() string {
 type recordingBucket struct {
 	objstore.Bucket
 
-	mu            sync.Mutex
-	stats         providerStats
-	bytesSent     atomic.Int64
-	bytesReceived atomic.Int64
+	mu               sync.Mutex
+	stats            providerStats
+	bytesSent        atomic.Int64
+	bytesReceived    atomic.Int64
 	connectionString string
 	containerName    string
 }

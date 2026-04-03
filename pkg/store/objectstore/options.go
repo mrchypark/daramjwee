@@ -5,23 +5,23 @@ import "time"
 type Option func(*config)
 
 type config struct {
-	dataDir               string
-	prefix                string
-	defaultGCGrace        time.Duration
-	packedObjectThreshold int64
-	wholeThreshold        int64
-	pageSize              int64
-	memoryPageCacheBytes  int64
-	memoryBlockCacheBytes int64
-	memoryCheckpointBytes int64
-	checkpointCacheTTL    time.Duration
+	dir                  string
+	prefix               string
+	gcGrace              time.Duration
+	packThreshold        int64
+	pagedThreshold       int64
+	pageSize             int64
+	pageCacheBytes       int64
+	blockCacheBytes      int64
+	checkpointCacheBytes int64
+	checkpointTTL        time.Duration
 }
 
-// WithDataDir configures the local objectstore working directory used for
+// WithDir configures the local objectstore working directory used for
 // ingest segments and catalog state. When omitted, a temporary directory is used.
-func WithDataDir(dir string) Option {
+func WithDir(dir string) Option {
 	return func(cfg *config) {
-		cfg.dataDir = dir
+		cfg.dir = dir
 	}
 }
 
@@ -32,28 +32,28 @@ func WithPrefix(prefix string) Option {
 	}
 }
 
-// WithDefaultGCGrace configures the default grace period for conservative GC sweeps.
-func WithDefaultGCGrace(grace time.Duration) Option {
+// WithGCGrace configures the default grace period for conservative GC sweeps.
+func WithGCGrace(grace time.Duration) Option {
 	return func(cfg *config) {
-		cfg.defaultGCGrace = grace
+		cfg.gcGrace = grace
 	}
 }
 
-// WithPackedObjectThreshold configures the size threshold for packing flushed
+// WithPackThreshold configures the size threshold for packing flushed
 // records into shard segments. Records larger than the threshold are uploaded
 // as direct remote blobs instead. A non-positive threshold keeps all records
 // on the packed-segment path.
-func WithPackedObjectThreshold(threshold int64) Option {
+func WithPackThreshold(threshold int64) Option {
 	return func(cfg *config) {
-		cfg.packedObjectThreshold = threshold
+		cfg.packThreshold = threshold
 	}
 }
 
-// WithWholeObjectThreshold chooses paged layout when the logical object size exceeds the threshold.
+// WithPagedThreshold chooses paged layout when the logical object size exceeds the threshold.
 // A non-positive threshold keeps whole layout for all objects.
-func WithWholeObjectThreshold(threshold int64) Option {
+func WithPagedThreshold(threshold int64) Option {
 	return func(cfg *config) {
-		cfg.wholeThreshold = threshold
+		cfg.pagedThreshold = threshold
 	}
 }
 
@@ -64,35 +64,35 @@ func WithPageSize(size int64) Option {
 	}
 }
 
-// WithMemoryPageCache enables in-memory page caching with the provided byte capacity.
+// WithPageCache enables in-memory page caching with the provided byte capacity.
 // A non-positive capacity disables the page cache.
-func WithMemoryPageCache(capacityBytes int64) Option {
+func WithPageCache(capacityBytes int64) Option {
 	return func(cfg *config) {
-		cfg.memoryPageCacheBytes = capacityBytes
+		cfg.pageCacheBytes = capacityBytes
 	}
 }
 
-// WithMemoryBlockCache enables in-memory block caching with the provided byte capacity.
+// WithBlockCache enables in-memory block caching with the provided byte capacity.
 // A non-positive capacity disables the block cache.
-func WithMemoryBlockCache(capacityBytes int64) Option {
+func WithBlockCache(capacityBytes int64) Option {
 	return func(cfg *config) {
-		cfg.memoryBlockCacheBytes = capacityBytes
+		cfg.blockCacheBytes = capacityBytes
 	}
 }
 
-// WithMemoryCheckpointCache enables in-memory shard checkpoint caching with the
+// WithCheckpointCache enables in-memory shard checkpoint caching with the
 // provided byte capacity. A non-positive capacity disables the cache.
-func WithMemoryCheckpointCache(capacityBytes int64) Option {
+func WithCheckpointCache(capacityBytes int64) Option {
 	return func(cfg *config) {
-		cfg.memoryCheckpointBytes = capacityBytes
+		cfg.checkpointCacheBytes = capacityBytes
 	}
 }
 
-// WithCheckpointCacheTTL sets how long decoded shard checkpoints stay valid in
+// WithCheckpointTTL sets how long decoded shard checkpoints stay valid in
 // the in-memory checkpoint cache before being reloaded from remote storage.
 // A non-positive TTL falls back to the backend default.
-func WithCheckpointCacheTTL(ttl time.Duration) Option {
+func WithCheckpointTTL(ttl time.Duration) Option {
 	return func(cfg *config) {
-		cfg.checkpointCacheTTL = ttl
+		cfg.checkpointTTL = ttl
 	}
 }

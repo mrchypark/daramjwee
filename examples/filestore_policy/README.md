@@ -128,7 +128,7 @@ store, err := filestore.New(
     "/path/to/cache",
     logger,
     filestore.WithCapacity(2*1024*1024),
-    filestore.WithEvictionPolicy(customPolicy),
+    filestore.WithEviction(customPolicy),
 )
 ```
 
@@ -150,7 +150,7 @@ You can create configuration file-based tests by referring to `config.yaml`.
 
 1. **Capacity Settings**: Too small causes frequent eviction, too large wastes memory
 2. **Policy Selection**: Choose policy that matches your workload patterns
-3. **NFS Environment**: Use `WithCopyAndTruncate()` option
+3. **NFS Environment**: Use `WithCopyWrite()` option
 4. **Monitoring**: Adjust log levels to minimize performance impact
 
 ## 🐛 Troubleshooting
