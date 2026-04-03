@@ -80,6 +80,8 @@ type Store struct {
 
 func (s *Store) GetStreamUsesContext() bool { return true }
 
+func (s *Store) BeginSetUsesContext() bool { return true }
+
 var _ daramjwee.Store = (*Store)(nil)
 
 // New creates a new object storage backend.
@@ -246,8 +248,11 @@ func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Met
 }
 
 // BeginSet starts a staged write for a new immutable generation.
-func (s *Store) BeginSet(_ context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.lockManager.Lock(key)
@@ -260,6 +265,7 @@ func (s *Store) BeginSet(_ context.Context, key string, metadata *daramjwee.Meta
 	}
 
 	w := &writer{
+		ctx:      ctx,
 		store:    s,
 		key:      key,
 		segment:  segmentWriter,
