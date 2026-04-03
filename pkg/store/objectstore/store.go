@@ -55,7 +55,7 @@ type Store struct {
 	dataDir         string
 	prefix          string
 	gcGrace         time.Duration
-	packedThreshold int64
+	packThreshold   int64
 	pagedThreshold  int64
 	pageSize        int64
 	blockCache      *blockcache.Cache
@@ -115,7 +115,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		dataDir:         dataDir,
 		prefix:          trimSlashes(cfg.prefix),
 		gcGrace:         cfg.gcGrace,
-		packedThreshold: cfg.packThreshold,
+		packThreshold:   cfg.packThreshold,
 		pagedThreshold:  cfg.pagedThreshold,
 		pageSize:        cfg.pageSize,
 		blockCache:      blockcache.New(cfg.blockCacheBytes),

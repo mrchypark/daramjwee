@@ -170,7 +170,7 @@ func (s *Store) pendingRecordsForShard(shardID string, entries map[string]localC
 }
 
 func (s *Store) shouldUploadDirect(entry localCatalogEntry) bool {
-	return s.packedThreshold > 0 && entry.Length > s.packedThreshold
+	return s.packThreshold > 0 && entry.Length > s.packThreshold
 }
 
 func (s *Store) flushPackedRecords(
