@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mrchypark/daramjwee/internal/worker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -277,7 +278,5 @@ func TestNew_WithWorkerStrategyAllUsesAllStrategy(t *testing.T) {
 	require.False(t, strategyField.IsNil())
 
 	strategyType := strategyField.Elem().Type()
-	require.Equal(t, reflect.Ptr, strategyType.Kind())
-	assert.Equal(t, "AllStrategy", strategyType.Elem().Name())
-	assert.Equal(t, "github.com/mrchypark/daramjwee/internal/worker", strategyType.Elem().PkgPath())
+	assert.Equal(t, reflect.TypeOf((*worker.AllStrategy)(nil)), strategyType)
 }
