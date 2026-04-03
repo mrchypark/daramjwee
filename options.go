@@ -42,7 +42,7 @@ type Option func(cfg *Config) error
 
 // WithTiers sets the regular cache tiers in top-to-bottom order.
 // It replaces the entire tier chain, so any WithTierFreshness override indices
-// are validated against the final order supplied here.
+// are validated against the final order during cache initialization.
 func WithTiers(stores ...Store) Option {
 	return func(cfg *Config) error {
 		cfg.Tiers = append([]Store(nil), stores...)
@@ -117,7 +117,8 @@ func WithCloseTimeout(timeout time.Duration) Option {
 }
 
 // WithFreshness sets the chain-wide default freshness duration for positive and
-// negative cache entries across the ordered tier chain.
+// negative cache entries across the ordered tier chain. A duration of 0 causes
+// entries to be considered stale immediately.
 func WithFreshness(positive, negative time.Duration) Option {
 	return func(cfg *Config) error {
 		if positive < 0 {
@@ -134,6 +135,7 @@ func WithFreshness(positive, negative time.Duration) Option {
 
 // WithTierFreshness overrides the positive and negative freshness durations for
 // a specific tier index. The configured values override the chain-wide default.
+// A duration of 0 causes entries to be considered stale immediately.
 func WithTierFreshness(index int, positive, negative time.Duration) Option {
 	return func(cfg *Config) error {
 		if index < 0 {
