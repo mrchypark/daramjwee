@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.5.0
+
+### ⚠️ Breaking Changes & API Updates
+
+*   **Option naming redesigned across the public API**: Root cache options and store-specific option surfaces were renamed for shorter, more readable call sites.
+    *   Root cache configuration now centers on `WithFreshness(...)`, `WithTierFreshness(...)`, `WithOpTimeout(...)`, `WithCloseTimeout(...)`, `WithWorkers(...)`, `WithWorkerQueue(...)`, `WithWorkerTimeout(...)`, and `WithWorkerStrategy(...)`.
+    *   `filestore` options now use the simplified `WithCopyWrite(...)` and `WithEviction(...)` names.
+    *   `objectstore` options now use the simplified `WithDir(...)`, `WithGCGrace(...)`, `WithPackThreshold(...)`, `WithPagedThreshold(...)`, `WithPageCache(...)`, `WithBlockCache(...)`, `WithCheckpointCache(...)`, and `WithCheckpointTTL(...)` names.
+
+### 🚀 Features & Enhancements
+
+*   **Per-tier freshness overrides**: Added `WithTierFreshness(index, positive, negative)` so ordered tier chains can override freshness on a specific tier while keeping a chain-wide default via `WithFreshness(...)`.
+*   **Expanded migration coverage**: Updated examples, READMEs, and tests across the repository to use the redesigned option names consistently.
+*   **Design documentation for the API redesign**: Added design and implementation notes covering the per-tier freshness work and the option naming redesign.
+
+### 🐛 Bug Fixes & Refinements
+
+*   **Worker strategy preserved during the rename**: Restored configurable worker strategy support through `WithWorkerStrategy(...)` so the naming cleanup does not silently hardcode the background execution mode.
+*   **Cache concrete type compatibility retained**: Restored exported `DaramjweeCache` fields to avoid breaking downstream code that type-asserts to the concrete cache type for inspection or tests.
+*   **Objectstore write lifecycle now follows request context semantics**: `objectstore.Store` now explicitly marks `BeginSet(...)` as context-bound, and objectstore write sinks keep using the request context through `Write` and `Close`.
+*   **Additional validation hardening**: Tightened per-tier freshness override validation, deduplicated freshness validation logic, and aligned objectstore internal threshold naming.
+
+### ✅ Verification
+
+*   `go test ./...`
+
 ## v0.4.2
 
 ### 🚀 Features & Enhancements
