@@ -196,7 +196,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		seen = append(seen, tier)
 	}
 	for idx := range cfg.TierFreshnessOverrides {
-		if idx >= len(cfg.Tiers) {
+		if idx < 0 || idx >= len(cfg.Tiers) {
 			return nil, &ConfigError{fmt.Sprintf("tier freshness override index %d is out of range", idx)}
 		}
 	}

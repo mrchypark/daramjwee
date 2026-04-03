@@ -280,3 +280,19 @@ func TestNew_WithWorkerStrategyAllUsesAllStrategy(t *testing.T) {
 	strategyType := strategyField.Elem().Type()
 	assert.Equal(t, reflect.TypeOf((*worker.AllStrategy)(nil)), strategyType)
 }
+
+func TestNew_WithManualNegativeTierFreshnessOverrideFails(t *testing.T) {
+	cache, err := New(nil,
+		WithTiers(&optionsTestMockStore{id: 1}),
+		func(cfg *Config) error {
+			cfg.TierFreshnessOverrides = map[int]TierFreshnessOverride{
+				-1: {Positive: time.Second, Negative: time.Second},
+			}
+			return nil
+		},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tier freshness override index -1 is out of range")
+	assert.Nil(t, cache)
+}
