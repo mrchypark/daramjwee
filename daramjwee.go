@@ -207,18 +207,18 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 	}
 
 	c := &DaramjweeCache{
-		Logger:                 logger,
-		Tiers:                  append([]Store(nil), cfg.Tiers...),
-		Worker:                 workerManager,
-		OpTimeout:              cfg.OpTimeout,
-		CloseTimeout:           cfg.CloseTimeout,
-		PositiveFreshness:      cfg.PositiveFreshness,
-		NegativeFreshness:      cfg.NegativeFreshness,
-		TierFreshnessOverrides: cloneTierFreshnessOverrides(cfg.TierFreshnessOverrides),
+		logger:                 logger,
+		tiers:                  append([]Store(nil), cfg.Tiers...),
+		worker:                 workerManager,
+		opTimeout:              cfg.OpTimeout,
+		closeTimeout:           cfg.CloseTimeout,
+		positiveFreshness:      cfg.PositiveFreshness,
+		negativeFreshness:      cfg.NegativeFreshness,
+		tierFreshnessOverrides: cloneTierFreshnessOverrides(cfg.TierFreshnessOverrides),
 		loggingDisabled:        isNoopLogger(logger),
 	}
 
-	level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", c.OpTimeout)
+	level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", c.opTimeout)
 	return c, nil
 }
 
