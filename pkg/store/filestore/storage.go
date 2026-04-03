@@ -55,7 +55,8 @@ type Option func(*FileStore)
 
 // WithCopyWrite sets the store to use a copy-and-truncate strategy
 // instead of an atomic rename. This can be necessary for compatibility with
-// some network filesystems like NFS.
+// some network filesystems like NFS, but it is non-atomic and may leave
+// partial or orphaned files behind if a write fails.
 func WithCopyWrite() Option {
 	return func(fs *FileStore) {
 		fs.useCopyWrite = true

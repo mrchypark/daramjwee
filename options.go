@@ -40,6 +40,8 @@ type TierFreshnessOverride struct {
 type Option func(cfg *Config) error
 
 // WithTiers sets the regular cache tiers in top-to-bottom order.
+// It replaces the entire tier chain, so any WithTierFreshness override indices
+// are validated against the final order supplied here.
 func WithTiers(stores ...Store) Option {
 	return func(cfg *Config) error {
 		cfg.Tiers = append([]Store(nil), stores...)

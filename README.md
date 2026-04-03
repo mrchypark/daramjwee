@@ -217,6 +217,9 @@ cache, err := daramjwee.New(
 ```
 
 Tier indexes follow the order passed to `WithTiers(...)`.
+Because `WithTiers(...)` replaces the whole chain, it is best to define the
+final tier list and any `WithTierFreshness(...)` overrides together in the same
+`daramjwee.New(...)` call.
 
 ## objectstore Configuration
 
