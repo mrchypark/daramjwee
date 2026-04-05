@@ -2,12 +2,12 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 
 	"github.com/go-kit/log"
-	"github.com/goccy/go-json"
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
 	"github.com/stretchr/testify/assert"
@@ -15,11 +15,14 @@ import (
 	"github.com/thanos-io/objstore"
 )
 
+func legacyMetadataJSON(cacheTag string) []byte {
+	return []byte(fmt.Sprintf(`{"ETag":%q,"IsNegative":false,"CachedAt":"0001-01-01T00:00:00Z"}`, cacheTag))
+}
+
 func TestObjstoreAdapter_ReadsLegacyObjects(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	metaBytes, err := json.Marshal(&daramjwee.Metadata{CacheTag: "legacy"})
-	require.NoError(t, err)
+	metaBytes := legacyMetadataJSON("legacy")
 	require.NoError(t, bucket.Upload(ctx, "legacy-key", strings.NewReader("legacy body")))
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("legacy-key"), strings.NewReader(string(metaBytes))))
 
@@ -42,8 +45,7 @@ func TestObjstoreAdapter_ReadsLegacyObjects(t *testing.T) {
 func TestObjstoreAdapter_PrefersModernEntriesOverLegacyFallback(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	metaBytes, err := json.Marshal(&daramjwee.Metadata{CacheTag: "legacy"})
-	require.NoError(t, err)
+	metaBytes := legacyMetadataJSON("legacy")
 	require.NoError(t, bucket.Upload(ctx, "same-key", strings.NewReader("legacy body")))
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("same-key"), strings.NewReader(string(metaBytes))))
 
@@ -67,15 +69,14 @@ func TestObjstoreAdapter_PrefersModernEntriesOverLegacyFallback(t *testing.T) {
 func TestObjstoreAdapter_DeleteRemovesLegacyObjects(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	metaBytes, err := json.Marshal(&daramjwee.Metadata{CacheTag: "legacy"})
-	require.NoError(t, err)
+	metaBytes := legacyMetadataJSON("legacy")
 	require.NoError(t, bucket.Upload(ctx, "legacy-delete", strings.NewReader("legacy body")))
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("legacy-delete"), strings.NewReader(string(metaBytes))))
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
 	require.NoError(t, store.Delete(ctx, "legacy-delete"))
 
-	_, _, err = store.GetStream(ctx, "legacy-delete")
+	_, _, err := store.GetStream(ctx, "legacy-delete")
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 

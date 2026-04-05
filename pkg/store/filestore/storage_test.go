@@ -2,6 +2,7 @@ package filestore
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -41,6 +42,19 @@ func setupTestStore(t *testing.T, opts ...Option) *FileStore {
 	require.NoError(t, err, "failed to create filestore")
 
 	return fs
+}
+
+func writeLegacyMetadataForTest(t *testing.T, w io.Writer, cacheTag string) {
+	t.Helper()
+	metaBytes := []byte(fmt.Sprintf(`{"ETag":%q,"IsNegative":false,"CachedAt":"0001-01-01T00:00:00Z"}`, cacheTag))
+
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(metaBytes)))
+
+	_, err := w.Write(lenBuf[:])
+	require.NoError(t, err)
+	_, err = w.Write(metaBytes)
+	require.NoError(t, err)
 }
 
 func TestFileStore_WriteSinkConformance(t *testing.T) {
@@ -601,7 +615,7 @@ func TestFileStore_LegacyPathRemainsReadableAndDeletable(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy"}))
+	writeLegacyMetadataForTest(t, f, "legacy")
 	_, err = f.Write([]byte("legacy-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -633,7 +647,7 @@ func TestFileStore_OverwriteLegacyPathRemovesLegacyFile(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy"}))
+	writeLegacyMetadataForTest(t, f, "legacy")
 	_, err = f.Write([]byte("legacy-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -696,7 +710,7 @@ func TestFileStore_EncodedNamespaceDoesNotOverwriteLegacyB64PrefixedKey(t *testi
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy"}))
+	writeLegacyMetadataForTest(t, f, "legacy")
 	_, err = f.Write([]byte("legacy-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -740,7 +754,7 @@ func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFile(t *testing.T)
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy-ambiguous"}))
+	writeLegacyMetadataForTest(t, f, "legacy-ambiguous")
 	_, err = f.Write([]byte("legacy-ambiguous-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -778,7 +792,7 @@ func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFileWithTrailingSl
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy-trailing"}))
+	writeLegacyMetadataForTest(t, f, "legacy-trailing")
 	_, err = f.Write([]byte("legacy-trailing-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -808,7 +822,7 @@ func TestFileStore_LegacyB64PrefixedKeyRemainsReachable(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy-b64"}))
+	writeLegacyMetadataForTest(t, f, "legacy-b64")
 	_, err = f.Write([]byte("legacy-b64-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -840,7 +854,7 @@ func TestFileStore_ReopenPreservesLegacyB64PrefixedKeyTracking(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy-b64"}))
+	writeLegacyMetadataForTest(t, f, "legacy-b64")
 	_, err = f.Write([]byte("legacy-b64-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
