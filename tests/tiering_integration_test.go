@@ -270,6 +270,41 @@ func TestCache_ConditionalStaleHitReturnsNotModifiedAndRefreshesWithoutClose(t *
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
+func TestCache_LowerTierConditionalHitPromotesFreshEntryToTop(t *testing.T) {
+	top := newMockStore()
+	lower := newMockStore()
+	cachedAt := time.Now()
+	lower.setData("conditional-lower-key", "cached-value", &daramjwee.Metadata{
+		CacheTag: "cache-v1",
+		CachedAt: cachedAt,
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	resp, err := cache.Get(context.Background(), "conditional-lower-key", daramjwee.GetRequest{IfNoneMatch: "cache-v1"}, &mockFetcher{})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Equal(t, daramjwee.GetStatusNotModified, resp.Status)
+	require.Nil(t, resp.Body)
+
+	reader, meta, err := top.GetStream(context.Background(), "conditional-lower-key")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "cached-value", string(body))
+	assert.Equal(t, "cache-v1", meta.CacheTag)
+	assert.Equal(t, cachedAt.UnixNano(), meta.CachedAt.UnixNano())
+}
+
 func TestCache_LowerTierNegativeStaleHitNotModifiedPromotesNegativeToTop(t *testing.T) {
 	top := newMockStore()
 	lower := newMockStore()

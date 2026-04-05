@@ -308,7 +308,11 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 
 	isStale := c.isTierCachedStale(meta, tierIndex)
 	if !meta.IsNegative && req.IfNoneMatch != "" && req.IfNoneMatch == meta.CacheTag {
-		if err := src.Close(); err != nil {
+		if !isStale {
+			if err := c.promoteLowerTierHitToTop(requestCtx, setupCtx, key, tierIndex, src, metaToPromote); err != nil {
+				c.warnLog("msg", "failed to promote conditional lower-tier hit to top tier", "key", key, "tier_index", tierIndex, "err", err)
+			}
+		} else if err := src.Close(); err != nil {
 			cancel()
 			return nil, err
 		}
@@ -370,6 +374,27 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 		}
 	}
 	return newGetResponse(GetStatusOK, streamThrough(src, writer, cancel, onPublish), meta), nil
+}
+
+func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, metadata *Metadata) error {
+	defer src.Close()
+
+	target := c.topWriteStore()
+	writer, err := c.setStreamToStore(c.beginSetContextForStore(requestCtx, setupCtx, target), target, key, metadata)
+	if err != nil {
+		return err
+	}
+	if _, copyErr := io.Copy(writer, src); copyErr != nil {
+		abortErr := writer.Abort()
+		return errors.Join(copyErr, abortErr)
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	if destinations := c.regularFanoutDestinations(tierIndex); len(destinations) > 0 {
+		c.schedulePersistFromTop(key, destinations...)
+	}
+	return nil
 }
 
 func (c *DaramjweeCache) refreshOnCloseCallback(key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata) func() {
