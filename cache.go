@@ -526,7 +526,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 				if errors.Is(err, ErrNilMetadata) {
 					return nil, err
 				}
-				c.warnLog("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
+				c.warnLog("msg", "hot cache entry not found after 304 from origin", "key", key, "err", err)
 				cancel()
 				return newGetResponse(GetStatusNotFound, nil, nil), nil
 			}
