@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +25,29 @@ type Config struct {
 	Debug   bool   `json:"debug"`
 	Port    int    `json:"port"`
 }
+
+type statusOnlyCache struct {
+	resp *daramjwee.GetResponse
+	err  error
+}
+
+func (c statusOnlyCache) Get(context.Context, string, daramjwee.GetRequest, daramjwee.Fetcher) (*daramjwee.GetResponse, error) {
+	return c.resp, c.err
+}
+
+func (statusOnlyCache) Set(context.Context, string, *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return nil, assert.AnError
+}
+
+func (statusOnlyCache) Delete(context.Context, string) error {
+	return nil
+}
+
+func (statusOnlyCache) ScheduleRefresh(context.Context, string, daramjwee.Fetcher) error {
+	return nil
+}
+
+func (statusOnlyCache) Close() {}
 
 func createTestCache() (daramjwee.Cache, error) {
 	logger := log.NewNopLogger()
@@ -325,6 +349,19 @@ func TestGenericCache_StaleEntryHandlesNotModified(t *testing.T) {
 	}, time.Second, 10*time.Millisecond) {
 		t.Fatalf("expected fetcher to be called twice, got %d", fetchCount)
 	}
+}
+
+func TestGenericCache_GetUnexpectedStatusIncludesKeyAndStatus(t *testing.T) {
+	stringCache := NewGeneric[string](statusOnlyCache{
+		resp: &daramjwee.GetResponse{Status: daramjwee.GetStatusNotModified},
+	})
+
+	_, err := stringCache.Get(context.Background(), "product:42", nil)
+	if err == nil {
+		t.Fatal("expected error for unexpected status")
+	}
+	assert.True(t, strings.Contains(err.Error(), "product:42"))
+	assert.True(t, strings.Contains(err.Error(), daramjwee.GetStatusNotModified.String()))
 }
 
 func TestGenericCache_GetWithDefault(t *testing.T) {

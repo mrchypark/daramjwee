@@ -59,7 +59,7 @@ func (gc *GenericCache[T]) Get(ctx context.Context, key string, fetcher GenericF
 		return zero, daramjwee.ErrNotFound
 	}
 	if reader.Status != daramjwee.GetStatusOK {
-		return zero, fmt.Errorf("unexpected cache get status: %d", reader.Status)
+		return zero, fmt.Errorf("unexpected cache get status for key %q: %s", key, reader.Status)
 	}
 
 	payload, err := io.ReadAll(reader)

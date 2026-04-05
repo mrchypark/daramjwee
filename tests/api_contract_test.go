@@ -209,3 +209,10 @@ func TestCache_GetReturnsBodyAndDecisionMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte("cached-value"), body)
 }
+
+func TestGetStatusString(t *testing.T) {
+	assert.Equal(t, "ok", daramjwee.GetStatusOK.String())
+	assert.Equal(t, "not_modified", daramjwee.GetStatusNotModified.String())
+	assert.Equal(t, "not_found", daramjwee.GetStatusNotFound.String())
+	assert.Equal(t, "GetStatus(99)", daramjwee.GetStatus(99).String())
+}

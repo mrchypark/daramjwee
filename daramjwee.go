@@ -80,6 +80,19 @@ const (
 	GetStatusNotFound
 )
 
+func (s GetStatus) String() string {
+	switch s {
+	case GetStatusOK:
+		return "ok"
+	case GetStatusNotModified:
+		return "not_modified"
+	case GetStatusNotFound:
+		return "not_found"
+	default:
+		return fmt.Sprintf("GetStatus(%d)", int(s))
+	}
+}
+
 // GetResponse carries the result of a cache read decision.
 // It also implements io.ReadCloser by delegating to Body, allowing callers to
 // continue using io.ReadAll/Close on successful body-bearing responses.
