@@ -120,16 +120,12 @@ func (r *GetResponse) Close() error {
 }
 
 func ifNoneMatchMatchesCacheTag(ifNoneMatch, cacheTag string) bool {
-	if ifNoneMatch == "" || cacheTag == "" {
+	if strings.TrimSpace(ifNoneMatch) == "" {
 		return false
 	}
 
 	normalizedTag := normalizeEntityTag(cacheTag)
-	if normalizedTag == "" {
-		return false
-	}
-
-	for _, candidate := range strings.Split(ifNoneMatch, ",") {
+	for _, candidate := range splitEntityTagList(ifNoneMatch) {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
 			continue
@@ -137,12 +133,39 @@ func ifNoneMatchMatchesCacheTag(ifNoneMatch, cacheTag string) bool {
 		if candidate == "*" {
 			return true
 		}
+		if normalizedTag == "" {
+			continue
+		}
 		if normalizeEntityTag(candidate) == normalizedTag {
 			return true
 		}
 	}
 
 	return false
+}
+
+func splitEntityTagList(header string) []string {
+	parts := make([]string, 0, strings.Count(header, ",")+1)
+	start := 0
+	inQuotes := false
+	escaped := false
+
+	for i, r := range header {
+		switch {
+		case escaped:
+			escaped = false
+		case inQuotes && r == '\\':
+			escaped = true
+		case r == '"':
+			inQuotes = !inQuotes
+		case r == ',' && !inQuotes:
+			parts = append(parts, header[start:i])
+			start = i + 1
+		}
+	}
+
+	parts = append(parts, header[start:])
+	return parts
 }
 
 func normalizeEntityTag(tag string) string {

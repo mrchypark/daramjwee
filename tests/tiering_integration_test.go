@@ -271,24 +271,27 @@ func TestCache_ConditionalStaleHitReturnsNotModifiedAndRefreshesWithoutClose(t *
 }
 
 func TestCache_ConditionalHitAcceptsHTTPIfNoneMatchForms(t *testing.T) {
-	top := newMockStore()
-	top.setData("conditional-header-key", "cached-value", &daramjwee.Metadata{
-		CacheTag: "cache-v1",
-		CachedAt: time.Now(),
-	})
-
 	tests := []struct {
 		name        string
 		ifNoneMatch string
+		cacheTag    string
 	}{
-		{name: "quoted", ifNoneMatch: "\"cache-v1\""},
-		{name: "weak and csv", ifNoneMatch: "\"other\", W/\"cache-v1\""},
-		{name: "wildcard", ifNoneMatch: "*"},
+		{name: "quoted", ifNoneMatch: "\"cache-v1\"", cacheTag: "cache-v1"},
+		{name: "weak and csv", ifNoneMatch: "\"other\", W/\"cache-v1\"", cacheTag: "cache-v1"},
+		{name: "wildcard", ifNoneMatch: "*", cacheTag: "cache-v1"},
+		{name: "quoted comma", ifNoneMatch: "\"rev,42\"", cacheTag: "rev,42"},
+		{name: "wildcard with empty cache tag", ifNoneMatch: "*", cacheTag: ""},
 	}
 
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			top := newMockStore()
+			top.setData("conditional-header-key", "cached-value", &daramjwee.Metadata{
+				CacheTag: tt.cacheTag,
+				CachedAt: time.Now(),
+			})
+
 			cache, err := daramjwee.New(
 				nil,
 				daramjwee.WithTiers(top),
@@ -304,6 +307,7 @@ func TestCache_ConditionalHitAcceptsHTTPIfNoneMatchForms(t *testing.T) {
 			require.NotNil(t, resp)
 			require.Equal(t, daramjwee.GetStatusNotModified, resp.Status)
 			require.Nil(t, resp.Body)
+			assert.Equal(t, tt.cacheTag, resp.Metadata.CacheTag)
 			assert.Equal(t, 0, fetcher.getFetchCount())
 		})
 	}

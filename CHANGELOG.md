@@ -15,8 +15,26 @@
 
 ### 🧰 Migration Notes
 
-*   Update `cache.Get(ctx, key, fetcher)` to `cache.Get(ctx, key, daramjwee.GetRequest{}, fetcher)`.
-*   Check `resp.Status` for `GetStatusNotFound` and `GetStatusNotModified`.
+*   Update `cache.Get(ctx, key, fetcher)` to the new request/response form and handle `resp.Status` explicitly. For example:
+
+    ```go
+    resp, err := cache.Get(ctx, key, daramjwee.GetRequest{
+        IfNoneMatch: clientETag,
+    }, fetcher)
+    if err != nil {
+        return err
+    }
+    defer resp.Close()
+
+    switch resp.Status {
+    case daramjwee.GetStatusOK:
+        // stream resp.Body
+    case daramjwee.GetStatusNotModified:
+        // return 304 / skip body work
+    case daramjwee.GetStatusNotFound:
+        // return 404 / handle negative cache
+    }
+    ```
 *   Replace `Metadata.ETag` reads/writes with `Metadata.CacheTag`.
 
 ### ✅ Verification
