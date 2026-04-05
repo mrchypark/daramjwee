@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/go-kit/log"
@@ -116,6 +117,43 @@ func (r *GetResponse) Close() error {
 		return nil
 	}
 	return r.Body.Close()
+}
+
+func ifNoneMatchMatchesCacheTag(ifNoneMatch, cacheTag string) bool {
+	if ifNoneMatch == "" || cacheTag == "" {
+		return false
+	}
+
+	normalizedTag := normalizeEntityTag(cacheTag)
+	if normalizedTag == "" {
+		return false
+	}
+
+	for _, candidate := range strings.Split(ifNoneMatch, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if candidate == "*" {
+			return true
+		}
+		if normalizeEntityTag(candidate) == normalizedTag {
+			return true
+		}
+	}
+
+	return false
+}
+
+func normalizeEntityTag(tag string) string {
+	tag = strings.TrimSpace(tag)
+	if len(tag) >= 2 && (strings.HasPrefix(tag, "W/") || strings.HasPrefix(tag, "w/")) {
+		tag = strings.TrimSpace(tag[2:])
+	}
+	if len(tag) >= 2 && tag[0] == '"' && tag[len(tag)-1] == '"' {
+		tag = tag[1 : len(tag)-1]
+	}
+	return tag
 }
 
 // FetchResult holds the data and metadata returned from a successful fetch operation.

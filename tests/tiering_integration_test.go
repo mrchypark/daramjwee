@@ -270,6 +270,45 @@ func TestCache_ConditionalStaleHitReturnsNotModifiedAndRefreshesWithoutClose(t *
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
+func TestCache_ConditionalHitAcceptsHTTPIfNoneMatchForms(t *testing.T) {
+	top := newMockStore()
+	top.setData("conditional-header-key", "cached-value", &daramjwee.Metadata{
+		CacheTag: "cache-v1",
+		CachedAt: time.Now(),
+	})
+
+	tests := []struct {
+		name        string
+		ifNoneMatch string
+	}{
+		{name: "quoted", ifNoneMatch: "\"cache-v1\""},
+		{name: "weak and csv", ifNoneMatch: "\"other\", W/\"cache-v1\""},
+		{name: "wildcard", ifNoneMatch: "*"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			cache, err := daramjwee.New(
+				nil,
+				daramjwee.WithTiers(top),
+				daramjwee.WithFreshness(time.Hour, time.Hour),
+				daramjwee.WithOpTimeout(2*time.Second),
+			)
+			require.NoError(t, err)
+			defer cache.Close()
+
+			fetcher := &mockFetcher{}
+			resp, err := cache.Get(context.Background(), "conditional-header-key", daramjwee.GetRequest{IfNoneMatch: tt.ifNoneMatch}, fetcher)
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			require.Equal(t, daramjwee.GetStatusNotModified, resp.Status)
+			require.Nil(t, resp.Body)
+			assert.Equal(t, 0, fetcher.getFetchCount())
+		})
+	}
+}
+
 func TestCache_LowerTierConditionalHitPromotesFreshEntryToTop(t *testing.T) {
 	top := newMockStore()
 	lower := newMockStore()

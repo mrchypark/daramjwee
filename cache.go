@@ -266,7 +266,7 @@ func (c *DaramjweeCache) handleTopTierHit(_ context.Context, key string, req Get
 	c.debugLog("msg", "top tier hit", "key", key)
 
 	isStale := c.isTierCachedStale(meta, 0)
-	if !meta.IsNegative && req.IfNoneMatch != "" && req.IfNoneMatch == meta.CacheTag {
+	if !meta.IsNegative && ifNoneMatchMatchesCacheTag(req.IfNoneMatch, meta.CacheTag) {
 		if err := stream.Close(); err != nil {
 			cancel()
 			return nil, err
@@ -307,7 +307,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 	}
 
 	isStale := c.isTierCachedStale(meta, tierIndex)
-	if !meta.IsNegative && req.IfNoneMatch != "" && req.IfNoneMatch == meta.CacheTag {
+	if !meta.IsNegative && ifNoneMatchMatchesCacheTag(req.IfNoneMatch, meta.CacheTag) {
 		if !isStale {
 			if err := c.promoteLowerTierHitToTop(requestCtx, setupCtx, key, tierIndex, src, metaToPromote); err != nil {
 				c.warnLog("msg", "failed to promote conditional lower-tier hit to top tier", "key", key, "tier_index", tierIndex, "err", err)
@@ -560,7 +560,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 				cancel()
 				return newGetResponse(GetStatusNotFound, nil, meta), nil
 			}
-			if req.IfNoneMatch != "" && req.IfNoneMatch == meta.CacheTag {
+			if ifNoneMatchMatchesCacheTag(req.IfNoneMatch, meta.CacheTag) {
 				if err := stream.Close(); err != nil {
 					cancel()
 					return nil, err
