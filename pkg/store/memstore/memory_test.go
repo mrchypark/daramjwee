@@ -96,7 +96,7 @@ func TestMemStore_SetAndGetStream(t *testing.T) {
 	content := "hello world"
 
 	// Set data
-	writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+	writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
 	require.NoError(t, err)
@@ -114,7 +114,7 @@ func TestMemStore_SetAndGetStream(t *testing.T) {
 	readBytes, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, content, string(readBytes))
-	assert.Equal(t, etag, meta.ETag)
+	assert.Equal(t, etag, meta.CacheTag)
 }
 
 // TestMemStore_Get_NotFound tests getting a non-existent key.
@@ -139,7 +139,7 @@ func TestMemStore_Stat(t *testing.T) {
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 
 	// Set data
-	writer, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+	writer, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 	writer.Write([]byte("data"))
 	writer.Close()
 
@@ -147,7 +147,7 @@ func TestMemStore_Stat(t *testing.T) {
 	meta, err := store.Stat(ctx, key)
 	require.NoError(t, err)
 	require.NotNil(t, meta)
-	assert.Equal(t, etag, meta.ETag)
+	assert.Equal(t, etag, meta.CacheTag)
 
 	// Verify policy was touched
 	assert.Contains(t, policy.touched, key, "Stat should touch the policy")
@@ -162,7 +162,7 @@ func TestMemStore_Delete(t *testing.T) {
 	content := "some data"
 
 	// Set data
-	writer, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	writer.Write([]byte(content))
 	writer.Close()
 
@@ -192,14 +192,14 @@ func TestMemStore_Overwrite(t *testing.T) {
 	key := "overwrite-key"
 
 	// 1. Write initial version
-	writer1, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer1, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	writer1.Write([]byte("version 1"))
 	writer1.Close()
 	assert.Equal(t, int64(len("version 1")), store.currentSize)
 
 	// 2. Write new version
 	newContent := "this is version 2"
-	writer2, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v2"})
+	writer2, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
 	writer2.Write([]byte(newContent))
 	writer2.Close()
 
@@ -211,7 +211,7 @@ func TestMemStore_Overwrite(t *testing.T) {
 	defer reader.Close()
 	readBytes, _ := io.ReadAll(reader)
 
-	assert.Equal(t, "v2", meta.ETag)
+	assert.Equal(t, "v2", meta.CacheTag)
 	assert.Equal(t, newContent, string(readBytes))
 }
 
@@ -225,7 +225,7 @@ func TestMemStore_Eviction(t *testing.T) {
 	policy.setKeysToEvict("key1")
 
 	// 2. Add first item (10 bytes)
-	writer1, _ := store.BeginSet(ctx, "key1", &daramjwee.Metadata{ETag: "v1"})
+	writer1, _ := store.BeginSet(ctx, "key1", &daramjwee.Metadata{CacheTag: "v1"})
 	writer1.Write([]byte("0123456789"))
 	writer1.Close()
 	assert.Equal(t, int64(10), store.currentSize)
@@ -233,7 +233,7 @@ func TestMemStore_Eviction(t *testing.T) {
 	require.NoError(t, err, "key1 should exist before eviction")
 
 	// 3. Add second item (15 bytes), which exceeds capacity (10 + 15 > 20)
-	writer2, _ := store.BeginSet(ctx, "key2", &daramjwee.Metadata{ETag: "v2"})
+	writer2, _ := store.BeginSet(ctx, "key2", &daramjwee.Metadata{CacheTag: "v2"})
 	writer2.Write([]byte("0123456789ABCDE"))
 	err = writer2.Close() // Eviction happens here
 	require.NoError(t, err)
@@ -254,7 +254,7 @@ func TestMemStore_PolicyIntegration(t *testing.T) {
 	key1, key2 := "key1", "key2"
 
 	// 1. Add key1
-	writer1, _ := store.BeginSet(ctx, key1, &daramjwee.Metadata{ETag: "v1"})
+	writer1, _ := store.BeginSet(ctx, key1, &daramjwee.Metadata{CacheTag: "v1"})
 	writer1.Write([]byte("data1"))
 	writer1.Close()
 	assert.Contains(t, policy.added, key1, "Add should be called for key1")
@@ -277,11 +277,11 @@ func TestMemStore_PolicyIntegration(t *testing.T) {
 
 	// 5. Eviction (via Add)
 	policy.setKeysToEvict(key2)
-	writer2, _ := store.BeginSet(ctx, key2, &daramjwee.Metadata{ETag: "v2"})
+	writer2, _ := store.BeginSet(ctx, key2, &daramjwee.Metadata{CacheTag: "v2"})
 	writer2.Write([]byte("data2"))
 	writer2.Close() // Add key2
 
-	writer3, _ := store.BeginSet(ctx, "key3", &daramjwee.Metadata{ETag: "v3"})
+	writer3, _ := store.BeginSet(ctx, "key3", &daramjwee.Metadata{CacheTag: "v3"})
 	writer3.Write([]byte("data3-long")) // Exceeds capacity
 	writer3.Close()
 
@@ -305,7 +305,7 @@ func TestMemStore_Concurrency(t *testing.T) {
 			content := "content"
 
 			// Perform a write
-			writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+			writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 			if assert.NoError(t, err) {
 				_, err = writer.Write([]byte(content))
 				if assert.NoError(t, err) {
@@ -317,7 +317,7 @@ func TestMemStore_Concurrency(t *testing.T) {
 			// Perform a read
 			reader, meta, err := store.GetStream(ctx, key)
 			if assert.NoError(t, err) {
-				assert.Equal(t, "v1", meta.ETag)
+				assert.Equal(t, "v1", meta.CacheTag)
 				_, err := io.ReadAll(reader)
 				assert.NoError(t, err)
 				reader.Close()
@@ -337,7 +337,7 @@ func TestMemStore_Parallel(t *testing.T) {
 	// Pre-populate with some data
 	keys := []string{"keyA", "keyB", "keyC", "keyD"}
 	for _, key := range keys {
-		writer, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v_init"})
+		writer, _ := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v_init"})
 		writer.Write([]byte("initial"))
 		writer.Close()
 	}
@@ -345,13 +345,13 @@ func TestMemStore_Parallel(t *testing.T) {
 	t.Run("group", func(t *testing.T) {
 		t.Run("Set-Get", func(t *testing.T) {
 			t.Parallel()
-			writer, _ := store.BeginSet(ctx, "keyA", &daramjwee.Metadata{ETag: "v_setget"})
+			writer, _ := store.BeginSet(ctx, "keyA", &daramjwee.Metadata{CacheTag: "v_setget"})
 			writer.Write([]byte("from set-get"))
 			writer.Close()
 			r, m, err := store.GetStream(ctx, "keyA")
 			assert.NoError(t, err)
 			if err == nil {
-				assert.Equal(t, "v_setget", m.ETag)
+				assert.Equal(t, "v_setget", m.CacheTag)
 				r.Close()
 			}
 		})
@@ -367,7 +367,7 @@ func TestMemStore_Parallel(t *testing.T) {
 		})
 		t.Run("Set-New", func(t *testing.T) {
 			t.Parallel()
-			writer, _ := store.BeginSet(ctx, "keyE", &daramjwee.Metadata{ETag: "v_new"})
+			writer, _ := store.BeginSet(ctx, "keyE", &daramjwee.Metadata{CacheTag: "v_new"})
 			writer.Write([]byte("new key"))
 			writer.Close()
 		})
@@ -398,7 +398,7 @@ func TestMemStore_NegativeCache_NoBody(t *testing.T) {
 	key := "negative-cache-key"
 
 	// Set an item with IsNegative=true and an empty body.
-	meta := &daramjwee.Metadata{ETag: "v-neg", IsNegative: true}
+	meta := &daramjwee.Metadata{CacheTag: "v-neg", IsNegative: true}
 	writer, err := store.BeginSet(ctx, key, meta)
 	require.NoError(t, err)
 	// Write *no* data to the writer.
@@ -419,7 +419,7 @@ func TestMemStore_NegativeCache_NoBody(t *testing.T) {
 
 	// Check metadata
 	assert.True(t, retrievedMeta.IsNegative)
-	assert.Equal(t, "v-neg", retrievedMeta.ETag)
+	assert.Equal(t, "v-neg", retrievedMeta.CacheTag)
 
 	// Check body
 	readBytes, err := io.ReadAll(reader)
@@ -435,7 +435,7 @@ func TestMemStore_SetEmptyValue(t *testing.T) {
 	etag := "v_empty"
 
 	// Set empty data
-	writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+	writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 	require.NoError(t, err)
 	// Write nothing
 	err = writer.Close()
@@ -450,7 +450,7 @@ func TestMemStore_SetEmptyValue(t *testing.T) {
 	readBytes, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "", string(readBytes))
-	assert.Equal(t, etag, meta.ETag)
+	assert.Equal(t, etag, meta.CacheTag)
 }
 
 // TestMemStore_MetadataFields ensures all metadata fields are stored and retrieved correctly.
@@ -462,7 +462,7 @@ func TestMemStore_MetadataFields(t *testing.T) {
 
 	// 1. Set data with complex metadata
 	originalMeta := &daramjwee.Metadata{
-		ETag:       "v-complex",
+		CacheTag:   "v-complex",
 		CachedAt:   now,
 		IsNegative: true,
 	}
@@ -476,7 +476,7 @@ func TestMemStore_MetadataFields(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, retrievedMeta)
 
-	assert.Equal(t, originalMeta.ETag, retrievedMeta.ETag)
+	assert.Equal(t, originalMeta.CacheTag, retrievedMeta.CacheTag)
 	assert.True(t, originalMeta.CachedAt.Equal(retrievedMeta.CachedAt), "GraceUntil should be equal")
 	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
 
@@ -485,7 +485,7 @@ func TestMemStore_MetadataFields(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, retrievedMetaFromStat)
 
-	assert.Equal(t, originalMeta.ETag, retrievedMetaFromStat.ETag)
+	assert.Equal(t, originalMeta.CacheTag, retrievedMetaFromStat.CacheTag)
 	assert.True(t, originalMeta.CachedAt.Equal(retrievedMetaFromStat.CachedAt), "GraceUntil from Stat should be equal")
 	assert.Equal(t, originalMeta.IsNegative, retrievedMetaFromStat.IsNegative)
 }
@@ -505,14 +505,14 @@ func TestMemStore_NormalizesNilMetadataToEmptyMetadata(t *testing.T) {
 	require.NoError(t, err)
 	defer reader.Close()
 	require.NotNil(t, meta)
-	assert.Empty(t, meta.ETag)
+	assert.Empty(t, meta.CacheTag)
 	assert.False(t, meta.IsNegative)
 	assert.True(t, meta.CachedAt.IsZero())
 
 	statMeta, err := store.Stat(ctx, key)
 	require.NoError(t, err)
 	require.NotNil(t, statMeta)
-	assert.Empty(t, statMeta.ETag)
+	assert.Empty(t, statMeta.CacheTag)
 	assert.False(t, statMeta.IsNegative)
 	assert.True(t, statMeta.CachedAt.IsZero())
 }
@@ -521,13 +521,13 @@ func TestMemStore_OldSinkTerminalCallsDoNotAffectNewWrite(t *testing.T) {
 	ctx := context.Background()
 	store := New(0, nil)
 
-	first, err := store.BeginSet(ctx, "first", &daramjwee.Metadata{ETag: "v1"})
+	first, err := store.BeginSet(ctx, "first", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = first.Write([]byte("first-value"))
 	require.NoError(t, err)
 	require.NoError(t, first.Close())
 
-	second, err := store.BeginSet(ctx, "second", &daramjwee.Metadata{ETag: "v2"})
+	second, err := store.BeginSet(ctx, "second", &daramjwee.Metadata{CacheTag: "v2"})
 	require.NoError(t, err)
 	_, err = second.Write([]byte("second-value"))
 	require.NoError(t, err)
@@ -543,7 +543,7 @@ func TestMemStore_OldSinkTerminalCallsDoNotAffectNewWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "second-value", string(body))
 	require.NotNil(t, meta)
-	require.Equal(t, "v2", meta.ETag)
+	require.Equal(t, "v2", meta.CacheTag)
 }
 
 func TestMemStore_ReturnsMetadataCopies(t *testing.T) {
@@ -551,17 +551,17 @@ func TestMemStore_ReturnsMetadataCopies(t *testing.T) {
 	store := New(0, nil)
 	key := "copy-meta-key"
 
-	writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 
 	_, metaFromGet, err := store.GetStream(ctx, key)
 	require.NoError(t, err)
-	metaFromGet.ETag = "mutated-get"
+	metaFromGet.CacheTag = "mutated-get"
 
 	metaFromStat, err := store.Stat(ctx, key)
 	require.NoError(t, err)
-	require.Equal(t, "v1", metaFromStat.ETag)
+	require.Equal(t, "v1", metaFromStat.CacheTag)
 }
 
 func TestMemStore_EvictionNotifiesPolicyRemove(t *testing.T) {
@@ -571,13 +571,13 @@ func TestMemStore_EvictionNotifiesPolicyRemove(t *testing.T) {
 
 	policy.setKeysToEvict("key1")
 
-	writer1, err := store.BeginSet(ctx, "key1", &daramjwee.Metadata{ETag: "v1"})
+	writer1, err := store.BeginSet(ctx, "key1", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = writer1.Write([]byte("12345"))
 	require.NoError(t, err)
 	require.NoError(t, writer1.Close())
 
-	writer2, err := store.BeginSet(ctx, "key2", &daramjwee.Metadata{ETag: "v2"})
+	writer2, err := store.BeginSet(ctx, "key2", &daramjwee.Metadata{CacheTag: "v2"})
 	require.NoError(t, err)
 	_, err = writer2.Write([]byte("67890"))
 	require.NoError(t, err)

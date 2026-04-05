@@ -23,7 +23,7 @@ func TestStore_GetStream_LocalPublishedHitReadsFromLocalSegment(t *testing.T) {
 	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "local-read", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "local-read", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "local body")
 	require.NoError(t, err)
@@ -36,7 +36,7 @@ func TestStore_GetStream_LocalPublishedHitReadsFromLocalSegment(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "local body", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestStore_GetStream_RemoteOnlyHitResolvesThroughShardCheckpoint(t *testing.T) {
@@ -45,7 +45,7 @@ func TestStore_GetStream_RemoteOnlyHitResolvesThroughShardCheckpoint(t *testing.
 	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
 
-	writer, err := flushed.BeginSet(ctx, "remote-only", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := flushed.BeginSet(ctx, "remote-only", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "remote checkpoint body")
 	require.NoError(t, err)
@@ -62,7 +62,7 @@ func TestStore_GetStream_RemoteOnlyHitResolvesThroughShardCheckpoint(t *testing.
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "remote checkpoint body", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestStore_GetStream_RemoteCheckpointCacheAvoidsRepeatedCheckpointFetch(t *testing.T) {
@@ -74,7 +74,7 @@ func TestStore_GetStream_RemoteCheckpointCacheAvoidsRepeatedCheckpointFetch(t *t
 	)
 	flushed.autoFlush = false
 
-	writer, err := flushed.BeginSet(ctx, "remote-cached", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := flushed.BeginSet(ctx, "remote-cached", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "remote cached body")
 	require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestStore_GetStream_RemoteCheckpointCacheReloadsAfterTTL(t *testing.T) {
 	)
 	flushed.autoFlush = false
 
-	writer, err := flushed.BeginSet(ctx, "remote-ttl", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := flushed.BeginSet(ctx, "remote-ttl", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "remote ttl body")
 	require.NoError(t, err)
@@ -160,13 +160,13 @@ func TestStore_PublishCheckpointRefreshesCheckpointCache(t *testing.T) {
 			SegmentPath: oldRemotePath,
 			Offset:      0,
 			Length:      int64(len("old body")),
-			Metadata:    daramjwee.Metadata{ETag: "v1"},
+			Metadata:    daramjwee.Metadata{CacheTag: "v1"},
 		},
 	}))
 
 	entry, err := store.loadRemoteEntry(ctx, "checkpoint-cache-publish")
 	require.NoError(t, err)
-	assert.Equal(t, "v1", entry.Metadata.ETag)
+	assert.Equal(t, "v1", entry.Metadata.CacheTag)
 	assert.Equal(t, 0, bucket.checkpointCalls())
 
 	newRemotePath := joinPath(store.prefix, "blobs", "new")
@@ -176,13 +176,13 @@ func TestStore_PublishCheckpointRefreshesCheckpointCache(t *testing.T) {
 			SegmentPath: newRemotePath,
 			Offset:      0,
 			Length:      int64(len("new body")),
-			Metadata:    daramjwee.Metadata{ETag: "v2"},
+			Metadata:    daramjwee.Metadata{CacheTag: "v2"},
 		},
 	}))
 
 	entry, err = store.loadRemoteEntry(ctx, "checkpoint-cache-publish")
 	require.NoError(t, err)
-	assert.Equal(t, "v2", entry.Metadata.ETag)
+	assert.Equal(t, "v2", entry.Metadata.CacheTag)
 	assert.Equal(t, 0, bucket.checkpointCalls())
 }
 
@@ -201,7 +201,7 @@ func TestStore_GetStream_RemotePackedRecordReturnsExactLogicalObject(t *testing.
 		{keyA, "v1", "alpha remote value"},
 		{keyB, "v2", "beta remote value"},
 	} {
-		writer, err := flushed.BeginSet(ctx, tc.key, &daramjwee.Metadata{ETag: tc.etag})
+		writer, err := flushed.BeginSet(ctx, tc.key, &daramjwee.Metadata{CacheTag: tc.etag})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, tc.body)
 		require.NoError(t, err)
@@ -219,7 +219,7 @@ func TestStore_GetStream_RemotePackedRecordReturnsExactLogicalObject(t *testing.
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "beta remote value", string(body))
-	assert.Equal(t, "v2", meta.ETag)
+	assert.Equal(t, "v2", meta.CacheTag)
 }
 
 func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *testing.T) {
@@ -228,7 +228,7 @@ func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "local-disappears-remote-live", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "local-disappears-remote-live", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "remote fallback body")
 	require.NoError(t, err)
@@ -269,7 +269,7 @@ func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "remote fallback body", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappears(t *testing.T) {
@@ -278,7 +278,7 @@ func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappe
 
 	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
-	writer, err := flushed.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := flushed.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "old remote body")
 	require.NoError(t, err)
@@ -287,7 +287,7 @@ func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappe
 
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
-	writer, err = store.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{ETag: "v2"})
+	writer, err = store.BeginSet(ctx, "local-disappears-stale-remote", &daramjwee.Metadata{CacheTag: "v2"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "new local body")
 	require.NoError(t, err)
@@ -312,7 +312,7 @@ func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *
 
 	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
-	writer, err := flushed.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := flushed.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "old remote body")
 	require.NoError(t, err)
@@ -321,7 +321,7 @@ func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *
 
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
-	writer, err = store.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{ETag: "v2"})
+	writer, err = store.BeginSet(ctx, "local-recheck-newer-local", &daramjwee.Metadata{CacheTag: "v2"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "older local body")
 	require.NoError(t, err)
@@ -341,7 +341,7 @@ func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *
 				current.SegmentPath = newSegmentPath
 				current.Offset = 0
 				current.Length = int64(len("newest local body"))
-				current.Metadata.ETag = "v3"
+				current.Metadata.CacheTag = "v3"
 				return current, true
 			}))
 		}
@@ -358,7 +358,7 @@ func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "newest local body", string(body))
-	assert.Equal(t, "v3", meta.ETag)
+	assert.Equal(t, "v3", meta.CacheTag)
 }
 
 func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallback(t *testing.T) {
@@ -367,7 +367,7 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 
 	flushed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	flushed.autoFlush = false
-	writer, err := flushed.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := flushed.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "old remote body")
 	require.NoError(t, err)
@@ -376,7 +376,7 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
-	writer, err = store.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{ETag: "v2"})
+	writer, err = store.BeginSet(ctx, "local-final-recheck-newer-local", &daramjwee.Metadata{CacheTag: "v2"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "first local body")
 	require.NoError(t, err)
@@ -399,7 +399,7 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 				current.SegmentPath = secondSegmentPath
 				current.Offset = 0
 				current.Length = int64(len("second local body"))
-				current.Metadata.ETag = "v3"
+				current.Metadata.CacheTag = "v3"
 				return current, true
 			}))
 		case 2:
@@ -409,7 +409,7 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 				current.SegmentPath = thirdSegmentPath
 				current.Offset = 0
 				current.Length = int64(len("third local body"))
-				current.Metadata.ETag = "v4"
+				current.Metadata.CacheTag = "v4"
 				return current, true
 			}))
 		}
@@ -426,7 +426,7 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "third local body", string(body))
-	assert.Equal(t, "v4", meta.ETag)
+	assert.Equal(t, "v4", meta.CacheTag)
 }
 
 func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T) {
@@ -483,7 +483,7 @@ func TestStore_DeleteTombstoneHidesOlderPackedRecord(t *testing.T) {
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "delete-tombstone", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "delete-tombstone", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "stale remote value")
 	require.NoError(t, err)
@@ -514,7 +514,7 @@ func TestStore_DeleteRemoteOnlyKeyPreservesOtherCheckpointEntriesInSameShard(t *
 		{keyA, "v1", "alpha"},
 		{keyB, "v2", "beta"},
 	} {
-		writer, err := flushed.BeginSet(ctx, tc.key, &daramjwee.Metadata{ETag: tc.etag})
+		writer, err := flushed.BeginSet(ctx, tc.key, &daramjwee.Metadata{CacheTag: tc.etag})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, tc.body)
 		require.NoError(t, err)
@@ -540,7 +540,7 @@ func TestStore_DeleteRemoteOnlyKeyPreservesOtherCheckpointEntriesInSameShard(t *
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "beta", string(body))
-	assert.Equal(t, "v2", meta.ETag)
+	assert.Equal(t, "v2", meta.CacheTag)
 
 	checkpointObjects := listObjectNames(t, bucket, joinPath(remoteOnly.prefix, "checkpoints"))
 	require.Len(t, checkpointObjects, 1)
@@ -557,7 +557,7 @@ func TestStore_GetStream_FallsBackToLegacyManifestRemoteData(t *testing.T) {
 
 	blobPath := store.blobPath("legacy-remote", "v1")
 	require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader("legacy manifest body")))
-	require.NoError(t, store.publishManifest(ctx, "legacy-remote", blobPath, int64(len("legacy manifest body")), &daramjwee.Metadata{ETag: "legacy"}))
+	require.NoError(t, store.publishManifest(ctx, "legacy-remote", blobPath, int64(len("legacy manifest body")), &daramjwee.Metadata{CacheTag: "legacy"}))
 
 	reader, meta, err := store.GetStream(ctx, "legacy-remote")
 	require.NoError(t, err)
@@ -566,11 +566,11 @@ func TestStore_GetStream_FallsBackToLegacyManifestRemoteData(t *testing.T) {
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "legacy manifest body", string(body))
-	assert.Equal(t, "legacy", meta.ETag)
+	assert.Equal(t, "legacy", meta.CacheTag)
 
 	stat, err := store.Stat(ctx, "legacy-remote")
 	require.NoError(t, err)
-	assert.Equal(t, "legacy", stat.ETag)
+	assert.Equal(t, "legacy", stat.CacheTag)
 }
 
 func TestStore_GetStream_FallsBackToDefaultPageSizeForLegacyPagedManifest(t *testing.T) {
@@ -589,7 +589,7 @@ func TestStore_GetStream_FallsBackToDefaultPageSizeForLegacyPagedManifest(t *tes
 		BlobPath: blobPath,
 		Size:     int64(len(body)),
 		PageSize: 0,
-		Metadata: daramjwee.Metadata{ETag: "legacy-paged"},
+		Metadata: daramjwee.Metadata{CacheTag: "legacy-paged"},
 	}
 	encoded, err := json.Marshal(&m)
 	require.NoError(t, err)
@@ -602,5 +602,5 @@ func TestStore_GetStream_FallsBackToDefaultPageSizeForLegacyPagedManifest(t *tes
 	got, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, body, string(got))
-	assert.Equal(t, "legacy-paged", meta.ETag)
+	assert.Equal(t, "legacy-paged", meta.CacheTag)
 }

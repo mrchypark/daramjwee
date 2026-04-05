@@ -31,11 +31,11 @@ var ErrNilFetcher = errors.New("daramjwee: nil fetcher")
 // Cache is the primary public interface for interacting with daramjwee.
 // It enforces a memory-safe, stream-based interaction model.
 type Cache interface {
-	// Get retrieves an object as a stream.
+	// Get retrieves an object using the cache's current representation and
+	// optional client validator request metadata.
 	// On a cache miss, it uses the provided Fetcher to retrieve data from the origin.
 	// The fetcher must not be nil.
-	// The caller is responsible for closing the returned io.ReadCloser.
-	Get(ctx context.Context, key string, fetcher Fetcher) (io.ReadCloser, error)
+	Get(ctx context.Context, key string, req GetRequest, fetcher Fetcher) (*GetResponse, error)
 
 	// Set provides a writer to stream an object into the cache.
 	// The cache entry is finalized when the returned writer is closed.
@@ -59,9 +59,50 @@ type Cache interface {
 // Metadata holds essential metadata about a cached item.
 // It is designed to be extensible for future needs (e.g., LastModified, Size).
 type Metadata struct {
-	ETag       string
+	CacheTag   string
 	IsNegative bool
 	CachedAt   time.Time
+}
+
+// GetRequest controls cache read behavior.
+type GetRequest struct {
+	// IfNoneMatch compares the caller's validator against the cache's current
+	// representation validator.
+	IfNoneMatch string
+}
+
+// GetStatus describes the result of a cache read decision.
+type GetStatus int
+
+const (
+	GetStatusOK GetStatus = iota
+	GetStatusNotModified
+	GetStatusNotFound
+)
+
+// GetResponse carries the result of a cache read decision.
+// It also implements io.ReadCloser by delegating to Body, allowing callers to
+// continue using io.ReadAll/Close on successful body-bearing responses.
+type GetResponse struct {
+	Status   GetStatus
+	Body     io.ReadCloser
+	Metadata Metadata
+}
+
+// Read delegates to the response body when present.
+func (r *GetResponse) Read(p []byte) (int, error) {
+	if r == nil || r.Body == nil {
+		return 0, io.EOF
+	}
+	return r.Body.Read(p)
+}
+
+// Close closes the response body when present.
+func (r *GetResponse) Close() error {
+	if r == nil || r.Body == nil {
+		return nil
+	}
+	return r.Body.Close()
 }
 
 // FetchResult holds the data and metadata returned from a successful fetch operation.

@@ -19,7 +19,7 @@ func TestStore_PackedObjectFlushUsesPackedSegmentPath(t *testing.T) {
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(32))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "packed-key", &daramjwee.Metadata{ETag: "small"})
+	writer, err := store.BeginSet(ctx, "packed-key", &daramjwee.Metadata{CacheTag: "small"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "small payload")
 	require.NoError(t, err)
@@ -45,7 +45,7 @@ func TestStore_LargeObjectFlushUsesDirectBlobPath(t *testing.T) {
 	store.autoFlush = false
 	body := strings.Repeat("x", 128)
 
-	writer, err := store.BeginSet(ctx, "large-key", &daramjwee.Metadata{ETag: "large"})
+	writer, err := store.BeginSet(ctx, "large-key", &daramjwee.Metadata{CacheTag: "large"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, body)
 	require.NoError(t, err)
@@ -71,7 +71,7 @@ func TestStore_LargeObjectFlushUsesDirectBlobPath(t *testing.T) {
 	readBody, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, body, string(readBody))
-	assert.Equal(t, "large", meta.ETag)
+	assert.Equal(t, "large", meta.CacheTag)
 }
 
 func TestStore_LargeObjectAbortLeavesNoVisibleEntry(t *testing.T) {
@@ -80,7 +80,7 @@ func TestStore_LargeObjectAbortLeavesNoVisibleEntry(t *testing.T) {
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(32))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "large-abort", &daramjwee.Metadata{ETag: "large"})
+	writer, err := store.BeginSet(ctx, "large-abort", &daramjwee.Metadata{CacheTag: "large"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, strings.Repeat("a", 128))
 	require.NoError(t, err)

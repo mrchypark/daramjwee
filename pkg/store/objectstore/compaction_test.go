@@ -25,7 +25,7 @@ func TestStore_CompactReclaimsSupersededRemoteObjects(t *testing.T) {
 
 	writeAndFlush := func(body, etag string) {
 		t.Helper()
-		writer, err := store.BeginSet(ctx, "compact-large", &daramjwee.Metadata{ETag: etag})
+		writer, err := store.BeginSet(ctx, "compact-large", &daramjwee.Metadata{CacheTag: etag})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, body)
 		require.NoError(t, err)
@@ -57,7 +57,7 @@ func TestStore_CompactReclaimsSupersededRemoteObjects(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, strings.Repeat("b", 128), string(body))
-	assert.Equal(t, "v2", meta.ETag)
+	assert.Equal(t, "v2", meta.CacheTag)
 }
 
 func TestStore_CompactPrunesStaleCheckpointObjects(t *testing.T) {
@@ -66,7 +66,7 @@ func TestStore_CompactPrunesStaleCheckpointObjects(t *testing.T) {
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "checkpoint-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "checkpoint-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "checkpoint-body")
 	require.NoError(t, err)
@@ -93,7 +93,7 @@ func TestStore_CompactKeepsLegacyManifestBackedBlobReachable(t *testing.T) {
 
 	blobPath := store.blobPath("legacy-compact", "legacy-v1")
 	require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader("legacy body")))
-	require.NoError(t, store.publishManifest(ctx, "legacy-compact", blobPath, int64(len("legacy body")), &daramjwee.Metadata{ETag: "legacy"}))
+	require.NoError(t, store.publishManifest(ctx, "legacy-compact", blobPath, int64(len("legacy body")), &daramjwee.Metadata{CacheTag: "legacy"}))
 
 	stats, err := store.Compact(ctx, 0)
 	require.NoError(t, err)
@@ -107,7 +107,7 @@ func TestStore_CompactKeepsLegacyManifestBackedBlobReachable(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "legacy body", string(body))
-	assert.Equal(t, "legacy", meta.ETag)
+	assert.Equal(t, "legacy", meta.CacheTag)
 }
 
 func TestStore_ReclaimAutomaticallySchedulesFlushForPublishedUnflushedLocalEntriesAfterReopen(t *testing.T) {
@@ -118,7 +118,7 @@ func TestStore_ReclaimAutomaticallySchedulesFlushForPublishedUnflushedLocalEntri
 	store := New(bucket, log.NewNopLogger(), WithDir(dataDir))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "requeue-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "requeue-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "requeue-body")
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestStore_ReclaimAutomaticallySchedulesFlushForPublishedUnflushedLocalEntri
 		defer stream.Close()
 
 		body, readErr := io.ReadAll(stream)
-		return readErr == nil && string(body) == "requeue-body" && meta.ETag == "v1"
+		return readErr == nil && string(body) == "requeue-body" && meta.CacheTag == "v1"
 	}, time.Second, 20*time.Millisecond)
 
 	reopened.flushMu.Lock()

@@ -94,7 +94,7 @@ func TestObjstoreProdLikeCompareHarness(t *testing.T) {
 
 	writeStart := time.Now()
 	for _, item := range items {
-		sink, err := store.BeginSet(ctx, item.Key, &daramjwee.Metadata{ETag: item.ETag})
+		sink, err := store.BeginSet(ctx, item.Key, &daramjwee.Metadata{CacheTag: item.CacheTag})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -165,7 +165,7 @@ func readAllObjectstoreItems(t *testing.T, ctx context.Context, store *Store, bu
 		if err != nil {
 			t.Fatal(err)
 		}
-		if meta == nil || meta.ETag != item.ETag {
+		if meta == nil || meta.CacheTag != item.CacheTag {
 			t.Fatalf("unexpected metadata for %q: %#v", item.Key, meta)
 		}
 

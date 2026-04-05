@@ -44,7 +44,7 @@ func benchmarkLocalPublishedStore(b *testing.B) *Store {
 		WithDir(b.TempDir()),
 	)
 	store.autoFlush = false
-	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{ETag: "bench"})
+	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{CacheTag: "bench"})
 	if err != nil {
 		panic(err)
 	}
@@ -70,7 +70,7 @@ func benchmarkRemotePackedStore(b *testing.B, enableCache bool) *Store {
 
 	store := New(bucket, log.NewNopLogger(), opts...)
 	store.autoFlush = false
-	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{ETag: "bench"})
+	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{CacheTag: "bench"})
 	if err != nil {
 		panic(err)
 	}

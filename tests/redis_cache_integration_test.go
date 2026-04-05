@@ -31,13 +31,13 @@ func TestCache_Get_WithRedisHotStore_KeepsStreamUsable(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	w, err := cache.Set(context.Background(), "redis-key", &daramjwee.Metadata{ETag: "v1"})
+	w, err := cache.Set(context.Background(), "redis-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = w.Write([]byte("hello redis"))
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	stream, err := cache.Get(context.Background(), "redis-key", &mockFetcher{})
+	stream, err := cache.Get(context.Background(), "redis-key", daramjwee.GetRequest{}, &mockFetcher{})
 	require.NoError(t, err)
 	defer stream.Close()
 

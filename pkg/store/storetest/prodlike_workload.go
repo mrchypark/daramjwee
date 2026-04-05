@@ -10,7 +10,7 @@ type ProdLikeWorkloadItem struct {
 	Key      string
 	Category string
 	Body     []byte
-	ETag     string
+	CacheTag string
 }
 
 func BuildProdLikeWorkload() ([]ProdLikeWorkloadItem, map[string]int, int64) {
@@ -43,7 +43,7 @@ func BuildProdLikeWorkload() ([]ProdLikeWorkloadItem, map[string]int, int64) {
 				Key:      key,
 				Category: spec.category,
 				Body:     body,
-				ETag:     fmt.Sprintf("%s-%03d", spec.category, i),
+				CacheTag: fmt.Sprintf("%s-%03d", spec.category, i),
 			})
 			counts[spec.category]++
 			totalBytes += int64(len(body))

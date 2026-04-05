@@ -18,7 +18,7 @@ import (
 func TestObjstoreAdapter_ReadsLegacyObjects(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	metaBytes, err := json.Marshal(&daramjwee.Metadata{ETag: "legacy"})
+	metaBytes, err := json.Marshal(&daramjwee.Metadata{CacheTag: "legacy"})
 	require.NoError(t, err)
 	require.NoError(t, bucket.Upload(ctx, "legacy-key", strings.NewReader("legacy body")))
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("legacy-key"), strings.NewReader(string(metaBytes))))
@@ -32,23 +32,23 @@ func TestObjstoreAdapter_ReadsLegacyObjects(t *testing.T) {
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "legacy body", string(body))
-	assert.Equal(t, "legacy", meta.ETag)
+	assert.Equal(t, "legacy", meta.CacheTag)
 
 	stat, err := store.Stat(ctx, "legacy-key")
 	require.NoError(t, err)
-	assert.Equal(t, "legacy", stat.ETag)
+	assert.Equal(t, "legacy", stat.CacheTag)
 }
 
 func TestObjstoreAdapter_PrefersModernEntriesOverLegacyFallback(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	metaBytes, err := json.Marshal(&daramjwee.Metadata{ETag: "legacy"})
+	metaBytes, err := json.Marshal(&daramjwee.Metadata{CacheTag: "legacy"})
 	require.NoError(t, err)
 	require.NoError(t, bucket.Upload(ctx, "same-key", strings.NewReader("legacy body")))
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("same-key"), strings.NewReader(string(metaBytes))))
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
-	writer, err := store.BeginSet(ctx, "same-key", &daramjwee.Metadata{ETag: "modern"})
+	writer, err := store.BeginSet(ctx, "same-key", &daramjwee.Metadata{CacheTag: "modern"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "modern body")
 	require.NoError(t, err)
@@ -61,13 +61,13 @@ func TestObjstoreAdapter_PrefersModernEntriesOverLegacyFallback(t *testing.T) {
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "modern body", string(body))
-	assert.Equal(t, "modern", meta.ETag)
+	assert.Equal(t, "modern", meta.CacheTag)
 }
 
 func TestObjstoreAdapter_DeleteRemovesLegacyObjects(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
-	metaBytes, err := json.Marshal(&daramjwee.Metadata{ETag: "legacy"})
+	metaBytes, err := json.Marshal(&daramjwee.Metadata{CacheTag: "legacy"})
 	require.NoError(t, err)
 	require.NoError(t, bucket.Upload(ctx, "legacy-delete", strings.NewReader("legacy body")))
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("legacy-delete"), strings.NewReader(string(metaBytes))))

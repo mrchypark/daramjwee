@@ -39,7 +39,7 @@ func TestFileStoreWithLRUPolicy(t *testing.T) {
 	writeFile := func(key string, size int) error {
 		data := strings.Repeat("X", size)
 		metadata := &daramjwee.Metadata{
-			ETag:     "test-etag",
+			CacheTag: "test-etag",
 			CachedAt: time.Now(),
 		}
 
@@ -129,7 +129,7 @@ func TestFileStoreWithS3FIFOPolicy(t *testing.T) {
 
 	// Test basic functionality
 	metadata := &daramjwee.Metadata{
-		ETag:     "test-etag",
+		CacheTag: "test-etag",
 		CachedAt: time.Now(),
 	}
 
@@ -163,8 +163,8 @@ func TestFileStoreWithS3FIFOPolicy(t *testing.T) {
 		t.Errorf("Expected 'test data', got '%s'", string(data))
 	}
 
-	if readMeta.ETag != "test-etag" {
-		t.Errorf("Expected ETag 'test-etag', got '%s'", readMeta.ETag)
+	if readMeta.CacheTag != "test-etag" {
+		t.Errorf("Expected CacheTag 'test-etag', got '%s'", readMeta.CacheTag)
 	}
 }
 
@@ -193,7 +193,7 @@ func TestFileStoreWithSIEVEPolicy(t *testing.T) {
 	writeFile := func(key string, size int) error {
 		data := strings.Repeat("X", size)
 		metadata := &daramjwee.Metadata{
-			ETag:     "test-etag",
+			CacheTag: "test-etag",
 			CachedAt: time.Now(),
 		}
 
@@ -259,7 +259,7 @@ func TestFileStoreWithoutEvictionPolicy(t *testing.T) {
 
 	// Test basic operations without eviction
 	metadata := &daramjwee.Metadata{
-		ETag:     "no-eviction-test",
+		CacheTag: "no-eviction-test",
 		CachedAt: time.Now(),
 	}
 
@@ -293,7 +293,7 @@ func TestFileStoreWithoutEvictionPolicy(t *testing.T) {
 		t.Errorf("Expected '%s', got '%s'", testData, string(data))
 	}
 
-	if readMeta.ETag != "no-eviction-test" {
-		t.Errorf("Expected ETag 'no-eviction-test', got '%s'", readMeta.ETag)
+	if readMeta.CacheTag != "no-eviction-test" {
+		t.Errorf("Expected CacheTag 'no-eviction-test', got '%s'", readMeta.CacheTag)
 	}
 }

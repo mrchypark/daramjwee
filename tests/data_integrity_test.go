@@ -43,14 +43,14 @@ func TestGenericCache_Set_MarshalError(t *testing.T) {
 	stringCache := cache.NewGeneric[string](baseCache)
 	key := "test-key"
 	validValue := "valid-data"
-	err = stringCache.Set(ctx, key, validValue, &daramjwee.Metadata{ETag: "v1"})
+	err = stringCache.Set(ctx, key, validValue, &daramjwee.Metadata{CacheTag: "v1"})
 	if err != nil {
 		t.Fatalf("Failed to set valid value: %v", err)
 	}
 
 	// Attempt to set a value that will cause a marshal error
 	unmarshalableValue := UnmarshalableType{Channel: make(chan int)}
-	err = unmarshalableCache.Set(ctx, "bad-key", unmarshalableValue, &daramjwee.Metadata{ETag: "v1"})
+	err = unmarshalableCache.Set(ctx, "bad-key", unmarshalableValue, &daramjwee.Metadata{CacheTag: "v1"})
 	if err == nil {
 		t.Fatal("Expected a marshal error, but got nil")
 	}
@@ -104,14 +104,14 @@ func TestGenericCache_Set_WriteError(t *testing.T) {
 	largeValue := string(make([]byte, 10*1024*1024)) // 10MB string
 
 	// This should either succeed or fail cleanly without corrupting the cache
-	err = stringCache.Set(ctx, key, largeValue, &daramjwee.Metadata{ETag: "v1"})
+	err = stringCache.Set(ctx, key, largeValue, &daramjwee.Metadata{CacheTag: "v1"})
 	// We don't assert on the error here because it might succeed or fail depending on system limits
 	// The important thing is that it doesn't corrupt the cache
 
 	// Set a small valid value to ensure cache is still functional
 	smallKey := "small-key"
 	smallValue := "small-data"
-	err = stringCache.Set(ctx, smallKey, smallValue, &daramjwee.Metadata{ETag: "v1"})
+	err = stringCache.Set(ctx, smallKey, smallValue, &daramjwee.Metadata{CacheTag: "v1"})
 	if err != nil {
 		t.Fatalf("Failed to set small value after large value attempt: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestGenericCache_Set_DataIntegrity(t *testing.T) {
 	}
 
 	key := "complex-key"
-	err = complexCache.Set(ctx, key, originalData, &daramjwee.Metadata{ETag: "v1"})
+	err = complexCache.Set(ctx, key, originalData, &daramjwee.Metadata{CacheTag: "v1"})
 	if err != nil {
 		t.Fatalf("Failed to set complex data: %v", err)
 	}

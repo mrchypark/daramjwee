@@ -99,7 +99,7 @@ func TestStore_BlockCacheUsesSegmentPathAndBlockIndexNotLogicalKey(t *testing.T)
 		{keyA, strings.Repeat("a", 40)},
 		{keyB, strings.Repeat("b", 40)},
 	} {
-		writer, err := flushed.BeginSet(ctx, tc.key, &daramjwee.Metadata{ETag: tc.key})
+		writer, err := flushed.BeginSet(ctx, tc.key, &daramjwee.Metadata{CacheTag: tc.key})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, tc.body)
 		require.NoError(t, err)
@@ -131,7 +131,7 @@ func seedRemotePackedStore(t *testing.T, ctx context.Context, bucket objstore.Bu
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: key})
+	writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: key})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, body)
 	require.NoError(t, err)

@@ -95,7 +95,7 @@ func main() {
 			Name:     "John Doe",
 			Email:    "john@example.com",
 			LastSeen: time.Now(),
-		}, &daramjwee.Metadata{ETag: "user-v1"}, nil
+		}, &daramjwee.Metadata{CacheTag: "user-v1"}, nil
 	})
 
 	// First get - will fetch from "database"
@@ -127,7 +127,7 @@ func main() {
 	}
 
 	// Set config directly
-	err = configCache.Set(ctx, "app-config", config, &daramjwee.Metadata{ETag: "config-v1"})
+	err = configCache.Set(ctx, "app-config", config, &daramjwee.Metadata{CacheTag: "config-v1"})
 	if err != nil {
 		fmt.Printf("Failed to set config: %v\n", err)
 		os.Exit(1)
@@ -137,7 +137,7 @@ func main() {
 	// Get config using GetOrSet pattern
 	retrievedConfig, err := configCache.GetOrSet(ctx, "app-config", func() (Config, *daramjwee.Metadata, error) {
 		fmt.Println("  🏭 Creating default configuration...")
-		return Config{AppName: "DefaultApp"}, &daramjwee.Metadata{ETag: "default"}, nil
+		return Config{AppName: "DefaultApp"}, &daramjwee.Metadata{CacheTag: "default"}, nil
 	})
 	if err != nil {
 		fmt.Printf("Failed to get config: %v\n", err)
@@ -157,7 +157,7 @@ func main() {
 			Category:    "Electronics",
 			InStock:     true,
 			Description: "High-quality wireless earbuds",
-		}, &daramjwee.Metadata{ETag: "product-v1"}, nil
+		}, &daramjwee.Metadata{CacheTag: "product-v1"}, nil
 	})
 
 	product, err := productCache.Get(ctx, "product:prod-123", productFetcher)
@@ -171,10 +171,10 @@ func main() {
 	fmt.Println("\n4. String Cache Example:")
 
 	// Using Must methods for simple operations
-	stringCache.MustSet(ctx, "welcome-message", "Hello, Generic Cache!", &daramjwee.Metadata{ETag: "msg-v1"})
+	stringCache.MustSet(ctx, "welcome-message", "Hello, Generic Cache!", &daramjwee.Metadata{CacheTag: "msg-v1"})
 
 	welcomeMsg := stringCache.GetWithDefault(ctx, "welcome-message", "Default message", cache.GenericFetcher[string](func(ctx context.Context, oldMetadata *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
-		return "Default message", &daramjwee.Metadata{ETag: "default"}, nil
+		return "Default message", &daramjwee.Metadata{CacheTag: "default"}, nil
 	}))
 	fmt.Printf("  💬 Welcome message: %s\n", welcomeMsg)
 

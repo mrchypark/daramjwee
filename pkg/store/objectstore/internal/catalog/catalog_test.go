@@ -23,7 +23,7 @@ func TestCatalogSetRollsBackOnPreCommitFailure(t *testing.T) {
 		syncPathFn = restoreSyncPath
 	})
 
-	err = cat.Set("precommit", Entry{Metadata: daramjwee.Metadata{ETag: "v1"}})
+	err = cat.Set("precommit", Entry{Metadata: daramjwee.Metadata{CacheTag: "v1"}})
 	require.Error(t, err)
 
 	_, ok := cat.Get("precommit")
@@ -50,7 +50,7 @@ func TestCatalogSetKeepsCommittedStateOnPostRenameFailure(t *testing.T) {
 
 	entry := Entry{
 		SegmentPath: filepath.Join(dir, "segment.seg"),
-		Metadata:    daramjwee.Metadata{ETag: "v2"},
+		Metadata:    daramjwee.Metadata{CacheTag: "v2"},
 	}
 
 	err = cat.Set("postrename", entry)

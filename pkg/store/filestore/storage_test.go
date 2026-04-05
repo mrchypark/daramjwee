@@ -58,7 +58,7 @@ func TestFileStore_SetAndGet(t *testing.T) {
 	etag := "v1.0.0"
 	content := "hello daramjwee"
 
-	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestFileStore_SetAndGet(t *testing.T) {
 	require.NoError(t, err)
 	defer reader.Close()
 
-	assert.Equal(t, etag, meta.ETag)
+	assert.Equal(t, etag, meta.CacheTag)
 
 	readBytes, err := io.ReadAll(reader)
 	require.NoError(t, err)
@@ -92,12 +92,12 @@ func TestFileStore_Stat(t *testing.T) {
 	key := "stat-key"
 	etag := "etag-for-stat"
 
-	writer, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+	writer, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 	require.NoError(t, writer.Close())
 
 	meta, err := fs.Stat(ctx, key)
 	require.NoError(t, err)
-	assert.Equal(t, etag, meta.ETag)
+	assert.Equal(t, etag, meta.CacheTag)
 
 	_, err = fs.Stat(ctx, "non-existent-key")
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
@@ -109,7 +109,7 @@ func TestFileStore_Delete(t *testing.T) {
 	ctx := context.Background()
 	key := "delete-key"
 
-	writer, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, writer.Close())
 
 	err := fs.Delete(ctx, key)
@@ -128,7 +128,7 @@ func TestFileStore_DeleteWaitsForPathLockBeforeUpdatingTracking(t *testing.T) {
 	ctx := context.Background()
 	key := "delete-blocked"
 
-	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("payload"))
 	require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestFileStore_EvictionDoesNotDropTrackingBeforeFileRemoval(t *testing.T) {
 	require.NotEmpty(t, keys[1])
 	require.NotEqual(t, fs.lockManager.getSlot(fs.toDataPath(keys[0])), fs.lockManager.getSlot(fs.toDataPath(keys[1])))
 
-	first, err := fs.BeginSet(ctx, keys[0], &daramjwee.Metadata{ETag: "v1"})
+	first, err := fs.BeginSet(ctx, keys[0], &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = first.Write([]byte(strings.Repeat("a", 64)))
 	require.NoError(t, err)
@@ -205,7 +205,7 @@ func TestFileStore_EvictionDoesNotDropTrackingBeforeFileRemoval(t *testing.T) {
 
 	writeDone := make(chan error, 1)
 	go func() {
-		writer, err := fs.BeginSet(ctx, keys[1], &daramjwee.Metadata{ETag: "v2"})
+		writer, err := fs.BeginSet(ctx, keys[1], &daramjwee.Metadata{CacheTag: "v2"})
 		if err != nil {
 			writeDone <- err
 			return
@@ -252,7 +252,7 @@ func TestFileStore_CloseReleasesEncodedLockBeforeLegacyCleanup(t *testing.T) {
 	}
 	require.NotEmpty(t, key)
 
-	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("payload"))
 	require.NoError(t, err)
@@ -300,13 +300,13 @@ func TestFileStore_Overwrite(t *testing.T) {
 	key := "overwrite-key"
 
 	// Write version 1
-	writer1, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer1, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	_, err := writer1.Write([]byte("version 1"))
 	require.NoError(t, err)
 	require.NoError(t, writer1.Close())
 
 	// Write version 2
-	writer2, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v2"})
+	writer2, _ := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
 	_, err = writer2.Write([]byte("version 2"))
 	require.NoError(t, err)
 	require.NoError(t, writer2.Close())
@@ -315,7 +315,7 @@ func TestFileStore_Overwrite(t *testing.T) {
 	require.NoError(t, err)
 	defer reader.Close()
 
-	assert.Equal(t, "v2", meta.ETag)
+	assert.Equal(t, "v2", meta.CacheTag)
 	content, _ := io.ReadAll(reader)
 	assert.Equal(t, "version 2", string(content))
 }
@@ -326,7 +326,7 @@ func TestFileStore_PathTraversal(t *testing.T) {
 	ctx := context.Background()
 
 	maliciousKey := "../malicious-file"
-	writer, err := fs.BeginSet(ctx, maliciousKey, &daramjwee.Metadata{ETag: "v1"})
+	writer, err := fs.BeginSet(ctx, maliciousKey, &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 
@@ -361,7 +361,7 @@ func TestFileStore_NestedPaths(t *testing.T) {
 			content := fmt.Sprintf("content for %s", uniqueKey)
 
 			// Write the file
-			writer, err := fs.BeginSet(ctx, uniqueKey, &daramjwee.Metadata{ETag: "v1"})
+			writer, err := fs.BeginSet(ctx, uniqueKey, &daramjwee.Metadata{CacheTag: "v1"})
 			require.NoError(t, err, "BeginSet should succeed for key: %s", uniqueKey)
 
 			_, err = writer.Write([]byte(content))
@@ -374,7 +374,7 @@ func TestFileStore_NestedPaths(t *testing.T) {
 			reader, meta, err := fs.GetStream(ctx, uniqueKey)
 			require.NoError(t, err, "GetStream should succeed for key: %s", uniqueKey)
 
-			assert.Equal(t, "v1", meta.ETag)
+			assert.Equal(t, "v1", meta.CacheTag)
 
 			readContent, err := io.ReadAll(reader)
 			require.NoError(t, err, "ReadAll should succeed")
@@ -384,7 +384,7 @@ func TestFileStore_NestedPaths(t *testing.T) {
 			// Test Stat
 			statMeta, err := fs.Stat(ctx, uniqueKey)
 			require.NoError(t, err, "Stat should succeed")
-			assert.Equal(t, "v1", statMeta.ETag)
+			assert.Equal(t, "v1", statMeta.CacheTag)
 
 			// Test Delete
 			err = fs.Delete(ctx, uniqueKey)
@@ -421,7 +421,7 @@ func TestFileStore_PathSafety(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			content := fmt.Sprintf("content for %s", tc.key)
 
-			writer, err := fs.BeginSet(ctx, tc.key, &daramjwee.Metadata{ETag: "v1"})
+			writer, err := fs.BeginSet(ctx, tc.key, &daramjwee.Metadata{CacheTag: "v1"})
 			if !tc.shouldWork {
 				// For cases that shouldn't work, we might still get a writer
 				// but operations should fail gracefully
@@ -461,7 +461,7 @@ func TestFileStore_SetWithCopyWrite(t *testing.T) {
 	key := "copy-test"
 	content := "data for copy"
 
-	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v-copy"})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v-copy"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte(content))
 	require.NoError(t, err)
@@ -490,7 +490,7 @@ func TestFileStore_Set_ErrorOnFinalize_Rename(t *testing.T) {
 	err = os.Mkdir(dataPath, 0755)
 	require.NoError(t, err)
 
-	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("some data"))
 	require.NoError(t, err)
@@ -518,7 +518,7 @@ func TestFileStore_Set_ErrorOnFinalize_Copy(t *testing.T) {
 	// Create a directory where the file should be, so the final copy fails.
 	require.NoError(t, os.MkdirAll(dataPath, 0755))
 
-	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err, "BeginSet should succeed as temp file creation is unaffected")
 	_, err = writer.Write([]byte("some data"))
 	require.NoError(t, err)
@@ -544,7 +544,7 @@ func TestFileStore_MetadataFields(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond) // Truncate for reliable comparison
 
 	originalMeta := &daramjwee.Metadata{
-		ETag:       "v-complex",
+		CacheTag:   "v-complex",
 		CachedAt:   now,
 		IsNegative: true,
 	}
@@ -554,7 +554,7 @@ func TestFileStore_MetadataFields(t *testing.T) {
 
 	_, retrievedMeta, err := fs.GetStream(ctx, key)
 	require.NoError(t, err)
-	assert.Equal(t, originalMeta.ETag, retrievedMeta.ETag)
+	assert.Equal(t, originalMeta.CacheTag, retrievedMeta.CacheTag)
 	assert.True(t, originalMeta.CachedAt.Equal(retrievedMeta.CachedAt))
 	assert.Equal(t, originalMeta.IsNegative, retrievedMeta.IsNegative)
 }
@@ -563,13 +563,13 @@ func TestFileStore_DistinctKeysDoNotCollideOnDisk(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()
 
-	writerA, err := fs.BeginSet(ctx, "", &daramjwee.Metadata{ETag: "empty"})
+	writerA, err := fs.BeginSet(ctx, "", &daramjwee.Metadata{CacheTag: "empty"})
 	require.NoError(t, err)
 	_, err = writerA.Write([]byte("empty-key-data"))
 	require.NoError(t, err)
 	require.NoError(t, writerA.Close())
 
-	writerB, err := fs.BeginSet(ctx, "empty_key", &daramjwee.Metadata{ETag: "literal"})
+	writerB, err := fs.BeginSet(ctx, "empty_key", &daramjwee.Metadata{CacheTag: "literal"})
 	require.NoError(t, err)
 	_, err = writerB.Write([]byte("literal-data"))
 	require.NoError(t, err)
@@ -580,7 +580,7 @@ func TestFileStore_DistinctKeysDoNotCollideOnDisk(t *testing.T) {
 	defer readerA.Close()
 	bodyA, err := io.ReadAll(readerA)
 	require.NoError(t, err)
-	assert.Equal(t, "empty", metaA.ETag)
+	assert.Equal(t, "empty", metaA.CacheTag)
 	assert.Equal(t, "empty-key-data", string(bodyA))
 
 	readerB, metaB, err := fs.GetStream(ctx, "empty_key")
@@ -588,7 +588,7 @@ func TestFileStore_DistinctKeysDoNotCollideOnDisk(t *testing.T) {
 	defer readerB.Close()
 	bodyB, err := io.ReadAll(readerB)
 	require.NoError(t, err)
-	assert.Equal(t, "literal", metaB.ETag)
+	assert.Equal(t, "literal", metaB.CacheTag)
 	assert.Equal(t, "literal-data", string(bodyB))
 }
 
@@ -601,7 +601,7 @@ func TestFileStore_LegacyPathRemainsReadableAndDeletable(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy"}))
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy"}))
 	_, err = f.Write([]byte("legacy-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -615,7 +615,7 @@ func TestFileStore_LegacyPathRemainsReadableAndDeletable(t *testing.T) {
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
-	assert.Equal(t, "legacy", meta.ETag)
+	assert.Equal(t, "legacy", meta.CacheTag)
 	assert.Equal(t, "legacy-data", string(body))
 
 	require.NoError(t, fs2.Delete(ctx, key))
@@ -633,7 +633,7 @@ func TestFileStore_OverwriteLegacyPathRemovesLegacyFile(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy"}))
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy"}))
 	_, err = f.Write([]byte("legacy-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -641,7 +641,7 @@ func TestFileStore_OverwriteLegacyPathRemovesLegacyFile(t *testing.T) {
 	fs2, err := New(fs.baseDir, log.NewNopLogger())
 	require.NoError(t, err)
 
-	writer, err := fs2.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "new"})
+	writer, err := fs2.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "new"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("new-data"))
 	require.NoError(t, err)
@@ -655,7 +655,7 @@ func TestFileStore_OverwriteLegacyPathRemovesLegacyFile(t *testing.T) {
 	defer reader.Close()
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, "new", meta.ETag)
+	assert.Equal(t, "new", meta.CacheTag)
 	assert.Equal(t, "new-data", string(body))
 }
 
@@ -663,7 +663,7 @@ func TestFileStore_LegacyFallbackDoesNotAliasEncodedNamespaceKeys(t *testing.T) 
 	fs := setupTestStore(t)
 	ctx := context.Background()
 
-	writer, err := fs.BeginSet(ctx, "foo", &daramjwee.Metadata{ETag: "foo"})
+	writer, err := fs.BeginSet(ctx, "foo", &daramjwee.Metadata{CacheTag: "foo"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("foo-data"))
 	require.NoError(t, err)
@@ -682,7 +682,7 @@ func TestFileStore_LegacyFallbackDoesNotAliasEncodedNamespaceKeys(t *testing.T) 
 	defer reader.Close()
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, "foo", meta.ETag)
+	assert.Equal(t, "foo", meta.CacheTag)
 	assert.Equal(t, "foo-data", string(body))
 }
 
@@ -696,12 +696,12 @@ func TestFileStore_EncodedNamespaceDoesNotOverwriteLegacyB64PrefixedKey(t *testi
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy"}))
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy"}))
 	_, err = f.Write([]byte("legacy-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	writer, err := fs.BeginSet(ctx, "foo", &daramjwee.Metadata{ETag: "foo"})
+	writer, err := fs.BeginSet(ctx, "foo", &daramjwee.Metadata{CacheTag: "foo"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("foo-data"))
 	require.NoError(t, err)
@@ -718,7 +718,7 @@ func TestFileStore_EncodedNamespaceDoesNotOverwriteLegacyB64PrefixedKey(t *testi
 	defer legacyReader.Close()
 	legacyBody, err := io.ReadAll(legacyReader)
 	require.NoError(t, err)
-	assert.Equal(t, "legacy", legacyMeta.ETag)
+	assert.Equal(t, "legacy", legacyMeta.CacheTag)
 	assert.Equal(t, "legacy-data", string(legacyBody))
 
 	reader, meta, err := fs.GetStream(ctx, "foo")
@@ -726,7 +726,7 @@ func TestFileStore_EncodedNamespaceDoesNotOverwriteLegacyB64PrefixedKey(t *testi
 	defer reader.Close()
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, "foo", meta.ETag)
+	assert.Equal(t, "foo", meta.CacheTag)
 	assert.Equal(t, "foo-data", string(body))
 }
 
@@ -740,7 +740,7 @@ func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFile(t *testing.T)
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-ambiguous"}))
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy-ambiguous"}))
 	_, err = f.Write([]byte("legacy-ambiguous-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -760,7 +760,7 @@ func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFile(t *testing.T)
 	defer reader.Close()
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, "legacy-ambiguous", meta.ETag)
+	assert.Equal(t, "legacy-ambiguous", meta.CacheTag)
 	assert.Equal(t, "legacy-ambiguous-data", string(body))
 }
 
@@ -778,7 +778,7 @@ func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFileWithTrailingSl
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-trailing"}))
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy-trailing"}))
 	_, err = f.Write([]byte("legacy-trailing-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -795,7 +795,7 @@ func TestFileStore_EncodedNamespaceDoesNotClaimAmbiguousLegacyFileWithTrailingSl
 	defer reader.Close()
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, "legacy-trailing", meta.ETag)
+	assert.Equal(t, "legacy-trailing", meta.CacheTag)
 	assert.Equal(t, "legacy-trailing-data", string(body))
 }
 
@@ -808,7 +808,7 @@ func TestFileStore_LegacyB64PrefixedKeyRemainsReachable(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-b64"}))
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy-b64"}))
 	_, err = f.Write([]byte("legacy-b64-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -818,12 +818,12 @@ func TestFileStore_LegacyB64PrefixedKeyRemainsReachable(t *testing.T) {
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
-	assert.Equal(t, "legacy-b64", meta.ETag)
+	assert.Equal(t, "legacy-b64", meta.CacheTag)
 	assert.Equal(t, "legacy-b64-data", string(body))
 
 	statMeta, err := fs.Stat(ctx, key)
 	require.NoError(t, err)
-	assert.Equal(t, "legacy-b64", statMeta.ETag)
+	assert.Equal(t, "legacy-b64", statMeta.CacheTag)
 
 	require.NoError(t, fs.Delete(ctx, key))
 	_, statErr := os.Stat(legacyPath)
@@ -840,7 +840,7 @@ func TestFileStore_ReopenPreservesLegacyB64PrefixedKeyTracking(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0755))
 	f, err := os.Create(legacyPath)
 	require.NoError(t, err)
-	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: "legacy-b64"}))
+	require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: "legacy-b64"}))
 	_, err = f.Write([]byte("legacy-b64-data"))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -850,7 +850,7 @@ func TestFileStore_ReopenPreservesLegacyB64PrefixedKeyTracking(t *testing.T) {
 
 	meta, err := fs.Stat(ctx, key)
 	require.NoError(t, err)
-	assert.Equal(t, "legacy-b64", meta.ETag)
+	assert.Equal(t, "legacy-b64", meta.CacheTag)
 
 	require.NoError(t, fs.Delete(ctx, key))
 	_, statErr := os.Stat(legacyPath)
@@ -870,9 +870,9 @@ func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t
 		f, err := os.Create(path)
 		require.NoError(t, err)
 		if storedKey != "" {
-			require.NoError(t, writeStoredMetadata(f, storedKey, &daramjwee.Metadata{ETag: etag}))
+			require.NoError(t, writeStoredMetadata(f, storedKey, &daramjwee.Metadata{CacheTag: etag}))
 		} else {
-			require.NoError(t, writeMetadata(f, &daramjwee.Metadata{ETag: etag}))
+			require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: etag}))
 		}
 		_, err = f.Write([]byte(body))
 		require.NoError(t, err)
@@ -987,7 +987,7 @@ func benchmarkFileStoreSet(b *testing.B, store *FileStore) {
 
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("bench-key-%d", i)
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v-bench"})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v-bench"})
 		if err != nil {
 			b.Fatalf("BeginSet failed: %v", err)
 		}
@@ -1021,7 +1021,7 @@ func benchmarkFileStoreGet(b *testing.B, store *FileStore) {
 
 	for i := 0; i < numItems; i++ {
 		key := fmt.Sprintf("bench-key-%d", i)
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v-bench"})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v-bench"})
 		if err != nil {
 			b.Fatalf("Setup: BeginSet failed: %v", err)
 		}
