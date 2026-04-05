@@ -164,7 +164,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		if err != nil {
 			if errors.Is(err, ErrCacheableNotFound) {
 				c.debugLog("msg", "re-caching as negative entry during background refresh", "key", key)
-				c.handleNegativeCache(jobCtx, jobCtx, key)
+				c.handleNegativeCache(jobCtx, jobCtx, key, nil)
 			} else if errors.Is(err, ErrNotModified) {
 				c.debugLog("msg", "background refresh: object not modified", "key", key)
 				if fallbackSource != nil {
@@ -517,7 +517,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 	result, err := c.fetchFromOrigin(c.fetchContextForFetcher(requestCtx, setupCtx, fetcher), fetcher, oldMetadata)
 	if err != nil {
 		if errors.Is(err, ErrCacheableNotFound) {
-			return c.handleNegativeCache(requestCtx, setupCtx, key)
+			return c.handleNegativeCache(requestCtx, setupCtx, key, cancel)
 		}
 		if errors.Is(err, ErrNotModified) {
 			c.debugLog("msg", "object not modified, serving from hot cache again", "key", key)
@@ -527,10 +527,12 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 					return nil, err
 				}
 				c.warnLog("msg", "failed to refetch from hot cache after 304", "key", key, "err", err)
+				cancel()
 				return newGetResponse(GetStatusNotFound, nil, nil), nil
 			}
 			if meta.IsNegative {
 				stream.Close()
+				cancel()
 				return newGetResponse(GetStatusNotFound, nil, meta), nil
 			}
 			if req.IfNoneMatch != "" && req.IfNoneMatch == meta.CacheTag {
@@ -563,7 +565,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 }
 
 // handleNegativeCache processes the logic for storing a negative cache entry.
-func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Context, key string) (*GetResponse, error) {
+func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Context, key string, cancel context.CancelFunc) (*GetResponse, error) {
 	_, negativeFreshFor := c.tierFreshness(0)
 	c.debugLog("msg", "caching as negative entry", "key", key, "negative_fresh_for", negativeFreshFor)
 
@@ -579,6 +581,9 @@ func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Contex
 		if closeErr := writer.Close(); closeErr != nil {
 			c.warnLog("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
 		}
+	}
+	if cancel != nil {
+		cancel()
 	}
 	return newGetResponse(GetStatusNotFound, nil, meta), nil
 }
