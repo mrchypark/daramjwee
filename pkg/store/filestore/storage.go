@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -48,6 +49,45 @@ type dataPathCandidate struct {
 type storedMetadata struct {
 	daramjwee.Metadata
 	StoredKey *string `json:"__stored_key,omitempty"`
+}
+
+func (m storedMetadata) MarshalJSON() ([]byte, error) {
+	type payload struct {
+		CacheTag   string    `json:"CacheTag,omitempty"`
+		IsNegative bool      `json:"IsNegative"`
+		CachedAt   time.Time `json:"CachedAt"`
+		StoredKey  *string   `json:"__stored_key,omitempty"`
+	}
+	return json.Marshal(payload{
+		CacheTag:   m.Metadata.CacheTag,
+		IsNegative: m.Metadata.IsNegative,
+		CachedAt:   m.Metadata.CachedAt,
+		StoredKey:  m.StoredKey,
+	})
+}
+
+func (m *storedMetadata) UnmarshalJSON(data []byte) error {
+	type payload struct {
+		CacheTag   string    `json:"CacheTag,omitempty"`
+		LegacyETag string    `json:"ETag,omitempty"`
+		IsNegative bool      `json:"IsNegative"`
+		CachedAt   time.Time `json:"CachedAt"`
+		StoredKey  *string   `json:"__stored_key,omitempty"`
+	}
+	var p payload
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	m.Metadata = daramjwee.Metadata{
+		CacheTag:   p.CacheTag,
+		IsNegative: p.IsNegative,
+		CachedAt:   p.CachedAt,
+	}
+	if m.Metadata.CacheTag == "" {
+		m.Metadata.CacheTag = p.LegacyETag
+	}
+	m.StoredKey = p.StoredKey
+	return nil
 }
 
 // Option configures the FileStore.

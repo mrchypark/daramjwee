@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/goccy/go-json"
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/policy"
 	"github.com/mrchypark/daramjwee/pkg/store/storetest"
@@ -55,6 +56,22 @@ func writeLegacyMetadataForTest(t *testing.T, w io.Writer, cacheTag string) {
 	require.NoError(t, err)
 	_, err = w.Write(metaBytes)
 	require.NoError(t, err)
+}
+
+func TestStoredMetadataJSONRoundTripPreservesStoredKey(t *testing.T) {
+	key := "encoded/key"
+	encoded, err := json.Marshal(storedMetadata{
+		Metadata:  daramjwee.Metadata{CacheTag: "v1"},
+		StoredKey: &key,
+	})
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"__stored_key":"encoded/key"`)
+
+	var decoded storedMetadata
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.Equal(t, "v1", decoded.CacheTag)
+	require.NotNil(t, decoded.StoredKey)
+	require.Equal(t, key, *decoded.StoredKey)
 }
 
 func TestFileStore_WriteSinkConformance(t *testing.T) {
