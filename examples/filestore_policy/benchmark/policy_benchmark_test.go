@@ -73,7 +73,7 @@ func benchmarkFileStorePolicy(b *testing.B, policyName string, pol daramjwee.Evi
 
 		// Write operation
 		metadata := &daramjwee.Metadata{
-			ETag:     fmt.Sprintf("etag-%d", i),
+			CacheTag: fmt.Sprintf("etag-%d", i),
 			CachedAt: time.Now(),
 		}
 
@@ -144,7 +144,7 @@ func benchmarkMixedWorkload(b *testing.B, policyName string, pol daramjwee.Evict
 	for i := range 50 {
 		key := fmt.Sprintf("init-file-%d", i)
 		metadata := &daramjwee.Metadata{
-			ETag:     fmt.Sprintf("etag-%d", i),
+			CacheTag: fmt.Sprintf("etag-%d", i),
 			CachedAt: time.Now(),
 		}
 
@@ -169,7 +169,7 @@ func benchmarkMixedWorkload(b *testing.B, policyName string, pol daramjwee.Evict
 			// Write operation (33% of operations)
 			key := fmt.Sprintf("file-%d", i)
 			metadata := &daramjwee.Metadata{
-				ETag:     fmt.Sprintf("etag-%d", i),
+				CacheTag: fmt.Sprintf("etag-%d", i),
 				CachedAt: time.Now(),
 			}
 

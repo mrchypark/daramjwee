@@ -50,11 +50,17 @@ func (gf GenericFetcher[T]) Fetch(ctx context.Context, oldMetadata *daramjwee.Me
 func (gc *GenericCache[T]) Get(ctx context.Context, key string, fetcher GenericFetcher[T]) (T, error) {
 	var zero T
 
-	reader, err := gc.cache.Get(ctx, key, fetcher)
+	reader, err := gc.cache.Get(ctx, key, daramjwee.GetRequest{}, fetcher)
 	if err != nil {
 		return zero, err
 	}
 	defer reader.Close()
+	if reader.Status == daramjwee.GetStatusNotFound {
+		return zero, daramjwee.ErrNotFound
+	}
+	if reader.Status != daramjwee.GetStatusOK {
+		return zero, fmt.Errorf("unexpected cache get status for key %q: %s", key, reader.Status)
+	}
 
 	payload, err := io.ReadAll(reader)
 	if err != nil {
@@ -121,7 +127,7 @@ func (gc *GenericCache[T]) GetOrSet(ctx context.Context, key string, factory fun
 func (gc *GenericCache[T]) MustGet(ctx context.Context, key string, fetcher GenericFetcher[T]) T {
 	value, err := gc.Get(ctx, key, fetcher)
 	if err != nil {
-panic(fmt.Errorf("MustGet failed: %w", err))
+		panic(fmt.Errorf("MustGet failed: %w", err))
 	}
 	return value
 }
@@ -129,7 +135,7 @@ panic(fmt.Errorf("MustGet failed: %w", err))
 // MustSet is like Set but panics on error. Use when you're confident the operation will succeed.
 func (gc *GenericCache[T]) MustSet(ctx context.Context, key string, value T, metadata *daramjwee.Metadata) {
 	if err := gc.Set(ctx, key, value, metadata); err != nil {
-panic(fmt.Errorf("MustSet failed: %w", err))
+		panic(fmt.Errorf("MustSet failed: %w", err))
 	}
 }
 

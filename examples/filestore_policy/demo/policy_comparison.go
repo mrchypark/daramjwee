@@ -108,7 +108,7 @@ func testPolicy(logger log.Logger, policyName string, pol daramjwee.EvictionPoli
 	writeData := func(key string, size int) error {
 		data := strings.Repeat("X", size)
 		metadata := &daramjwee.Metadata{
-			ETag:     fmt.Sprintf("etag-%s", key),
+			CacheTag: fmt.Sprintf("etag-%s", key),
 			CachedAt: time.Now(),
 		}
 

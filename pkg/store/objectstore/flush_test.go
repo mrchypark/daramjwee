@@ -44,7 +44,7 @@ func TestStore_FlushUsesFreshCheckpointBaseWhenMemoryCacheIsEnabled(t *testing.T
 	keyA, keyB, keyC := sameShardKeys3("flush-fresh-base")
 	writeAndFlush := func(t *testing.T, store *Store, key, etag, body string) {
 		t.Helper()
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, body)
 		require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestStore_FlushUploadsSealedLocalSegmentAsRemoteSegmentObject(t *testing.T)
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "flush-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "flush-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "flush payload")
 	require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestStore_FlushPacksMultipleKeysIntoSingleRemoteSegment(t *testing.T) {
 
 	writeAndClose := func(key, etag, body string) {
 		t.Helper()
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, body)
 		require.NoError(t, err)
@@ -128,7 +128,7 @@ func TestStore_FlushWritesShardScopedCheckpointWithoutKeyManifests(t *testing.T)
 	store.autoFlush = false
 
 	for _, key := range []string{"checkpoint-a", "checkpoint-b"} {
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: key})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: key})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, key+"-body")
 		require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestStore_FlushFailureKeepsShardPendingForRetry(t *testing.T) {
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "retry-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "retry-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "retry payload")
 	require.NoError(t, err)
@@ -182,7 +182,7 @@ func TestStore_DeleteRepublishesCheckpointWithoutDeletedKey(t *testing.T) {
 	keyA, keyB := sameShardKeys("delete-checkpoint")
 
 	for _, key := range []string{keyA, keyB} {
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: key})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: key})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, key+"-body")
 		require.NoError(t, err)
@@ -211,7 +211,7 @@ func TestStore_FlushReclaimsLocalSegmentAfterRemoteCommit(t *testing.T) {
 	store := New(bucket, log.NewNopLogger(), WithDir(dataDir))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "reclaim-after-flush", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "reclaim-after-flush", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "flush payload")
 	require.NoError(t, err)
@@ -233,7 +233,7 @@ func TestStore_FlushReclaimsLocalSegmentAfterRemoteCommit(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "flush payload", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestStore_FlushDefersLocalSegmentReclaimUntilReaderCloses(t *testing.T) {
@@ -243,7 +243,7 @@ func TestStore_FlushDefersLocalSegmentReclaimUntilReaderCloses(t *testing.T) {
 	store := New(bucket, log.NewNopLogger(), WithDir(dataDir))
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "reclaim-after-reader-close", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "reclaim-after-reader-close", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "flush payload")
 	require.NoError(t, err)
@@ -251,7 +251,7 @@ func TestStore_FlushDefersLocalSegmentReclaimUntilReaderCloses(t *testing.T) {
 
 	stream, meta, err := store.GetStream(ctx, "reclaim-after-reader-close")
 	require.NoError(t, err)
-	require.Equal(t, "v1", meta.ETag)
+	require.Equal(t, "v1", meta.CacheTag)
 
 	require.Len(t, localSegmentPaths(t, dataDir), 1)
 	require.NoError(t, store.flushPending(ctx))
@@ -267,7 +267,7 @@ func TestStore_FlushDefersLocalSegmentReclaimUntilReaderCloses(t *testing.T) {
 	body, err := io.ReadAll(remoteStream)
 	require.NoError(t, err)
 	assert.Equal(t, "flush payload", string(body))
-	assert.Equal(t, "v1", remoteMeta.ETag)
+	assert.Equal(t, "v1", remoteMeta.CacheTag)
 }
 
 func localSegmentPaths(t *testing.T, dataDir string) []string {

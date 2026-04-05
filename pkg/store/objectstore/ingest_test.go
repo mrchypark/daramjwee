@@ -25,7 +25,7 @@ func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "local-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "local-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "hello, local ingest")
 	require.NoError(t, err)
@@ -42,7 +42,7 @@ func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "hello, local ingest", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestStore_AbortLeavesNoVisibleLocalEntry(t *testing.T) {
@@ -55,7 +55,7 @@ func TestStore_AbortLeavesNoVisibleLocalEntry(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "abort-local", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "abort-local", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "partial")
 	require.NoError(t, err)
@@ -77,7 +77,7 @@ func TestStore_ReopenRecoversPublishedLocalEntries(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "recover-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "recover-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "recoverable payload")
 	require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestStore_ReopenRecoversPublishedLocalEntries(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "recoverable payload", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestStore_MissingLocalSegmentDoesNotRemainVisible(t *testing.T) {
@@ -110,7 +110,7 @@ func TestStore_MissingLocalSegmentDoesNotRemainVisible(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "missing-segment", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "missing-segment", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "payload")
 	require.NoError(t, err)
@@ -141,9 +141,9 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 
 	oldBlobPath := store.blobPath("missing-segment-remote-fallback", "remote-v1")
 	require.NoError(t, bucket.Upload(ctx, oldBlobPath, strings.NewReader("remote-old")))
-	require.NoError(t, store.publishManifest(ctx, "missing-segment-remote-fallback", oldBlobPath, int64(len("remote-old")), &daramjwee.Metadata{ETag: "remote-v1"}))
+	require.NoError(t, store.publishManifest(ctx, "missing-segment-remote-fallback", oldBlobPath, int64(len("remote-old")), &daramjwee.Metadata{CacheTag: "remote-v1"}))
 
-	writer, err := store.BeginSet(ctx, "missing-segment-remote-fallback", &daramjwee.Metadata{ETag: "local-v2"})
+	writer, err := store.BeginSet(ctx, "missing-segment-remote-fallback", &daramjwee.Metadata{CacheTag: "local-v2"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "local-new")
 	require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "missing-segment-remote-live", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "missing-segment-remote-live", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "remote-current")
 	require.NoError(t, err)
@@ -219,7 +219,7 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "remote-current", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 
 	reopened := New(
 		bucket,
@@ -235,7 +235,7 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 	reopenedBody, err := io.ReadAll(reopenedStream)
 	require.NoError(t, err)
 	assert.Equal(t, "remote-current", string(reopenedBody))
-	assert.Equal(t, "v1", reopenedMeta.ETag)
+	assert.Equal(t, "v1", reopenedMeta.CacheTag)
 }
 
 func TestStore_OverwriteRemovesPreviousPublishedLocalSegment(t *testing.T) {
@@ -250,7 +250,7 @@ func TestStore_OverwriteRemovesPreviousPublishedLocalSegment(t *testing.T) {
 
 	write := func(key, etag, body string) {
 		t.Helper()
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, body)
 		require.NoError(t, err)
@@ -277,7 +277,7 @@ func TestStore_FlushUpdateSkipsKeyWhenNewerLocalEntryWasPublished(t *testing.T) 
 
 	write := func(key, etag, body string) {
 		t.Helper()
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, body)
 		require.NoError(t, err)
@@ -300,7 +300,7 @@ func TestStore_FlushUpdateSkipsKeyWhenNewerLocalEntryWasPublished(t *testing.T) 
 
 	current, ok := store.catalog.Get("flush-stale-key")
 	require.True(t, ok)
-	assert.Equal(t, "v2", current.Metadata.ETag)
+	assert.Equal(t, "v2", current.Metadata.CacheTag)
 	assert.Empty(t, current.RemotePath)
 
 	stream, meta, err := store.GetStream(ctx, "flush-stale-key")
@@ -310,7 +310,7 @@ func TestStore_FlushUpdateSkipsKeyWhenNewerLocalEntryWasPublished(t *testing.T) 
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "new", string(body))
-	assert.Equal(t, "v2", meta.ETag)
+	assert.Equal(t, "v2", meta.CacheTag)
 }
 
 func TestStore_DeleteRemovesPublishedLocalSegment(t *testing.T) {
@@ -323,7 +323,7 @@ func TestStore_DeleteRemovesPublishedLocalSegment(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "delete-local-segment", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "delete-local-segment", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "payload")
 	require.NoError(t, err)
@@ -348,7 +348,7 @@ func TestStore_OverwriteDefersPreviousSegmentRemovalUntilReaderCloses(t *testing
 
 	write := func(key, etag, body string) {
 		t.Helper()
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: etag})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: etag})
 		require.NoError(t, err)
 		_, err = io.WriteString(writer, body)
 		require.NoError(t, err)
@@ -359,7 +359,7 @@ func TestStore_OverwriteDefersPreviousSegmentRemovalUntilReaderCloses(t *testing
 
 	oldStream, oldMeta, err := store.GetStream(ctx, "overwrite-reader")
 	require.NoError(t, err)
-	require.Equal(t, "v1", oldMeta.ETag)
+	require.Equal(t, "v1", oldMeta.CacheTag)
 
 	segmentsBefore, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
 	require.NoError(t, err)
@@ -374,7 +374,7 @@ func TestStore_OverwriteDefersPreviousSegmentRemovalUntilReaderCloses(t *testing
 	newStream, newMeta, err := store.GetStream(ctx, "overwrite-reader")
 	require.NoError(t, err)
 	defer newStream.Close()
-	require.Equal(t, "v2", newMeta.ETag)
+	require.Equal(t, "v2", newMeta.CacheTag)
 
 	newBody, err := io.ReadAll(newStream)
 	require.NoError(t, err)
@@ -399,7 +399,7 @@ func TestStore_DeleteDefersSegmentRemovalUntilReaderCloses(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "delete-reader", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "delete-reader", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "payload")
 	require.NoError(t, err)
@@ -407,7 +407,7 @@ func TestStore_DeleteDefersSegmentRemovalUntilReaderCloses(t *testing.T) {
 
 	stream, meta, err := store.GetStream(ctx, "delete-reader")
 	require.NoError(t, err)
-	require.Equal(t, "v1", meta.ETag)
+	require.Equal(t, "v1", meta.CacheTag)
 
 	segments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
 	require.NoError(t, err)
@@ -439,7 +439,7 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "live-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "live-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "live payload")
 	require.NoError(t, err)
@@ -467,7 +467,7 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "live payload", string(body))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestStore_ReopenFailsWhenRecoveryCannotPersistCatalogRepair(t *testing.T) {
@@ -481,7 +481,7 @@ func TestStore_ReopenFailsWhenRecoveryCannotPersistCatalogRepair(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "recover-failure", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "recover-failure", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "payload")
 	require.NoError(t, err)
@@ -519,7 +519,7 @@ func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginSet(ctx, "close-failure", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "close-failure", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "payload")
 	require.NoError(t, err)

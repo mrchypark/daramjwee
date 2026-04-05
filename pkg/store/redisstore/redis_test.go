@@ -46,7 +46,7 @@ func TestRedisStore_SetAndGet(t *testing.T) {
 	key := "test-key"
 	testData := []byte("hello world")
 	testMetadata := &daramjwee.Metadata{
-		ETag:       "v1.0.0",
+		CacheTag:   "v1.0.0",
 		CachedAt:   time.Now().UTC().Truncate(time.Second),
 		IsNegative: false,
 	}
@@ -66,7 +66,7 @@ func TestRedisStore_SetAndGet(t *testing.T) {
 	defer reader.Close()
 
 	// 3. Verify metadata
-	assert.Equal(t, testMetadata.ETag, meta.ETag)
+	assert.Equal(t, testMetadata.CacheTag, meta.CacheTag)
 	assert.Equal(t, testMetadata.CachedAt, meta.CachedAt.UTC().Truncate(time.Second))
 	assert.Equal(t, testMetadata.IsNegative, meta.IsNegative)
 
@@ -88,7 +88,7 @@ func TestRedisStore_GetStream_Streaming(t *testing.T) {
 	key := "test-streaming-key"
 	// Create a large data slice to force multiple reads
 	largeData := []byte(strings.Repeat("a", chunkSize*2))
-	testMetadata := &daramjwee.Metadata{ETag: "v1"}
+	testMetadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	// 1. Set data
 	writer, err := store.BeginSet(ctx, key, testMetadata)
@@ -120,7 +120,7 @@ func TestRedisStore_Stat(t *testing.T) {
 	key := "test-stat-key"
 	testData := []byte("hello stat")
 	testMetadata := &daramjwee.Metadata{
-		ETag:       "v1.0.1",
+		CacheTag:   "v1.0.1",
 		CachedAt:   time.Now().UTC().Truncate(time.Second),
 		IsNegative: false,
 	}
@@ -137,7 +137,7 @@ func TestRedisStore_Stat(t *testing.T) {
 	require.NoError(t, err)
 
 	// 3. Verify metadata
-	assert.Equal(t, testMetadata.ETag, meta.ETag)
+	assert.Equal(t, testMetadata.CacheTag, meta.CacheTag)
 	assert.Equal(t, testMetadata.CachedAt, meta.CachedAt.UTC().Truncate(time.Second))
 	assert.Equal(t, testMetadata.IsNegative, meta.IsNegative)
 }
@@ -153,7 +153,7 @@ func TestRedisStore_Delete(t *testing.T) {
 	ctx := context.Background()
 	key := "test-delete-key"
 	testData := []byte("data to be deleted")
-	testMetadata := &daramjwee.Metadata{ETag: "v1"}
+	testMetadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	// 1. Set data first
 	writer, err := store.BeginSet(ctx, key, testMetadata)
@@ -188,7 +188,7 @@ func TestRedisStore_GetStream_DataInconsistency(t *testing.T) {
 
 	ctx := context.Background()
 	key := "test-inconsistent-key"
-	testMetadata := &daramjwee.Metadata{ETag: "v1"}
+	testMetadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	// Manually set metadata but not data to simulate inconsistency
 	metaBytes, err := json.Marshal(testMetadata)
@@ -209,7 +209,7 @@ func TestRedisStore_ContextCancellation(t *testing.T) {
 	store := New(client, logger)
 
 	key := "test-cancel"
-	metadata := &daramjwee.Metadata{ETag: "v1"}
+	metadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	t.Run("BeginSet", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -260,7 +260,7 @@ func TestRedisStore_AbortDeletesTempKey(t *testing.T) {
 	store := New(client, log.NewNopLogger()).(*RedisStore)
 	ctx := context.Background()
 
-	sink, err := store.BeginSet(ctx, "abort-key", &daramjwee.Metadata{ETag: "v1"})
+	sink, err := store.BeginSet(ctx, "abort-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 
 	writer := sink.(*redisStoreWriter)
@@ -282,7 +282,7 @@ func TestRedisStore_ActiveStreamKeepsTempKeyVisible(t *testing.T) {
 	store := New(client, log.NewNopLogger()).(*RedisStore)
 	ctx := context.Background()
 
-	sink, err := store.BeginSet(ctx, "active-key", &daramjwee.Metadata{ETag: "v1"})
+	sink, err := store.BeginSet(ctx, "active-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 
 	writer := sink.(*redisStoreWriter)
@@ -306,7 +306,7 @@ func TestRedisStore_ZeroByteWrite(t *testing.T) {
 
 	ctx := context.Background()
 	key := "zero-byte-key"
-	metadata := &daramjwee.Metadata{ETag: "v0", IsNegative: true}
+	metadata := &daramjwee.Metadata{CacheTag: "v0", IsNegative: true}
 
 	writer, err := store.BeginSet(ctx, key, metadata)
 	require.NoError(t, err)
@@ -319,6 +319,6 @@ func TestRedisStore_ZeroByteWrite(t *testing.T) {
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Len(t, body, 0)
-	assert.Equal(t, metadata.ETag, meta.ETag)
+	assert.Equal(t, metadata.CacheTag, meta.CacheTag)
 	assert.True(t, meta.IsNegative)
 }

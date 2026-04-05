@@ -38,7 +38,7 @@ func TestMemStore_EvictionStress(t *testing.T) {
 		key := fmt.Sprintf("stress-key-%d", i)
 		size := 1024 + rand.Intn(9*1024) // 1KB ~ 10KB
 
-		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{ETag: "v1"})
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
 		require.NoError(t, err)
 
 		_, err = writer.Write(dataChunk[:size])

@@ -175,7 +175,7 @@ func (f *mockFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata
 	}
 	return &daramjwee.FetchResult{
 		Body:     io.NopCloser(bytes.NewReader([]byte(f.content))),
-		Metadata: &daramjwee.Metadata{ETag: f.etag},
+		Metadata: &daramjwee.Metadata{CacheTag: f.etag},
 	}, nil
 }
 
@@ -237,9 +237,9 @@ func TestCache_WithSlowColdStore(t *testing.T) {
 
 	key := "slow-item"
 	content := "content from slow store"
-	slowCold.setData(key, content, &daramjwee.Metadata{ETag: "v-slow", CachedAt: time.Now()})
+	slowCold.setData(key, content, &daramjwee.Metadata{CacheTag: "v-slow", CachedAt: time.Now()})
 
-	stream, err := cache.Get(context.Background(), key, &mockFetcher{})
+	stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, &mockFetcher{})
 	require.NoError(t, err)
 
 	readBytes, err := io.ReadAll(stream)

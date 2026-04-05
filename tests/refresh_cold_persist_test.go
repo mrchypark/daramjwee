@@ -27,7 +27,7 @@ func TestScheduleRefresh_PersistsToCold(t *testing.T) {
 	key := "refresh-cold-persist"
 
 	// Seed initial value into hot via public API
-	wc, err := cache.Set(ctx, key, &daramjwee.Metadata{ETag: "v0"})
+	wc, err := cache.Set(ctx, key, &daramjwee.Metadata{CacheTag: "v0"})
 	require.NoError(t, err)
 	_, err = wc.Write([]byte("old-value"))
 	require.NoError(t, err)

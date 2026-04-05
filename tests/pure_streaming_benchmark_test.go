@@ -76,7 +76,7 @@ func BenchmarkCacheGet_MissPartialReadAbort(b *testing.B) {
 		key := benchmarkKey("partial-miss", i)
 		fetcher := &mockFetcher{content: payload, etag: "v1"}
 
-		stream, err := cache.Get(context.Background(), key, fetcher)
+		stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
 		if err != nil {
 			b.Fatalf("get: %v", err)
 		}
@@ -112,7 +112,7 @@ func BenchmarkCacheGet_MissFirstRead(b *testing.B) {
 			etag:  "v1",
 		}
 
-		stream, err := cache.Get(context.Background(), key, fetcher)
+		stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
 		if err != nil {
 			b.Fatalf("get: %v", err)
 		}
@@ -133,7 +133,7 @@ func BenchmarkCacheGet_LowerTierFirstRead(b *testing.B) {
 		first:    []byte("c"),
 		rest:     bytes.Repeat([]byte("c"), benchmarkSmallPayload-1),
 		delay:    benchmarkFirstByteLag,
-		metadata: &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()},
+		metadata: &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()},
 	}
 
 	cache := mustNewBenchmarkCache(
@@ -148,7 +148,7 @@ func BenchmarkCacheGet_LowerTierFirstRead(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		key := benchmarkKey("first-byte-cold", i)
-		stream, err := cache.Get(context.Background(), key, &mockFetcher{})
+		stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, &mockFetcher{})
 		if err != nil {
 			b.Fatalf("get: %v", err)
 		}
@@ -166,7 +166,7 @@ func BenchmarkCacheGet_LowerTierFirstRead(b *testing.B) {
 func benchmarkHotHitDefaultTTL(b *testing.B, payloadSize int) {
 	hot := newMockStore()
 	payload := strings.Repeat("a", payloadSize)
-	hot.setData("bench-key", payload, &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
+	hot.setData("bench-key", payload, &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
 
 	cache := mustNewBenchmarkCache(
 		b,
@@ -175,14 +175,14 @@ func benchmarkHotHitDefaultTTL(b *testing.B, payloadSize int) {
 	)
 
 	runReadAllBenchmark(b, func(i int) (io.ReadCloser, error) {
-		return cache.Get(context.Background(), "bench-key", &mockFetcher{})
+		return cache.Get(context.Background(), "bench-key", daramjwee.GetRequest{}, &mockFetcher{})
 	})
 }
 
 func benchmarkHotHitFresh(b *testing.B, payloadSize int) {
 	hot := newMockStore()
 	payload := strings.Repeat("f", payloadSize)
-	hot.setData("fresh-key", payload, &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
+	hot.setData("fresh-key", payload, &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
 
 	cache := mustNewBenchmarkCache(
 		b,
@@ -192,14 +192,14 @@ func benchmarkHotHitFresh(b *testing.B, payloadSize int) {
 	)
 
 	runReadAllBenchmark(b, func(i int) (io.ReadCloser, error) {
-		return cache.Get(context.Background(), "fresh-key", &mockFetcher{})
+		return cache.Get(context.Background(), "fresh-key", daramjwee.GetRequest{}, &mockFetcher{})
 	})
 }
 
 func benchmarkHotHitStale(b *testing.B, payloadSize int) {
 	hot := newMockStore()
 	payload := strings.Repeat("s", payloadSize)
-	hot.setData("stale-key", payload, &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now().Add(-time.Hour)})
+	hot.setData("stale-key", payload, &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now().Add(-time.Hour)})
 
 	cache := mustNewBenchmarkCache(
 		b,
@@ -213,7 +213,7 @@ func benchmarkHotHitStale(b *testing.B, payloadSize int) {
 	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
 
 	runReadAllBenchmark(b, func(i int) (io.ReadCloser, error) {
-		return cache.Get(context.Background(), "stale-key", fetcher)
+		return cache.Get(context.Background(), "stale-key", daramjwee.GetRequest{}, fetcher)
 	})
 }
 
@@ -233,9 +233,9 @@ func benchmarkLowerTierHitStreamThrough(b *testing.B, payloadSize int) {
 
 	for i := 0; i < b.N; i++ {
 		key := benchmarkKey("cold-key", i)
-		cold.setData(key, payload, &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
+		cold.setData(key, payload, &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
 
-		stream, err := cache.Get(context.Background(), key, &mockFetcher{})
+		stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, &mockFetcher{})
 		if err != nil {
 			b.Fatalf("get: %v", err)
 		}
@@ -265,7 +265,7 @@ func benchmarkMissStreamThrough(b *testing.B, payloadSize int) {
 		key := benchmarkKey("miss-key", i)
 		fetcher := &mockFetcher{content: payload, etag: "v1"}
 
-		stream, err := cache.Get(context.Background(), key, fetcher)
+		stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
 		if err != nil {
 			b.Fatalf("get: %v", err)
 		}
@@ -309,7 +309,7 @@ func benchmarkMissStreamThroughWithFixtures(b *testing.B, payload []byte, hot da
 
 	for i := 0; i < b.N; i++ {
 		key := benchmarkKey("miss-fixture", i)
-		stream, err := cache.Get(context.Background(), key, fetcher)
+		stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
 		if err != nil {
 			b.Fatalf("get: %v", err)
 		}
@@ -366,7 +366,7 @@ type benchmarkDelayedFetcher struct {
 func (f *benchmarkDelayedFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	return &daramjwee.FetchResult{
 		Body:     newBenchmarkDelayedReadCloser(f.first, f.rest, f.delay),
-		Metadata: &daramjwee.Metadata{ETag: f.etag},
+		Metadata: &daramjwee.Metadata{CacheTag: f.etag},
 	}, nil
 }
 
@@ -378,7 +378,7 @@ type benchmarkBytesFetcher struct {
 func (f *benchmarkBytesFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	return &daramjwee.FetchResult{
 		Body:     io.NopCloser(bytes.NewReader(f.body)),
-		Metadata: &daramjwee.Metadata{ETag: f.etag},
+		Metadata: &daramjwee.Metadata{CacheTag: f.etag},
 	}, nil
 }
 

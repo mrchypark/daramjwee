@@ -23,7 +23,7 @@ func TestStore_PagedReadRoundTrip(t *testing.T) {
 	)
 
 	payload := bytes.Repeat([]byte("0123456789abcdef"), 32)
-	writer, err := store.BeginSet(ctx, "paged-stream", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "paged-stream", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = writer.Write(payload)
 	require.NoError(t, err)
@@ -36,7 +36,7 @@ func TestStore_PagedReadRoundTrip(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, payload, body)
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestStore_NonPositivePageSizeFallsBackToDefaultForPagedReads(t *testing.T) {
@@ -49,7 +49,7 @@ func TestStore_NonPositivePageSizeFallsBackToDefaultForPagedReads(t *testing.T) 
 	)
 
 	payload := bytes.Repeat([]byte("abcd"), 128)
-	writer, err := store.BeginSet(ctx, "fallback-page-size", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := store.BeginSet(ctx, "fallback-page-size", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = writer.Write(payload)
 	require.NoError(t, err)
@@ -62,6 +62,6 @@ func TestStore_NonPositivePageSizeFallsBackToDefaultForPagedReads(t *testing.T) 
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, payload, body)
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 	assert.Positive(t, int(store.pageSize))
 }

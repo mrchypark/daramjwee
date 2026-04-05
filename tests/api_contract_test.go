@@ -41,7 +41,7 @@ func TestCache_SetPublishesOnClose(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	writer, err := cache.Set(context.Background(), "set-close-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := cache.Set(context.Background(), "set-close-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 
 	_, err = writer.Write([]byte("hello"))
@@ -56,7 +56,7 @@ func TestCache_SetPublishesOnClose(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte("hello"), body)
 	require.NotNil(t, meta)
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestCache_SetDiscardsOnAbort(t *testing.T) {
@@ -66,7 +66,7 @@ func TestCache_SetDiscardsOnAbort(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	writer, err := cache.Set(context.Background(), "set-abort-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := cache.Set(context.Background(), "set-abort-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 
 	_, err = writer.Write([]byte("partial"))
@@ -96,7 +96,7 @@ func TestCache_ObjectStoreTierZeroPublishesOnClose(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	writer, err := cache.Set(context.Background(), "objectstore-tier-zero", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := cache.Set(context.Background(), "objectstore-tier-zero", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 
 	_, err = writer.Write([]byte("hello objectstore"))
@@ -104,7 +104,7 @@ func TestCache_ObjectStoreTierZeroPublishesOnClose(t *testing.T) {
 	require.NoError(t, writer.Close())
 
 	fetcher := &mockFetcher{content: "origin-value", etag: "origin-v1"}
-	reader, err := cache.Get(context.Background(), "objectstore-tier-zero", fetcher)
+	reader, err := cache.Get(context.Background(), "objectstore-tier-zero", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -132,7 +132,7 @@ func TestCache_ObjectStoreTierZeroSinkIgnoresOpTimeoutAfterBeginSetReturns(t *te
 	require.NoError(t, err)
 	defer cache.Close()
 
-	writer, err := cache.Set(context.Background(), "objectstore-tier-zero-timeout", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := cache.Set(context.Background(), "objectstore-tier-zero-timeout", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
@@ -149,7 +149,7 @@ func TestCache_ObjectStoreTierZeroSinkIgnoresOpTimeoutAfterBeginSetReturns(t *te
 	require.NoError(t, err)
 	assert.Equal(t, []byte("hello objectstore"), body)
 	require.NotNil(t, meta)
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestCache_GetRejectsNilFetcher(t *testing.T) {
@@ -159,7 +159,7 @@ func TestCache_GetRejectsNilFetcher(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	_, err = cache.Get(context.Background(), "missing-key", nil)
+	_, err = cache.Get(context.Background(), "missing-key", daramjwee.GetRequest{}, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, daramjwee.ErrNilFetcher)
 }
@@ -181,7 +181,38 @@ func TestCache_GetReturnsErrNilMetadataForTopTierHit(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	_, err = cache.Get(context.Background(), "key", &mockFetcher{})
+	_, err = cache.Get(context.Background(), "key", daramjwee.GetRequest{}, &mockFetcher{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, daramjwee.ErrNilMetadata)
+}
+
+func TestCache_GetReturnsBodyAndDecisionMetadata(t *testing.T) {
+	hot := newMockStore()
+	hot.setData("get-response-key", "cached-value", &daramjwee.Metadata{
+		CacheTag: "cache-v1",
+		CachedAt: time.Now(),
+	})
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(time.Second))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	resp, err := cache.Get(context.Background(), "get-response-key", daramjwee.GetRequest{}, &mockFetcher{})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	defer resp.Close()
+
+	assert.Equal(t, daramjwee.GetStatusOK, resp.Status)
+	assert.Equal(t, "cache-v1", resp.Metadata.CacheTag)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("cached-value"), body)
+}
+
+func TestGetStatusString(t *testing.T) {
+	assert.Equal(t, "ok", daramjwee.GetStatusOK.String())
+	assert.Equal(t, "not_modified", daramjwee.GetStatusNotModified.String())
+	assert.Equal(t, "not_found", daramjwee.GetStatusNotFound.String())
+	assert.Equal(t, "GetStatus(99)", daramjwee.GetStatus(99).String())
 }

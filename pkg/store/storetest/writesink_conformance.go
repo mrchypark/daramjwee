@@ -16,7 +16,7 @@ func RunWriteSinkConformance(t *testing.T, factory func(t *testing.T) daramjwee.
 	t.Run("ClosePublishes", func(t *testing.T) {
 		store := factory(t)
 
-		sink, err := store.BeginSet(context.Background(), "publish-key", &daramjwee.Metadata{ETag: "v1"})
+		sink, err := store.BeginSet(context.Background(), "publish-key", &daramjwee.Metadata{CacheTag: "v1"})
 		require.NoError(t, err)
 		_, err = sink.Write([]byte("value"))
 		require.NoError(t, err)
@@ -30,13 +30,13 @@ func RunWriteSinkConformance(t *testing.T, factory func(t *testing.T) daramjwee.
 		require.NoError(t, err)
 		assert.Equal(t, []byte("value"), body)
 		require.NotNil(t, meta)
-		assert.Equal(t, "v1", meta.ETag)
+		assert.Equal(t, "v1", meta.CacheTag)
 	})
 
 	t.Run("AbortDiscards", func(t *testing.T) {
 		store := factory(t)
 
-		sink, err := store.BeginSet(context.Background(), "abort-key", &daramjwee.Metadata{ETag: "v1"})
+		sink, err := store.BeginSet(context.Background(), "abort-key", &daramjwee.Metadata{CacheTag: "v1"})
 		require.NoError(t, err)
 		_, err = sink.Write([]byte("partial"))
 		require.NoError(t, err)
@@ -49,7 +49,7 @@ func RunWriteSinkConformance(t *testing.T, factory func(t *testing.T) daramjwee.
 	t.Run("AbortThenCloseDoesNotPublish", func(t *testing.T) {
 		store := factory(t)
 
-		sink, err := store.BeginSet(context.Background(), "abort-close-key", &daramjwee.Metadata{ETag: "v1"})
+		sink, err := store.BeginSet(context.Background(), "abort-close-key", &daramjwee.Metadata{CacheTag: "v1"})
 		require.NoError(t, err)
 		_, err = sink.Write([]byte("partial"))
 		require.NoError(t, err)
@@ -63,7 +63,7 @@ func RunWriteSinkConformance(t *testing.T, factory func(t *testing.T) daramjwee.
 	t.Run("CloseThenAbortDoesNotUnpublish", func(t *testing.T) {
 		store := factory(t)
 
-		sink, err := store.BeginSet(context.Background(), "close-abort-key", &daramjwee.Metadata{ETag: "v1"})
+		sink, err := store.BeginSet(context.Background(), "close-abort-key", &daramjwee.Metadata{CacheTag: "v1"})
 		require.NoError(t, err)
 		_, err = sink.Write([]byte("value"))
 		require.NoError(t, err)
@@ -82,7 +82,7 @@ func RunWriteSinkConformance(t *testing.T, factory func(t *testing.T) daramjwee.
 	t.Run("RepeatedTerminalCallsAreSafe", func(t *testing.T) {
 		store := factory(t)
 
-		sink, err := store.BeginSet(context.Background(), "repeat-key", &daramjwee.Metadata{ETag: "v1"})
+		sink, err := store.BeginSet(context.Background(), "repeat-key", &daramjwee.Metadata{CacheTag: "v1"})
 		require.NoError(t, err)
 		_, err = sink.Write([]byte("value"))
 		require.NoError(t, err)
@@ -94,7 +94,7 @@ func RunWriteSinkConformance(t *testing.T, factory func(t *testing.T) daramjwee.
 	t.Run("WritesFailAfterAbort", func(t *testing.T) {
 		store := factory(t)
 
-		sink, err := store.BeginSet(context.Background(), "write-after-abort-key", &daramjwee.Metadata{ETag: "v1"})
+		sink, err := store.BeginSet(context.Background(), "write-after-abort-key", &daramjwee.Metadata{CacheTag: "v1"})
 		require.NoError(t, err)
 		require.NoError(t, sink.Abort())
 
@@ -105,7 +105,7 @@ func RunWriteSinkConformance(t *testing.T, factory func(t *testing.T) daramjwee.
 	t.Run("WritesFailAfterClose", func(t *testing.T) {
 		store := factory(t)
 
-		sink, err := store.BeginSet(context.Background(), "write-after-close-key", &daramjwee.Metadata{ETag: "v1"})
+		sink, err := store.BeginSet(context.Background(), "write-after-close-key", &daramjwee.Metadata{CacheTag: "v1"})
 		require.NoError(t, err)
 		require.NoError(t, sink.Close())
 

@@ -23,7 +23,7 @@ func (f *SimpleFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 	fmt.Println("Fetching data from origin...")
 	return &daramjwee.FetchResult{
 		Body:     io.NopCloser(strings.NewReader(f.data)),
-		Metadata: &daramjwee.Metadata{ETag: "v1"},
+		Metadata: &daramjwee.Metadata{CacheTag: "v1"},
 	}, nil
 }
 
@@ -80,7 +80,7 @@ func main() {
 
 	fmt.Println("--- First Get (Cache Miss) ---")
 	fetcher := &SimpleFetcher{data: "Hello from FileStore!"}
-	reader, err := cache.Get(ctx, "file-key", fetcher)
+	reader, err := cache.Get(ctx, "file-key", daramjwee.GetRequest{}, fetcher)
 	if err != nil {
 		logger.Log("msg", "Failed to get key", "err", err)
 		os.Exit(1)
@@ -90,7 +90,7 @@ func main() {
 	fmt.Printf("Got data: %s", string(body))
 
 	fmt.Println("--- Second Get (Cache Hit) ---")
-	reader, err = cache.Get(ctx, "file-key", fetcher)
+	reader, err = cache.Get(ctx, "file-key", daramjwee.GetRequest{}, fetcher)
 	if err != nil {
 		logger.Log("msg", "Failed to get key", "err", err)
 		os.Exit(1)
@@ -100,7 +100,7 @@ func main() {
 	fmt.Printf("Got data: %s", string(body))
 
 	fmt.Println("--- Set New Value ---")
-	writer, err := cache.Set(ctx, "file-key", &daramjwee.Metadata{ETag: "v2"})
+	writer, err := cache.Set(ctx, "file-key", &daramjwee.Metadata{CacheTag: "v2"})
 	if err != nil {
 		logger.Log("msg", "Failed to set key", "err", err)
 		os.Exit(1)
@@ -114,7 +114,7 @@ func main() {
 	fmt.Println("Set complete.")
 
 	fmt.Println("--- Third Get (Cache Hit) ---")
-	reader, err = cache.Get(ctx, "file-key", fetcher)
+	reader, err = cache.Get(ctx, "file-key", daramjwee.GetRequest{}, fetcher)
 	if err != nil {
 		logger.Log("msg", "Failed to get key", "err", err)
 		os.Exit(1)
@@ -132,7 +132,7 @@ func main() {
 	fmt.Println("Delete complete.")
 
 	fmt.Println("--- Fourth Get (Cache Miss) ---")
-	reader, err = cache.Get(ctx, "file-key", fetcher)
+	reader, err = cache.Get(ctx, "file-key", daramjwee.GetRequest{}, fetcher)
 	if err != nil {
 		logger.Log("msg", "Failed to get key", "err", err)
 		os.Exit(1)

@@ -28,7 +28,7 @@ func (f SimpleFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadat
 	fmt.Println("Fetching data from origin...")
 	return &daramjwee.FetchResult{
 		Body:     io.NopCloser(strings.NewReader(f.data)),
-		Metadata: &daramjwee.Metadata{ETag: "v1"},
+		Metadata: &daramjwee.Metadata{CacheTag: "v1"},
 	}, nil
 }
 
@@ -162,7 +162,7 @@ func main() {
 // getAndCompare is a helper function to execute a cache Get request,
 // read the result, and verify it against expected data.
 func getAndCompare(ctx context.Context, logger log.Logger, cache daramjwee.Cache, key string, fetcher daramjwee.Fetcher, expectedData []byte) {
-	rc, err := cache.Get(ctx, key, fetcher)
+	rc, err := cache.Get(ctx, key, daramjwee.GetRequest{}, fetcher)
 	if err != nil {
 		logger.Log("level", "error", "msg", "FATAL: Failed to get key from cache", "key", key, "err", err)
 		os.Exit(1)

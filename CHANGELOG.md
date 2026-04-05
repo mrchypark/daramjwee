@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.6.0
+
+### ⚠️ Breaking Changes & API Updates
+
+*   **Public read API redesigned around request/response semantics**: `Cache.Get(...)` now accepts a `GetRequest` and returns a `GetResponse`, exposing `GetStatusOK`, `GetStatusNotModified`, and `GetStatusNotFound` without forcing callers to infer behavior from side-channel store reads.
+*   **Metadata validator renamed to `CacheTag`**: Public and internal metadata now describe the cache-owned representation validator as `Metadata.CacheTag` instead of `Metadata.ETag`.
+
+### 🚀 Features & Enhancements
+
+*   **Decision-consistent conditional reads**: `IfNoneMatch` can now be evaluated directly against the cache's current representation, including stale-hit paths that trigger background refresh immediately when returning `GetStatusNotModified`.
+*   **`GetResponse` implements `io.ReadCloser`**: Body-bearing responses still work naturally with `io.ReadAll`, `io.Copy`, and `defer resp.Close()` patterns.
+*   **Backward-compatible metadata decoding**: Stored metadata can still decode legacy serialized `ETag` fields while writing the new `CacheTag` name.
+
+### 🧰 Migration Notes
+
+*   Update `cache.Get(ctx, key, fetcher)` to the new request/response form and handle `resp.Status` explicitly. For example:
+
+    ```go
+    resp, err := cache.Get(ctx, key, daramjwee.GetRequest{
+        IfNoneMatch: clientETag,
+    }, fetcher)
+    if err != nil {
+        return err
+    }
+    defer resp.Close()
+
+    switch resp.Status {
+    case daramjwee.GetStatusOK:
+        // stream resp.Body
+    case daramjwee.GetStatusNotModified:
+        // return 304 / skip body work
+    case daramjwee.GetStatusNotFound:
+        // return 404 / handle negative cache
+    }
+    ```
+*   Replace `Metadata.ETag` reads/writes with `Metadata.CacheTag`.
+
+### ✅ Verification
+
+*   `go test ./...`
+
 ## v0.5.0
 
 ### ⚠️ Breaking Changes & API Updates

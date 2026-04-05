@@ -44,7 +44,7 @@ userCache := cache.NewGeneric[User](baseCache)
 
 ```go
 ctx := context.Background()
-metadata := &daramjwee.Metadata{ETag: "v1"}
+metadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 // Set a value
 user := User{ID: 1, Name: "John Doe"}
@@ -130,7 +130,7 @@ userFetcher := cache.GenericFetcher[User](func(ctx context.Context, oldMetadata 
     }
     
     return user, &daramjwee.Metadata{
-        ETag: fmt.Sprintf("user-%d-v%d", user.ID, user.Version),
+        CacheTag: fmt.Sprintf("user-%d-v%d", user.ID, user.Version),
     }, nil
 })
 ```

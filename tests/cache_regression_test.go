@@ -64,7 +64,7 @@ func TestScheduleRefresh_PersistsToColdWhenColdEntryIsMissing(t *testing.T) {
 	ctx := context.Background()
 	key := "refresh-cold-missing"
 
-	wc, err := cache.Set(ctx, key, &daramjwee.Metadata{ETag: "v0"})
+	wc, err := cache.Set(ctx, key, &daramjwee.Metadata{CacheTag: "v0"})
 	require.NoError(t, err)
 	_, err = wc.Write([]byte("old-value"))
 	require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestScheduleRefresh_DoesNotPublishPartialDataOnCopyFailure(t *testing.T) {
 	ctx := context.Background()
 	key := "refresh-partial-copy"
 
-	wc, err := cache.Set(ctx, key, &daramjwee.Metadata{ETag: "v0"})
+	wc, err := cache.Set(ctx, key, &daramjwee.Metadata{CacheTag: "v0"})
 	require.NoError(t, err)
 	_, err = wc.Write([]byte("old-value"))
 	require.NoError(t, err)
@@ -105,7 +105,7 @@ func TestScheduleRefresh_DoesNotPublishPartialDataOnCopyFailure(t *testing.T) {
 
 	fetcher := &failingRefreshFetcher{
 		body: newFailingReadCloser([]byte("new-"), assert.AnError),
-		meta: &daramjwee.Metadata{ETag: "v1"},
+		meta: &daramjwee.Metadata{CacheTag: "v1"},
 	}
 
 	require.NoError(t, cache.ScheduleRefresh(ctx, key, fetcher))
@@ -117,7 +117,7 @@ func TestScheduleRefresh_DoesNotPublishPartialDataOnCopyFailure(t *testing.T) {
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "old-value", string(body))
-	assert.Equal(t, "v0", meta.ETag)
+	assert.Equal(t, "v0", meta.CacheTag)
 }
 
 func TestScheduleRefresh_WithoutColdStoreDoesNotPanicWorker(t *testing.T) {
@@ -125,7 +125,7 @@ func TestScheduleRefresh_WithoutColdStoreDoesNotPanicWorker(t *testing.T) {
 	logger := log.NewLogfmtLogger(logBuf)
 	hot := newMockStore()
 	hot.setData("stale-key", "old-value", &daramjwee.Metadata{
-		ETag:     "v0",
+		CacheTag: "v0",
 		CachedAt: time.Now().Add(-time.Hour),
 	})
 
@@ -141,7 +141,7 @@ func TestScheduleRefresh_WithoutColdStoreDoesNotPanicWorker(t *testing.T) {
 	require.NoError(t, err)
 
 	fetcher := &mockFetcher{content: "new-value", etag: "v1"}
-	reader, err := cache.Get(context.Background(), "stale-key", fetcher)
+	reader, err := cache.Get(context.Background(), "stale-key", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
 
 	_, err = io.Copy(io.Discard, reader)
@@ -188,7 +188,7 @@ func TestScheduleRefresh_ContinuesAfterCallerContextCancel(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return string(body) == "refreshed-after-cancel" && meta.ETag == "v1" && fetcher.getFetchCount() > 0
+		return string(body) == "refreshed-after-cancel" && meta.CacheTag == "v1" && fetcher.getFetchCount() > 0
 	}, 2*time.Second, 10*time.Millisecond)
 }
 

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +25,29 @@ type Config struct {
 	Debug   bool   `json:"debug"`
 	Port    int    `json:"port"`
 }
+
+type statusOnlyCache struct {
+	resp *daramjwee.GetResponse
+	err  error
+}
+
+func (c statusOnlyCache) Get(context.Context, string, daramjwee.GetRequest, daramjwee.Fetcher) (*daramjwee.GetResponse, error) {
+	return c.resp, c.err
+}
+
+func (statusOnlyCache) Set(context.Context, string, *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return nil, assert.AnError
+}
+
+func (statusOnlyCache) Delete(context.Context, string) error {
+	return nil
+}
+
+func (statusOnlyCache) ScheduleRefresh(context.Context, string, daramjwee.Fetcher) error {
+	return nil
+}
+
+func (statusOnlyCache) Close() {}
 
 func createTestCache() (daramjwee.Cache, error) {
 	logger := log.NewNopLogger()
@@ -65,7 +89,7 @@ func TestGenericCache_SetAndGet(t *testing.T) {
 		Name:  "John Doe",
 		Email: "john@example.com",
 	}
-	metadata := &daramjwee.Metadata{ETag: "v1"}
+	metadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	err = userCache.Set(ctx, "user:1", user, metadata)
 	if err != nil {
@@ -113,7 +137,7 @@ func TestGenericCache_FetcherOnMiss(t *testing.T) {
 	var fetcherCalled int32
 	fetcher := GenericFetcher[User](func(_ context.Context, _ *daramjwee.Metadata) (User, *daramjwee.Metadata, error) {
 		atomic.StoreInt32(&fetcherCalled, 1)
-		return expectedUser, &daramjwee.Metadata{ETag: "v2"}, nil
+		return expectedUser, &daramjwee.Metadata{CacheTag: "v2"}, nil
 	})
 
 	// First call should trigger fetcher (cache miss)
@@ -157,7 +181,7 @@ func TestGenericCache_String(t *testing.T) {
 	ctx := context.Background()
 
 	value := "Hello, Generic Cache!"
-	metadata := &daramjwee.Metadata{ETag: "v1"}
+	metadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	err = stringCache.Set(ctx, "greeting", value, metadata)
 	if err != nil {
@@ -191,7 +215,7 @@ func TestGenericCache_GetOrSet(t *testing.T) {
 	var factoryCalled int32
 	factory := func() (string, *daramjwee.Metadata, error) {
 		atomic.StoreInt32(&factoryCalled, 1)
-		return "factory value", &daramjwee.Metadata{ETag: "v1"}, nil
+		return "factory value", &daramjwee.Metadata{CacheTag: "v1"}, nil
 	}
 
 	// First call should trigger factory
@@ -235,7 +259,7 @@ func TestGenericCache_Must(t *testing.T) {
 	ctx := context.Background()
 
 	value := "must work"
-	metadata := &daramjwee.Metadata{ETag: "v1"}
+	metadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	// Should not panic
 	stringCache.MustSet(ctx, "must-key", value, metadata)
@@ -295,12 +319,12 @@ func TestGenericCache_StaleEntryHandlesNotModified(t *testing.T) {
 	fetcher := GenericFetcher[string](func(_ context.Context, oldMetadata *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
 		call := atomic.AddInt32(&fetchCount, 1)
 		if call == 1 {
-			return "cached-value", &daramjwee.Metadata{ETag: "v1"}, nil
+			return "cached-value", &daramjwee.Metadata{CacheTag: "v1"}, nil
 		}
-		if oldMetadata != nil && oldMetadata.ETag == "v1" {
+		if oldMetadata != nil && oldMetadata.CacheTag == "v1" {
 			return "", nil, daramjwee.ErrNotModified
 		}
-		t.Fatalf("expected old metadata with ETag v1, got %#v", oldMetadata)
+		t.Fatalf("expected old metadata with CacheTag v1, got %#v", oldMetadata)
 		return "", nil, nil
 	})
 
@@ -325,6 +349,19 @@ func TestGenericCache_StaleEntryHandlesNotModified(t *testing.T) {
 	}, time.Second, 10*time.Millisecond) {
 		t.Fatalf("expected fetcher to be called twice, got %d", fetchCount)
 	}
+}
+
+func TestGenericCache_GetUnexpectedStatusIncludesKeyAndStatus(t *testing.T) {
+	stringCache := NewGeneric[string](statusOnlyCache{
+		resp: &daramjwee.GetResponse{Status: daramjwee.GetStatusNotModified},
+	})
+
+	_, err := stringCache.Get(context.Background(), "product:42", nil)
+	if err == nil {
+		t.Fatal("expected error for unexpected status")
+	}
+	assert.True(t, strings.Contains(err.Error(), "product:42"))
+	assert.True(t, strings.Contains(err.Error(), daramjwee.GetStatusNotModified.String()))
 }
 
 func TestGenericCache_GetWithDefault(t *testing.T) {
@@ -361,7 +398,7 @@ func TestGenericCache_Delete(t *testing.T) {
 
 	// Set a value
 	value := "to be deleted"
-	metadata := &daramjwee.Metadata{ETag: "v1"}
+	metadata := &daramjwee.Metadata{CacheTag: "v1"}
 	err = stringCache.Set(ctx, "delete-me", value, metadata)
 	if err != nil {
 		t.Fatalf("Set failed: %v", err)
@@ -377,7 +414,7 @@ func TestGenericCache_Delete(t *testing.T) {
 	var fetcherCalled int32
 	fetcher := GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
 		atomic.StoreInt32(&fetcherCalled, 1)
-		return "from fetcher", &daramjwee.Metadata{ETag: "v2"}, nil
+		return "from fetcher", &daramjwee.Metadata{CacheTag: "v2"}, nil
 	})
 
 	retrieved, err := stringCache.Get(ctx, "delete-me", fetcher)
@@ -409,7 +446,7 @@ func TestGenericCache_Config(t *testing.T) {
 		Debug:   true,
 		Port:    8080,
 	}
-	metadata := &daramjwee.Metadata{ETag: "v1"}
+	metadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	err = configCache.Set(ctx, "config", config, metadata)
 	if err != nil {

@@ -57,7 +57,7 @@ func TestConcurrentAccess(t *testing.T) {
 				if (id+j)%2 == 0 {
 					// Get with fetcher
 					fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
-						return fmt.Sprintf("value-%d-%d", id, j), &daramjwee.Metadata{ETag: "test"}, nil
+						return fmt.Sprintf("value-%d-%d", id, j), &daramjwee.Metadata{CacheTag: "test"}, nil
 					})
 
 					_, err := stringCache.Get(ctx, key, fetcher)
@@ -67,7 +67,7 @@ func TestConcurrentAccess(t *testing.T) {
 				} else {
 					// Set
 					value := fmt.Sprintf("set-value-%d-%d", id, j)
-					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{ETag: "test"})
+					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "test"})
 					if err != nil {
 						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
 					}
@@ -98,7 +98,7 @@ func TestConcurrentRefresh(t *testing.T) {
 
 	// 먼저 값을 설정
 	key := "refresh-test"
-	err = stringCache.Set(ctx, key, "initial-value", &daramjwee.Metadata{ETag: "v1"})
+	err = stringCache.Set(ctx, key, "initial-value", &daramjwee.Metadata{CacheTag: "v1"})
 	if err != nil {
 		t.Fatalf("Initial set failed: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestConcurrentRefresh(t *testing.T) {
 			defer wg.Done()
 
 			fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
-				return fmt.Sprintf("refreshed-value-%d", id), &daramjwee.Metadata{ETag: fmt.Sprintf("v%d", id)}, nil
+				return fmt.Sprintf("refreshed-value-%d", id), &daramjwee.Metadata{CacheTag: fmt.Sprintf("v%d", id)}, nil
 			})
 
 			err := stringCache.ScheduleRefresh(ctx, key, fetcher)
@@ -163,7 +163,7 @@ func TestConcurrentMixedOperations(t *testing.T) {
 				switch (id + j) % 4 {
 				case 0: // Get
 					fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
-						return fmt.Sprintf("fetched-%d-%d", id, j), &daramjwee.Metadata{ETag: "test"}, nil
+						return fmt.Sprintf("fetched-%d-%d", id, j), &daramjwee.Metadata{CacheTag: "test"}, nil
 					})
 					_, err := stringCache.Get(ctx, key, fetcher)
 					if err != nil {
@@ -172,14 +172,14 @@ func TestConcurrentMixedOperations(t *testing.T) {
 
 				case 1: // Set
 					value := fmt.Sprintf("set-%d-%d", id, j)
-					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{ETag: "test"})
+					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "test"})
 					if err != nil {
 						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
 					}
 
 				case 2: // GetOrSet
 					factory := func() (string, *daramjwee.Metadata, error) {
-						return fmt.Sprintf("factory-%d-%d", id, j), &daramjwee.Metadata{ETag: "test"}, nil
+						return fmt.Sprintf("factory-%d-%d", id, j), &daramjwee.Metadata{CacheTag: "test"}, nil
 					}
 					_, err := stringCache.GetOrSet(ctx, key, factory)
 					if err != nil {
@@ -226,13 +226,13 @@ func BenchmarkConcurrentAccess(b *testing.B) {
 				// Get operation
 				currentI := i // 클로저에서 사용할 값을 복사
 				fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
-					return fmt.Sprintf("bench-value-%d", currentI), &daramjwee.Metadata{ETag: "bench"}, nil
+					return fmt.Sprintf("bench-value-%d", currentI), &daramjwee.Metadata{CacheTag: "bench"}, nil
 				})
 				_, _ = stringCache.Get(ctx, key, fetcher)
 			} else {
 				// Set operation
 				value := fmt.Sprintf("bench-set-%d", i)
-				_ = stringCache.Set(ctx, key, value, &daramjwee.Metadata{ETag: "bench"})
+				_ = stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "bench"})
 			}
 			i++
 		}

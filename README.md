@@ -38,7 +38,7 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
   * **Efficient Caching Logic:**
 
-      * **ETag-based Optimization:** Avoids unnecessary data transfer by exchanging ETags with the origin server. If content is not modified (`ErrNotModified`), the fetch is skipped, saving network bandwidth.
+      * **CacheTag-based Optimization:** The cache tracks a cache-owned validator (`CacheTag`) for each representation. Origins can reuse it for conditional fetches, and applications can map it to external HTTP `ETag` headers if desired.
       * **Negative Caching:** Caches the "not found" state for non-existent keys, preventing repeated, wasteful requests to the origin.
       * **Stale-While-Revalidate:** Can serve stale data while asynchronously refreshing it in the background, minimizing latency while maintaining data freshness. This replaces the previous "Grace Period" concept.
 
@@ -124,11 +124,11 @@ var fakeOrigin = map[string]struct {
 }
 
 func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-	oldETagVal := "none"
+	oldCacheTag := "none"
 	if oldMetadata != nil {
-		oldETagVal = oldMetadata.ETag
+		oldCacheTag = oldMetadata.CacheTag
 	}
-	fmt.Printf("[Origin] Fetching key: %s (old ETag: %s)\n", f.key, oldETagVal)
+	fmt.Printf("[Origin] Fetching key: %s (old CacheTag: %s)\n", f.key, oldCacheTag)
 
 	// In a real application, this would be a DB query or an API call.
 	obj, ok := fakeOrigin[f.key]
@@ -136,14 +136,14 @@ func (f *originFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metada
 		return nil, daramjwee.ErrCacheableNotFound
 	}
 
-	// If the ETag matches, notify that the content has not been modified.
-	if oldMetadata != nil && oldMetadata.ETag == obj.etag {
+	// If the CacheTag matches, notify that the content has not been modified.
+	if oldMetadata != nil && oldMetadata.CacheTag == obj.etag {
 		return nil, daramjwee.ErrNotModified
 	}
 
 	return &daramjwee.FetchResult{
 		Body:     io.NopCloser(bytes.NewReader([]byte(obj.data))),
-		Metadata: &daramjwee.Metadata{ETag: obj.etag},
+		Metadata: &daramjwee.Metadata{CacheTag: obj.etag},
 	}, nil
 }
 
@@ -175,23 +175,35 @@ func main() {
 	http.HandleFunc("/objects/", func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(r.URL.Path, "/objects/")
 
-		// Call cache.Get() to retrieve the data stream.
-		stream, err := cache.Get(r.Context(), key, &originFetcher{key: key})
+		// Call cache.Get() to retrieve the current cache decision.
+		resp, err := cache.Get(r.Context(), key, daramjwee.GetRequest{
+			IfNoneMatch: r.Header.Get("If-None-Match"),
+		}, &originFetcher{key: key})
 		if err != nil {
-			if err == daramjwee.ErrNotFound {
-				http.Error(w, "Object Not Found", http.StatusNotFound)
-			} else if err == daramjwee.ErrCacheClosed {
+			if err == daramjwee.ErrCacheClosed {
 				http.Error(w, "Server is shutting down", http.StatusServiceUnavailable)
 			} else {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 			return
 		}
-		// CRITICAL: Always defer Close() immediately after checking for an error.
-		defer stream.Close()
+		defer resp.Close()
+
+		if resp.Metadata.CacheTag != "" {
+			w.Header().Set("ETag", resp.Metadata.CacheTag)
+		}
+
+		switch resp.Status {
+		case daramjwee.GetStatusNotFound:
+			http.Error(w, "Object Not Found", http.StatusNotFound)
+			return
+		case daramjwee.GetStatusNotModified:
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 
 		// Stream the response directly to the client.
-		io.Copy(w, stream)
+		io.Copy(w, resp)
 	})
 
 fmt.Println("Server is running on :8080")

@@ -11,6 +11,7 @@ type ProdLikeWorkloadItem struct {
 	Category string
 	Body     []byte
 	ETag     string
+	CacheTag string
 }
 
 func BuildProdLikeWorkload() ([]ProdLikeWorkloadItem, map[string]int, int64) {
@@ -39,11 +40,13 @@ func BuildProdLikeWorkload() ([]ProdLikeWorkloadItem, map[string]int, int64) {
 		for i := 0; i < spec.count; i++ {
 			key := fmt.Sprintf("%s/%03d/%s", spec.prefix, i, workloadDate(i))
 			body := workloadBody(spec.category, i, spec.size)
+			cacheTag := fmt.Sprintf("%s-%03d", spec.category, i)
 			items = append(items, ProdLikeWorkloadItem{
 				Key:      key,
 				Category: spec.category,
 				Body:     body,
-				ETag:     fmt.Sprintf("%s-%03d", spec.category, i),
+				ETag:     cacheTag,
+				CacheTag: cacheTag,
 			})
 			counts[spec.category]++
 			totalBytes += int64(len(body))

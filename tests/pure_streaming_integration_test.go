@@ -17,7 +17,7 @@ import (
 func TestCache_MissReturnsStreamBeforeSourceEOF(t *testing.T) {
 	hot := newMockStore()
 	source := newBlockingReadCloser([]byte("hello"), []byte(" world"))
-	fetcher := &blockingSourceFetcher{source: source, metadata: &daramjwee.Metadata{ETag: "v1"}}
+	fetcher := &blockingSourceFetcher{source: source, metadata: &daramjwee.Metadata{CacheTag: "v1"}}
 
 	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(2*time.Second))
 	require.NoError(t, err)
@@ -25,7 +25,7 @@ func TestCache_MissReturnsStreamBeforeSourceEOF(t *testing.T) {
 
 	resultCh := make(chan getResult, 1)
 	go func() {
-		stream, err := cache.Get(context.Background(), "miss-key", fetcher)
+		stream, err := cache.Get(context.Background(), "miss-key", daramjwee.GetRequest{}, fetcher)
 		resultCh <- getResult{stream: stream, err: err}
 	}()
 
@@ -68,7 +68,7 @@ func TestCache_ColdHitReturnsStreamBeforeSourceEOF(t *testing.T) {
 	source := newBlockingReadCloser([]byte("cold"), []byte(" value"))
 	cold := &blockingColdStore{
 		streamFactory: func() io.ReadCloser { return source },
-		metadata:      &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()},
+		metadata:      &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()},
 	}
 
 	cache, err := daramjwee.New(
@@ -82,7 +82,7 @@ func TestCache_ColdHitReturnsStreamBeforeSourceEOF(t *testing.T) {
 
 	resultCh := make(chan getResult, 1)
 	go func() {
-		stream, err := cache.Get(context.Background(), "cold-key", &mockFetcher{})
+		stream, err := cache.Get(context.Background(), "cold-key", daramjwee.GetRequest{}, &mockFetcher{})
 		resultCh <- getResult{stream: stream, err: err}
 	}()
 
@@ -129,7 +129,7 @@ func TestCache_MissBeginSetFailureFallsBackToPassthrough(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "miss-key", fetcher)
+	stream, err := cache.Get(context.Background(), "miss-key", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
 	defer stream.Close()
 
@@ -149,7 +149,7 @@ func TestCache_PartialMissReadCloseDoesNotPublishToHot(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "partial-miss-key", fetcher)
+	stream, err := cache.Get(context.Background(), "partial-miss-key", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
 
 	buf := make([]byte, 7)
@@ -165,7 +165,7 @@ func TestCache_PartialMissReadCloseDoesNotPublishToHot(t *testing.T) {
 func TestCache_PartialColdHitReadCloseDoesNotPublishToHot(t *testing.T) {
 	hot := newMockStore()
 	cold := newMockStore()
-	cold.setData("partial-cold-key", "partial-value", &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
+	cold.setData("partial-cold-key", "partial-value", &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
 
 	cache, err := daramjwee.New(
 		nil,
@@ -176,7 +176,7 @@ func TestCache_PartialColdHitReadCloseDoesNotPublishToHot(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "partial-cold-key", &mockFetcher{})
+	stream, err := cache.Get(context.Background(), "partial-cold-key", daramjwee.GetRequest{}, &mockFetcher{})
 	require.NoError(t, err)
 
 	buf := make([]byte, 7)
@@ -202,7 +202,7 @@ func TestCache_PublishFailureDoesNotScheduleColdPersist(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "publish-fail-key", fetcher)
+	stream, err := cache.Get(context.Background(), "publish-fail-key", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
 
 	body, err := io.ReadAll(stream)
@@ -223,7 +223,7 @@ func TestCache_PublishFailureDoesNotScheduleColdPersist(t *testing.T) {
 func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
 	hot := &statOnlyThenReadableStore{
 		data: []byte("cached-value"),
-		meta: &daramjwee.Metadata{ETag: "v1"},
+		meta: &daramjwee.Metadata{CacheTag: "v1"},
 	}
 	fetcher := &errFetcher{err: daramjwee.ErrNotModified}
 
@@ -231,7 +231,7 @@ func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "not-modified-key", fetcher)
+	stream, err := cache.Get(context.Background(), "not-modified-key", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
 
 	body, err := io.ReadAll(stream)
@@ -245,13 +245,13 @@ func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
 
 func TestCache_MissStreamIgnoresOpTimeoutAfterFetchReturns(t *testing.T) {
 	hot := newContextBoundStore()
-	fetcher := &contextBoundFetcher{body: []byte("timeout-safe-miss"), metadata: &daramjwee.Metadata{ETag: "v1"}}
+	fetcher := &contextBoundFetcher{body: []byte("timeout-safe-miss"), metadata: &daramjwee.Metadata{CacheTag: "v1"}}
 
 	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(20*time.Millisecond))
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "miss-timeout-key", fetcher)
+	stream, err := cache.Get(context.Background(), "miss-timeout-key", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
 	defer stream.Close()
 
@@ -268,7 +268,7 @@ func TestCache_MissStreamIgnoresOpTimeoutAfterFetchReturns(t *testing.T) {
 	persisted, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "timeout-safe-miss", string(persisted))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestCache_MissUsesOpTimeoutForFetchSetup(t *testing.T) {
@@ -279,7 +279,7 @@ func TestCache_MissUsesOpTimeoutForFetchSetup(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "miss-timeout-setup-key", fetcher)
+	stream, err := cache.Get(context.Background(), "miss-timeout-setup-key", daramjwee.GetRequest{}, fetcher)
 	require.Error(t, err)
 	require.Nil(t, stream)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -288,7 +288,7 @@ func TestCache_MissUsesOpTimeoutForFetchSetup(t *testing.T) {
 func TestCache_LowerTierStreamIgnoresOpTimeoutAfterGetReturns(t *testing.T) {
 	hot := newContextBoundStore()
 	lower := newContextBoundStore()
-	lower.set("lower-timeout-key", []byte("lower-timeout-value"), &daramjwee.Metadata{ETag: "v1", CachedAt: time.Now()})
+	lower.set("lower-timeout-key", []byte("lower-timeout-value"), &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
 
 	cache, err := daramjwee.New(
 		nil,
@@ -299,7 +299,7 @@ func TestCache_LowerTierStreamIgnoresOpTimeoutAfterGetReturns(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "lower-timeout-key", &mockFetcher{})
+	stream, err := cache.Get(context.Background(), "lower-timeout-key", daramjwee.GetRequest{}, &mockFetcher{})
 	require.NoError(t, err)
 	defer stream.Close()
 
@@ -316,7 +316,7 @@ func TestCache_LowerTierStreamIgnoresOpTimeoutAfterGetReturns(t *testing.T) {
 	persisted, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "lower-timeout-value", string(persisted))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 func TestCache_SetSinkIgnoresOpTimeoutAfterBeginSetReturns(t *testing.T) {
@@ -326,7 +326,7 @@ func TestCache_SetSinkIgnoresOpTimeoutAfterBeginSetReturns(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close()
 
-	writer, err := cache.Set(context.Background(), "set-timeout-key", &daramjwee.Metadata{ETag: "v1"})
+	writer, err := cache.Set(context.Background(), "set-timeout-key", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
@@ -341,7 +341,7 @@ func TestCache_SetSinkIgnoresOpTimeoutAfterBeginSetReturns(t *testing.T) {
 	persisted, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, "timeout-safe-set", string(persisted))
-	assert.Equal(t, "v1", meta.ETag)
+	assert.Equal(t, "v1", meta.CacheTag)
 }
 
 type getResult struct {
