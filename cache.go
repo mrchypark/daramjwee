@@ -641,7 +641,7 @@ func newGetResponse(status GetStatus, body io.ReadCloser, meta *Metadata) *GetRe
 		Body:   body,
 	}
 	if meta != nil {
-		resp.Metadata = *cloneMetadata(meta)
+		resp.Metadata = *meta
 	}
 	return resp
 }
