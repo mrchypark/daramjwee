@@ -50,33 +50,34 @@ type manifest struct {
 // Store is a first-party object storage backend.
 // It currently publishes immutable blob versions via internal manifest pointers.
 type Store struct {
-	bucket          objstore.Bucket
-	logger          log.Logger
-	dataDir         string
-	prefix          string
-	gcGrace         time.Duration
-	packThreshold   int64
-	pagedThreshold  int64
-	pageSize        int64
-	blockCache      *blockcache.Cache
-	pageCache       *pagecache.Cache
-	checkpointCache *checkpointCache
-	catalog         *internalcatalog.Catalog
-	lockManager     *keyLockManager
-	blockLoads      singleflight.Group
-	pageLoads       singleflight.Group
-	versionSeq      atomic.Uint64
-	generationSeq   atomic.Uint64
-	initErr         error
-	segmentRefsMu   sync.Mutex
-	segmentRefs     map[string]int
-	reclaimableSegs map[string]struct{}
-	flushMu         sync.Mutex
-	flushRunMu      sync.Mutex
-	pendingShards   map[string]struct{}
-	flushTimer      *time.Timer
-	autoFlush       bool
-	now             func() time.Time
+	bucket            objstore.Bucket
+	logger            log.Logger
+	dataDir           string
+	prefix            string
+	gcGrace           time.Duration
+	packThreshold     int64
+	pagedThreshold    int64
+	pageSize          int64
+	blockCache        *blockcache.Cache
+	pageCache         *pagecache.Cache
+	checkpointCache   *checkpointCache
+	catalog           *internalcatalog.Catalog
+	lockManager       *keyLockManager
+	blockLoads        singleflight.Group
+	pageLoads         singleflight.Group
+	versionSeq        atomic.Uint64
+	generationSeq     atomic.Uint64
+	initErr           error
+	segmentRefsMu     sync.Mutex
+	segmentRefs       map[string]int
+	reclaimableSegs   map[string]struct{}
+	flushMu           sync.Mutex
+	flushRunMu        sync.Mutex
+	pendingShards     map[string]struct{}
+	flushTimer        *time.Timer
+	autoFlush         bool
+	now               func() time.Time
+	openSegmentWriter func(root, shard, segmentID string) (segmentWriter, error)
 }
 
 func (s *Store) GetStreamUsesContext() bool { return true }
@@ -84,10 +85,6 @@ func (s *Store) GetStreamUsesContext() bool { return true }
 func (s *Store) BeginSetUsesContext() bool { return true }
 
 var _ daramjwee.Store = (*Store)(nil)
-
-var openSegmentWriter = func(root, shard, segmentID string) (segmentWriter, error) {
-	return segment.Open(root, shard, segmentID)
-}
 
 // New creates a new object storage backend.
 func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
@@ -135,6 +132,9 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		pendingShards:   make(map[string]struct{}),
 		autoFlush:       true,
 		now:             time.Now,
+		openSegmentWriter: func(root, shard, segmentID string) (segmentWriter, error) {
+			return segment.Open(root, shard, segmentID)
+		},
 	}
 	store.checkpointCache = newCheckpointCache(cfg.checkpointCacheBytes, cfg.checkpointTTL, func() time.Time {
 		return store.now()
@@ -263,7 +263,7 @@ func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Me
 
 	generation := s.nextGeneration()
 	segmentID := s.nextVersion()
-	segmentWriter, err := openSegmentWriter(s.dataDir, shardForKey(key), segmentID)
+	segmentWriter, err := s.openSegmentWriter(s.dataDir, shardForKey(key), segmentID)
 	if err != nil {
 		return nil, err
 	}

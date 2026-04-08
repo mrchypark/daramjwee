@@ -175,16 +175,16 @@ func TestStore_BeginSetGenerationPrecedesDelayedSegmentOpen(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	realOpenSegmentWriter := openSegmentWriter
+	realOpenSegmentWriter := store.openSegmentWriter
 	blockOpen := make(chan struct{})
 	openEntered := make(chan struct{}, 1)
-	openSegmentWriter = func(root, shard, segmentID string) (segmentWriter, error) {
+	store.openSegmentWriter = func(root, shard, segmentID string) (segmentWriter, error) {
 		openEntered <- struct{}{}
 		<-blockOpen
 		return realOpenSegmentWriter(root, shard, segmentID)
 	}
 	defer func() {
-		openSegmentWriter = realOpenSegmentWriter
+		store.openSegmentWriter = realOpenSegmentWriter
 	}()
 
 	type beginResult struct {
