@@ -221,6 +221,13 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	path := fs.toDataPath(key)
 	generation := fs.nextGeneration()
+	fs.beginGenerationTracking(key)
+	trackingActive := true
+	defer func() {
+		if trackingActive {
+			fs.finishGenerationTracking(key)
+		}
+	}()
 
 	// Ensure the directory exists for the target path
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -246,8 +253,6 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		}
 		return nil
 	}
-
-	fs.beginGenerationTracking(key)
 
 	abortCleanup := func() error {
 		defer fs.finishGenerationTracking(key)
@@ -299,6 +304,7 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		return nil
 	}
 
+	trackingActive = false
 	return newLockedWriteCloser(tmpFile, onClose, abortCleanup), nil
 }
 
@@ -791,7 +797,10 @@ func (fs *FileStore) finishGenerationTracking(key string) {
 	defer fs.generationMu.Unlock()
 
 	active := fs.activeWriters[key]
-	if active <= 1 {
+	if active == 0 {
+		return
+	}
+	if active == 1 {
 		delete(fs.activeWriters, key)
 		delete(fs.generations, key)
 		return

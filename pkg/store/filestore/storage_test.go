@@ -504,6 +504,27 @@ func TestFileStore_DeleteKeepsGenerationFloorUntilActiveWriterFinishes(t *testin
 	assert.False(t, activePresent)
 }
 
+func TestFileStore_BeginSetSetupFailureCleansGenerationTracking(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "beginset-setup-failure"
+
+	blockerPath := filepath.Join(fs.baseDir, encodedKeyDir)
+	require.NoError(t, os.RemoveAll(blockerPath))
+	require.NoError(t, os.WriteFile(blockerPath, []byte("block-dir"), 0o644))
+
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.Error(t, err)
+	require.Nil(t, writer)
+
+	fs.generationMu.Lock()
+	_, floorPresent := fs.generations[key]
+	_, activePresent := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	assert.False(t, floorPresent)
+	assert.False(t, activePresent)
+}
+
 // TestFileStore_PathTraversal tests that path traversal attempts are prevented.
 func TestFileStore_PathTraversal(t *testing.T) {
 	fs := setupTestStore(t)
