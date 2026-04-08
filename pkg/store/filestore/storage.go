@@ -141,7 +141,7 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 		activeWriters: make(map[string]int),
 		fileSizes:     make(map[string]int64),
 	}
-	if now := time.Now().UnixNano(); now > 0 {
+	if now := time.Now().UnixNano(); now != 0 {
 		fs.generationSeq.Store(uint64(now))
 	}
 
