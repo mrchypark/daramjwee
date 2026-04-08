@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.6.1
+
+### 🐛 Bug Fixes & Refinements
+
+*   **Writer-lifetime key/path locks removed from `filestore` and `objectstore`**: same-key writers now stage concurrently without holding a long-lived key/path lock for their full lifetime, eliminating the main orphan-lock failure mode when a `WriteSink` is never terminally closed.
+*   **Generation-based publish arbitration for staged writes**: visible state changes now happen only during publish, and stale late closes are discarded locally instead of reviving data over newer writes or deletes.
+*   **Delete/write race handling hardened**: `filestore` and `objectstore` now keep newer tombstones ahead of stale writers, and stale objectstore deletes no longer remove remote manifest visibility when they lose the generation race.
+*   **Expanded race and contention regression coverage**: added same-key overlap, stale-close, delete-race, and local contention test coverage across `filestore` and `objectstore`, plus a local race harness for lock-contention verification.
+
+### 🧰 Notes
+
+*   This release does not add cross-process coordination. The new generation arbitration remains process-local.
+
+### ✅ Verification
+
+*   `go test ./...`
+
 ## v0.6.0
 
 ### ⚠️ Breaking Changes & API Updates
