@@ -53,8 +53,7 @@ type dataPathCandidate struct {
 
 type storedMetadata struct {
 	daramjwee.Metadata
-	StoredKey  *string `json:"__stored_key,omitempty"`
-	Generation uint64  `json:"__generation,omitempty"`
+	StoredKey *string `json:"__stored_key,omitempty"`
 }
 
 func (m storedMetadata) MarshalJSON() ([]byte, error) {
@@ -63,14 +62,12 @@ func (m storedMetadata) MarshalJSON() ([]byte, error) {
 		IsNegative bool      `json:"IsNegative"`
 		CachedAt   time.Time `json:"CachedAt"`
 		StoredKey  *string   `json:"__stored_key,omitempty"`
-		Generation uint64    `json:"__generation,omitempty"`
 	}
 	return json.Marshal(payload{
 		CacheTag:   m.Metadata.CacheTag,
 		IsNegative: m.Metadata.IsNegative,
 		CachedAt:   m.Metadata.CachedAt,
 		StoredKey:  m.StoredKey,
-		Generation: m.Generation,
 	})
 }
 
@@ -81,7 +78,6 @@ func (m *storedMetadata) UnmarshalJSON(data []byte) error {
 		IsNegative bool      `json:"IsNegative"`
 		CachedAt   time.Time `json:"CachedAt"`
 		StoredKey  *string   `json:"__stored_key,omitempty"`
-		Generation uint64    `json:"__generation,omitempty"`
 	}
 	var p payload
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -96,7 +92,6 @@ func (m *storedMetadata) UnmarshalJSON(data []byte) error {
 		m.Metadata.CacheTag = p.LegacyETag
 	}
 	m.StoredKey = p.StoredKey
-	m.Generation = p.Generation
 	return nil
 }
 
@@ -143,6 +138,9 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 		lockManager: NewFileLockManager(2048),
 		generations: make(map[string]uint64),
 		fileSizes:   make(map[string]int64),
+	}
+	if now := time.Now().UnixNano(); now > 0 {
+		fs.generationSeq.Store(uint64(now))
 	}
 
 	// Apply options
@@ -542,10 +540,10 @@ func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 
 func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata, generation uint64) error {
 	storedKey := key
+	_ = generation
 	return writeStoredMetadataEnvelope(w, storedMetadata{
-		Metadata:   derefMetadata(meta),
-		StoredKey:  &storedKey,
-		Generation: generation,
+		Metadata:  derefMetadata(meta),
+		StoredKey: &storedKey,
 	})
 }
 
@@ -609,9 +607,9 @@ func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, uint64,
 
 	dataOffset := int64(4 + metaLen)
 	if meta.StoredKey == nil {
-		return &meta.Metadata, "", false, meta.Generation, dataOffset, nil
+		return &meta.Metadata, "", false, 0, dataOffset, nil
 	}
-	return &meta.Metadata, *meta.StoredKey, true, meta.Generation, dataOffset, nil
+	return &meta.Metadata, *meta.StoredKey, true, 0, dataOffset, nil
 }
 
 // copyFile copies a file from src to dst.
@@ -747,10 +745,6 @@ func (fs *FileStore) initializeCurrentSize() error {
 		if err != nil {
 			return err
 		}
-		generation, err := fs.readGenerationForPath(path)
-		if err != nil {
-			return err
-		}
 		size := info.Size()
 
 		if oldSize, exists := fs.fileSizes[key]; exists {
@@ -760,7 +754,6 @@ func (fs *FileStore) initializeCurrentSize() error {
 		fs.fileSizes[key] = size
 		fs.currentSize += size
 		fs.policy.Add(key, size)
-		fs.observeGeneration(key, generation)
 
 		return nil
 	})
@@ -775,10 +768,10 @@ func (fs *FileStore) observeGeneration(key string, generation uint64) {
 		return
 	}
 	fs.generationMu.Lock()
-	defer fs.generationMu.Unlock()
 	if generation > fs.generations[key] {
 		fs.generations[key] = generation
 	}
+	fs.generationMu.Unlock()
 	for {
 		current := fs.generationSeq.Load()
 		if current >= generation || fs.generationSeq.CompareAndSwap(current, generation) {
@@ -799,23 +792,6 @@ func (fs *FileStore) setGenerationFloor(key string, generation uint64) {
 	if generation > fs.generations[key] {
 		fs.generations[key] = generation
 	}
-}
-
-func (fs *FileStore) readGenerationForPath(path string) (uint64, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	defer file.Close()
-
-	_, _, _, generation, _, err := readStoredMetadata(file)
-	if err != nil {
-		return 0, err
-	}
-	return generation, nil
 }
 
 func (fs *FileStore) storedKeyForPath(path, relPath string) (string, error) {
