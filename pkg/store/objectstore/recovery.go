@@ -11,6 +11,7 @@ func (s *Store) recoverLocalState() error {
 	}
 
 	for key, entry := range s.catalog.Entries() {
+		s.observeGeneration(entry.Generation)
 		if entry.Missing || entry.SegmentPath == "" {
 			continue
 		}
@@ -23,7 +24,7 @@ func (s *Store) recoverLocalState() error {
 			return err
 		}
 
-		if err := s.publishLocalEntry(key, repairedEntryWithoutLocalSegment(entry)); err != nil {
+		if _, err := s.publishLocalEntry(key, repairedEntryWithoutLocalSegment(entry)); err != nil {
 			return err
 		}
 	}

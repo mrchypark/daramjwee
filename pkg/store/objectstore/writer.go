@@ -8,16 +8,19 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
+type segmentWriter interface {
+	Write([]byte) (int, error)
+	Seal() (string, int64, error)
+	Abort() error
+}
+
 type writer struct {
-	ctx     context.Context
-	store   *Store
-	key     string
-	segment interface {
-		Write([]byte) (int, error)
-		Seal() (string, int64, error)
-		Abort() error
-	}
-	metadata *daramjwee.Metadata
+	ctx        context.Context
+	store      *Store
+	key        string
+	segment    segmentWriter
+	metadata   *daramjwee.Metadata
+	generation uint64
 
 	mu   sync.Mutex
 	done bool
@@ -41,7 +44,6 @@ func (w *writer) Close() error {
 	if !w.markDone() {
 		return nil
 	}
-	defer w.store.lockManager.Unlock(w.key)
 	if err := w.ctx.Err(); err != nil {
 		_ = w.segment.Abort()
 		return err
@@ -55,15 +57,20 @@ func (w *writer) Close() error {
 	if w.metadata != nil {
 		metadata = *w.metadata
 	}
-	err = w.store.publishLocalEntry(w.key, localCatalogEntry{
+	published, err := w.store.publishLocalEntry(w.key, localCatalogEntry{
 		SegmentPath: sealedPath,
 		Offset:      0,
 		Length:      size,
+		Generation:  w.generation,
 		Metadata:    metadata,
 	})
 	if err != nil {
 		_ = removeLocalSegment(sealedPath)
 		return err
+	}
+	if !published {
+		_ = removeLocalSegment(sealedPath)
+		return nil
 	}
 	w.store.enqueueFlush(w.key)
 	return nil
@@ -73,7 +80,6 @@ func (w *writer) Abort() error {
 	if !w.markDone() {
 		return nil
 	}
-	defer w.store.lockManager.Unlock(w.key)
 	return w.segment.Abort()
 }
 

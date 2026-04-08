@@ -50,32 +50,34 @@ type manifest struct {
 // Store is a first-party object storage backend.
 // It currently publishes immutable blob versions via internal manifest pointers.
 type Store struct {
-	bucket          objstore.Bucket
-	logger          log.Logger
-	dataDir         string
-	prefix          string
-	gcGrace         time.Duration
-	packThreshold   int64
-	pagedThreshold  int64
-	pageSize        int64
-	blockCache      *blockcache.Cache
-	pageCache       *pagecache.Cache
-	checkpointCache *checkpointCache
-	catalog         *internalcatalog.Catalog
-	lockManager     *keyLockManager
-	blockLoads      singleflight.Group
-	pageLoads       singleflight.Group
-	versionSeq      atomic.Uint64
-	initErr         error
-	segmentRefsMu   sync.Mutex
-	segmentRefs     map[string]int
-	reclaimableSegs map[string]struct{}
-	flushMu         sync.Mutex
-	flushRunMu      sync.Mutex
-	pendingShards   map[string]struct{}
-	flushTimer      *time.Timer
-	autoFlush       bool
-	now             func() time.Time
+	bucket            objstore.Bucket
+	logger            log.Logger
+	dataDir           string
+	prefix            string
+	gcGrace           time.Duration
+	packThreshold     int64
+	pagedThreshold    int64
+	pageSize          int64
+	blockCache        *blockcache.Cache
+	pageCache         *pagecache.Cache
+	checkpointCache   *checkpointCache
+	catalog           *internalcatalog.Catalog
+	lockManager       *keyLockManager
+	blockLoads        singleflight.Group
+	pageLoads         singleflight.Group
+	versionSeq        atomic.Uint64
+	generationSeq     atomic.Uint64
+	initErr           error
+	segmentRefsMu     sync.Mutex
+	segmentRefs       map[string]int
+	reclaimableSegs   map[string]struct{}
+	flushMu           sync.Mutex
+	flushRunMu        sync.Mutex
+	pendingShards     map[string]struct{}
+	flushTimer        *time.Timer
+	autoFlush         bool
+	now               func() time.Time
+	openSegmentWriter func(root, shard, segmentID string) (segmentWriter, error)
 }
 
 func (s *Store) GetStreamUsesContext() bool { return true }
@@ -130,6 +132,9 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		pendingShards:   make(map[string]struct{}),
 		autoFlush:       true,
 		now:             time.Now,
+		openSegmentWriter: func(root, shard, segmentID string) (segmentWriter, error) {
+			return segment.Open(root, shard, segmentID)
+		},
 	}
 	store.checkpointCache = newCheckpointCache(cfg.checkpointCacheBytes, cfg.checkpointTTL, func() time.Time {
 		return store.now()
@@ -255,21 +260,21 @@ func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Me
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.lockManager.Lock(key)
 
+	generation := s.nextGeneration()
 	segmentID := s.nextVersion()
-	segmentWriter, err := segment.Open(s.dataDir, shardForKey(key), segmentID)
+	segmentWriter, err := s.openSegmentWriter(s.dataDir, shardForKey(key), segmentID)
 	if err != nil {
-		s.lockManager.Unlock(key)
 		return nil, err
 	}
 
 	w := &writer{
-		ctx:      ctx,
-		store:    s,
-		key:      key,
-		segment:  segmentWriter,
-		metadata: cloneMetadata(metadata),
+		ctx:        ctx,
+		store:      s,
+		key:        key,
+		segment:    segmentWriter,
+		generation: generation,
+		metadata:   cloneMetadata(metadata),
 	}
 
 	return w, nil
@@ -281,19 +286,13 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
-	s.lockManager.Lock(key)
-	defer s.lockManager.Unlock(key)
-
-	prev, ok, err := s.loadLocalEntry(key)
+	generation := s.nextGeneration()
+	applied, err := s.publishDeleteTombstone(key, generation)
 	if err != nil {
 		return err
 	}
-	tombstone := localCatalogEntry{Missing: true}
-	if ok {
-		tombstone.Metadata = prev.Metadata
-	}
-	if err := s.publishLocalEntry(key, tombstone); err != nil {
-		return err
+	if !applied {
+		return nil
 	}
 	s.enqueueFlush(key)
 	if err := s.flushPending(ctx); err != nil {
@@ -579,6 +578,22 @@ func (m *keyLockManager) Lock(key string) {
 
 func (m *keyLockManager) Unlock(key string) {
 	m.locks[xxh3.HashString(key)%m.slots].Unlock()
+}
+
+func (s *Store) nextGeneration() uint64 {
+	return s.generationSeq.Add(1)
+}
+
+func (s *Store) observeGeneration(generation uint64) {
+	if generation == 0 {
+		return
+	}
+	for {
+		current := s.generationSeq.Load()
+		if current >= generation || s.generationSeq.CompareAndSwap(current, generation) {
+			return
+		}
+	}
 }
 
 func ignoreNotFound(err error, bucket objstore.Bucket) error {

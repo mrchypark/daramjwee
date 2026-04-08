@@ -20,6 +20,7 @@ type Entry struct {
 	SegmentPath  string             `json:"segment_path"`
 	Offset       int64              `json:"offset"`
 	Length       int64              `json:"length"`
+	Generation   uint64             `json:"generation,omitempty"`
 	Missing      bool               `json:"missing,omitempty"`
 	RemotePath   string             `json:"remote_path,omitempty"`
 	RemoteOffset int64              `json:"remote_offset,omitempty"`

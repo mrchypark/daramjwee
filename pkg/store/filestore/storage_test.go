@@ -351,6 +351,180 @@ func TestFileStore_Overwrite(t *testing.T) {
 	assert.Equal(t, "version 2", string(content))
 }
 
+func TestFileStore_BeginSetDoesNotHoldPathLockForWriterLifetime(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "same-key-overlap"
+
+	first, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte("first"))
+	require.NoError(t, err)
+
+	type beginResult struct {
+		sink daramjwee.WriteSink
+		err  error
+	}
+	secondReady := make(chan beginResult, 1)
+	go func() {
+		sink, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+		secondReady <- beginResult{sink: sink, err: err}
+	}()
+
+	var second daramjwee.WriteSink
+	select {
+	case result := <-secondReady:
+		require.NoError(t, result.err)
+		second = result.sink
+	case <-time.After(100 * time.Millisecond):
+		require.NoError(t, first.Abort())
+		result := <-secondReady
+		if result.sink != nil {
+			_ = result.sink.Abort()
+		}
+		t.Fatal("second BeginSet blocked on first writer lifetime")
+	}
+
+	require.NoError(t, second.Abort())
+	require.NoError(t, first.Abort())
+}
+
+func TestFileStore_LateCloseDoesNotOverwriteNewerVisibleValue(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "same-key-late-close"
+
+	first, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte("first"))
+	require.NoError(t, err)
+
+	type beginResult struct {
+		sink daramjwee.WriteSink
+		err  error
+	}
+	secondReady := make(chan beginResult, 1)
+	go func() {
+		sink, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+		secondReady <- beginResult{sink: sink, err: err}
+	}()
+
+	var second daramjwee.WriteSink
+	select {
+	case result := <-secondReady:
+		require.NoError(t, result.err)
+		second = result.sink
+	case <-time.After(100 * time.Millisecond):
+		require.NoError(t, first.Abort())
+		result := <-secondReady
+		if result.sink != nil {
+			_ = result.sink.Abort()
+		}
+		t.Fatal("second BeginSet blocked on first writer lifetime")
+	}
+
+	_, err = second.Write([]byte("second"))
+	require.NoError(t, err)
+	require.NoError(t, second.Close())
+	require.NoError(t, first.Close())
+
+	reader, meta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", meta.CacheTag)
+	assert.Equal(t, "second", string(body))
+}
+
+func TestFileStore_GenerationStatePrunedWhenKeyBecomesIdle(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "generation-prune-idle"
+
+	first, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte("first"))
+	require.NoError(t, err)
+
+	second, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+	require.NoError(t, err)
+	_, err = second.Write([]byte("second"))
+	require.NoError(t, err)
+
+	require.NoError(t, second.Close())
+
+	fs.generationMu.Lock()
+	_, floorPresent := fs.generations[key]
+	activeWriters := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	require.True(t, floorPresent)
+	require.Equal(t, 1, activeWriters)
+
+	require.NoError(t, first.Close())
+
+	fs.generationMu.Lock()
+	_, floorPresent = fs.generations[key]
+	_, activePresent := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	assert.False(t, floorPresent)
+	assert.False(t, activePresent)
+}
+
+func TestFileStore_DeleteKeepsGenerationFloorUntilActiveWriterFinishes(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "generation-prune-delete"
+
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("payload"))
+	require.NoError(t, err)
+
+	require.NoError(t, fs.Delete(ctx, key))
+
+	fs.generationMu.Lock()
+	_, floorPresent := fs.generations[key]
+	activeWriters := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	require.True(t, floorPresent)
+	require.Equal(t, 1, activeWriters)
+
+	require.NoError(t, writer.Close())
+
+	_, _, err = fs.GetStream(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	fs.generationMu.Lock()
+	_, floorPresent = fs.generations[key]
+	_, activePresent := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	assert.False(t, floorPresent)
+	assert.False(t, activePresent)
+}
+
+func TestFileStore_BeginSetSetupFailureCleansGenerationTracking(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "beginset-setup-failure"
+
+	blockerPath := filepath.Join(fs.baseDir, encodedKeyDir)
+	require.NoError(t, os.RemoveAll(blockerPath))
+	require.NoError(t, os.WriteFile(blockerPath, []byte("block-dir"), 0o644))
+
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.Error(t, err)
+	require.Nil(t, writer)
+
+	fs.generationMu.Lock()
+	_, floorPresent := fs.generations[key]
+	_, activePresent := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	assert.False(t, floorPresent)
+	assert.False(t, activePresent)
+}
+
 // TestFileStore_PathTraversal tests that path traversal attempts are prevented.
 func TestFileStore_PathTraversal(t *testing.T) {
 	fs := setupTestStore(t)

@@ -27,6 +27,7 @@ type checkpointEntry struct {
 	SegmentPath string             `json:"segment_path"`
 	Offset      int64              `json:"offset"`
 	Length      int64              `json:"length"`
+	Generation  uint64             `json:"generation,omitempty"`
 	Metadata    daramjwee.Metadata `json:"metadata"`
 }
 
@@ -219,6 +220,7 @@ func (s *Store) flushPackedRecords(
 			SegmentPath: remotePath,
 			Offset:      offsets[record.key],
 			Length:      current.Length,
+			Generation:  current.Generation,
 			Metadata:    current.Metadata,
 		}
 	}
@@ -257,6 +259,7 @@ func (s *Store) flushDirectRecord(
 		SegmentPath: remotePath,
 		Offset:      0,
 		Length:      current.Length,
+		Generation:  current.Generation,
 		Metadata:    current.Metadata,
 	}
 	return nil
@@ -297,6 +300,7 @@ func mergeCheckpointEntries(base map[string]checkpointEntry, locals map[string]l
 			SegmentPath: entry.RemotePath,
 			Offset:      entry.RemoteOffset,
 			Length:      entry.Length,
+			Generation:  entry.Generation,
 			Metadata:    entry.Metadata,
 		}
 	}

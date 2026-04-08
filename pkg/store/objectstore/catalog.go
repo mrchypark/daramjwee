@@ -25,16 +25,9 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 	if err != nil || !ok {
 		return localCatalogEntry{}, ok, err
 	}
-	if entry.Missing {
-		return localCatalogEntry{}, false, errMissingLocalEntry
-	}
-	if entry.SegmentPath == "" {
-		return localCatalogEntry{}, false, nil
-	}
-	if _, statErr := os.Stat(entry.SegmentPath); statErr == nil {
-		return entry, true, nil
-	} else if !os.IsNotExist(statErr) {
-		return localCatalogEntry{}, false, statErr
+	resolved, live, needsRepair, err := resolveLocalEntry(entry)
+	if err != nil || live || !needsRepair {
+		return resolved, live, err
 	}
 
 	s.lockManager.Lock(key)
@@ -44,17 +37,48 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 	if err != nil || !ok {
 		return localCatalogEntry{}, false, err
 	}
-	if latest.SegmentPath == entry.SegmentPath {
-		repaired := repairedEntryWithoutLocalSegment(latest)
-		if err := s.publishLocalEntry(key, repaired); err != nil {
-			return localCatalogEntry{}, false, err
-		}
-		if repaired.Missing {
-			return localCatalogEntry{}, false, errMissingLocalEntry
-		}
-		return localCatalogEntry{}, false, nil
+	resolved, live, needsRepair, err = resolveLocalEntry(latest)
+	if err != nil || live || !needsRepair {
+		return resolved, live, err
 	}
-	return localCatalogEntry{}, false, nil
+
+	repaired := repairedEntryWithoutLocalSegment(latest)
+	published, err := s.publishLocalEntry(key, repaired)
+	if err != nil {
+		return localCatalogEntry{}, false, err
+	}
+	if !published {
+		current, ok, err := s.loadLocalEntry(key)
+		if err != nil || !ok {
+			return localCatalogEntry{}, ok, err
+		}
+		resolved, live, needsRepair, err = resolveLocalEntry(current)
+		if needsRepair {
+			repairedCurrent := repairedEntryWithoutLocalSegment(current)
+			if repairedCurrent.Missing {
+				return localCatalogEntry{}, false, errMissingLocalEntry
+			}
+			return localCatalogEntry{}, false, nil
+		}
+		return resolved, live, err
+	}
+	resolved, live, _, err = resolveLocalEntry(repaired)
+	return resolved, live, err
+}
+
+func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, error) {
+	if entry.Missing {
+		return localCatalogEntry{}, false, false, errMissingLocalEntry
+	}
+	if entry.SegmentPath == "" {
+		return localCatalogEntry{}, false, false, nil
+	}
+	if _, err := os.Stat(entry.SegmentPath); err == nil {
+		return entry, true, false, nil
+	} else if !os.IsNotExist(err) {
+		return localCatalogEntry{}, false, false, err
+	}
+	return localCatalogEntry{}, false, true, nil
 }
 
 func repairedEntryWithoutLocalSegment(entry localCatalogEntry) localCatalogEntry {
@@ -67,18 +91,35 @@ func repairedEntryWithoutLocalSegment(entry localCatalogEntry) localCatalogEntry
 	return entry
 }
 
-func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) error {
+func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) (bool, error) {
 	if s.catalog == nil {
-		return nil
+		return true, nil
 	}
-	prev, ok := s.catalog.Get(key)
-	if err := s.catalog.Set(key, entry); err != nil {
-		return err
+	s.observeGeneration(entry.Generation)
+	var (
+		prev      localCatalogEntry
+		ok        bool
+		applied   bool
+		staleSeen bool
+	)
+	if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		prev, ok = current, exists
+		if exists && current.Generation > entry.Generation {
+			staleSeen = true
+			return current, true
+		}
+		applied = true
+		return entry, true
+	}); err != nil {
+		return false, err
+	}
+	if staleSeen || !applied {
+		return false, nil
 	}
 	if ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
 		s.markLocalSegmentReclaimable(prev.SegmentPath)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) error {
@@ -133,6 +174,43 @@ func (s *Store) deleteLocalEntry(key string) error {
 		s.markLocalSegmentReclaimable(prev.SegmentPath)
 	}
 	return nil
+}
+
+func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, error) {
+	if s.catalog == nil {
+		return true, nil
+	}
+	s.observeGeneration(generation)
+	var (
+		previousSegment string
+		applied         bool
+		staleSeen       bool
+	)
+	if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		if exists && current.Generation > generation {
+			staleSeen = true
+			return current, true
+		}
+		applied = true
+		if current.SegmentPath != "" {
+			previousSegment = current.SegmentPath
+		}
+		tombstone := localCatalogEntry{
+			Generation: generation,
+			Missing:    true,
+			Metadata:   current.Metadata,
+		}
+		return tombstone, true
+	}); err != nil {
+		return false, err
+	}
+	if staleSeen || !applied {
+		return false, nil
+	}
+	if previousSegment != "" {
+		s.markLocalSegmentReclaimable(previousSegment)
+	}
+	return true, nil
 }
 
 func removeLocalSegment(path string) error {

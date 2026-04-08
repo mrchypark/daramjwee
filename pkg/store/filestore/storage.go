@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-kit/log"
@@ -26,6 +27,11 @@ type FileStore struct {
 	logger       log.Logger
 	lockManager  *FileLockManager
 	useCopyWrite bool // useCopyWrite, if true, uses a copy-based write strategy instead of atomic rename.
+
+	generationMu  sync.Mutex
+	generations   map[string]uint64
+	activeWriters map[string]int
+	generationSeq atomic.Uint64
 
 	// Policy-related fields
 	mu          sync.RWMutex
@@ -128,10 +134,15 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
 	}
 	fs := &FileStore{
-		baseDir:     dir,
-		logger:      logger,
-		lockManager: NewFileLockManager(2048),
-		fileSizes:   make(map[string]int64),
+		baseDir:       dir,
+		logger:        logger,
+		lockManager:   NewFileLockManager(2048),
+		generations:   make(map[string]uint64),
+		activeWriters: make(map[string]int),
+		fileSizes:     make(map[string]int64),
+	}
+	if now := time.Now().UnixNano(); now != 0 {
+		fs.generationSeq.Store(uint64(now))
 	}
 
 	// Apply options
@@ -209,17 +220,22 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 // upon closing the writer, or copied if WithCopyWrite option is used.
 func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	path := fs.toDataPath(key)
-	fs.lockManager.Lock(path)
+	fs.beginGenerationTracking(key)
+	trackingActive := true
+	defer func() {
+		if trackingActive {
+			fs.finishGenerationTracking(key)
+		}
+	}()
+	generation := fs.nextGeneration()
 
 	// Ensure the directory exists for the target path
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		fs.lockManager.Unlock(path)
 		return nil, fmt.Errorf("failed to create directory for key %s: %w", key, err)
 	}
 
 	tmpFile, err := os.CreateTemp(fs.baseDir, "daramjwee-tmp-*.data")
 	if err != nil {
-		fs.lockManager.Unlock(path)
 		return nil, err
 	}
 
@@ -227,16 +243,7 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 	if err := writeStoredMetadata(tmpFile, key, metadata); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
-		fs.lockManager.Unlock(path)
 		return nil, err
-	}
-
-	pathLocked := true
-	unlockPath := func() {
-		if pathLocked {
-			fs.lockManager.Unlock(path)
-			pathLocked = false
-		}
 	}
 
 	cleanupTemp := func() error {
@@ -248,17 +255,26 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 	}
 
 	abortCleanup := func() error {
-		defer unlockPath()
+		defer fs.finishGenerationTracking(key)
 		return cleanupTemp()
 	}
 
 	onClose := func() (err error) {
+		defer fs.finishGenerationTracking(key)
 		defer func() {
-			unlockPath()
 			if cleanupErr := cleanupTemp(); cleanupErr != nil && err == nil {
 				err = cleanupErr
 			}
 		}()
+
+		locked := fs.lockPaths([]string{path}, nil)
+		defer func() {
+			fs.unlockPaths(locked)
+		}()
+
+		if current := fs.generationFloor(key); current > generation {
+			return nil
+		}
 
 		if fs.useCopyWrite {
 			// Non-atomic copy strategy for NFS compatibility.
@@ -276,7 +292,11 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		if err := fs.updateAfterSet(key, path); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
 		}
-		unlockPath()
+		fs.setGenerationFloor(key, generation)
+
+		// Release the encoded-path publish lock before best-effort legacy cleanup.
+		fs.unlockPaths(locked)
+		locked = nil
 		if err := fs.removeLegacyPathOnly(key, nil); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
 		}
@@ -284,6 +304,8 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		return nil
 	}
 
+	// Hand off tracking responsibility to the writer's terminal callbacks.
+	trackingActive = false
 	return newLockedWriteCloser(tmpFile, onClose, abortCleanup), nil
 }
 
@@ -293,6 +315,7 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	paths := candidatePaths(candidates)
 	locked := fs.lockPaths(paths, nil)
 	defer fs.unlockPaths(locked)
+	generation := fs.nextGeneration()
 
 	removablePaths, err := fs.deletablePaths(candidates, key)
 	if err != nil {
@@ -309,6 +332,8 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	}
 	fs.policy.Remove(key)
 	fs.mu.Unlock()
+	fs.setGenerationFloor(key, generation)
+	fs.pruneGenerationIfIdle(key)
 
 	return nil
 }
@@ -742,6 +767,55 @@ func (fs *FileStore) initializeCurrentSize() error {
 
 		return nil
 	})
+}
+
+func (fs *FileStore) nextGeneration() uint64 {
+	return fs.generationSeq.Add(1)
+}
+
+func (fs *FileStore) generationFloor(key string) uint64 {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	return fs.generations[key]
+}
+
+func (fs *FileStore) setGenerationFloor(key string, generation uint64) {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	if generation > fs.generations[key] {
+		fs.generations[key] = generation
+	}
+}
+
+func (fs *FileStore) beginGenerationTracking(key string) {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	fs.activeWriters[key]++
+}
+
+func (fs *FileStore) finishGenerationTracking(key string) {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+
+	active := fs.activeWriters[key]
+	if active == 0 {
+		return
+	}
+	if active == 1 {
+		delete(fs.activeWriters, key)
+		delete(fs.generations, key)
+		return
+	}
+	fs.activeWriters[key] = active - 1
+}
+
+func (fs *FileStore) pruneGenerationIfIdle(key string) {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	if fs.activeWriters[key] == 0 {
+		delete(fs.activeWriters, key)
+		delete(fs.generations, key)
+	}
 }
 
 func (fs *FileStore) storedKeyForPath(path, relPath string) (string, error) {
