@@ -220,8 +220,8 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 // upon closing the writer, or copied if WithCopyWrite option is used.
 func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	path := fs.toDataPath(key)
-	generation := fs.nextGeneration()
 	fs.beginGenerationTracking(key)
+	generation := fs.nextGeneration()
 	trackingActive := true
 	defer func() {
 		if trackingActive {

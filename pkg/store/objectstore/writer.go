@@ -8,15 +8,17 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
+type segmentWriter interface {
+	Write([]byte) (int, error)
+	Seal() (string, int64, error)
+	Abort() error
+}
+
 type writer struct {
-	ctx     context.Context
-	store   *Store
-	key     string
-	segment interface {
-		Write([]byte) (int, error)
-		Seal() (string, int64, error)
-		Abort() error
-	}
+	ctx        context.Context
+	store      *Store
+	key        string
+	segment    segmentWriter
 	metadata   *daramjwee.Metadata
 	generation uint64
 

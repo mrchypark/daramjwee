@@ -85,6 +85,10 @@ func (s *Store) BeginSetUsesContext() bool { return true }
 
 var _ daramjwee.Store = (*Store)(nil)
 
+var openSegmentWriter = func(root, shard, segmentID string) (segmentWriter, error) {
+	return segment.Open(root, shard, segmentID)
+}
+
 // New creates a new object storage backend.
 func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	if logger == nil {
@@ -257,8 +261,9 @@ func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Me
 		return nil, err
 	}
 
+	generation := s.nextGeneration()
 	segmentID := s.nextVersion()
-	segmentWriter, err := segment.Open(s.dataDir, shardForKey(key), segmentID)
+	segmentWriter, err := openSegmentWriter(s.dataDir, shardForKey(key), segmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +273,7 @@ func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Me
 		store:      s,
 		key:        key,
 		segment:    segmentWriter,
-		generation: s.nextGeneration(),
+		generation: generation,
 		metadata:   cloneMetadata(metadata),
 	}
 

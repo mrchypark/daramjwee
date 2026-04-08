@@ -165,6 +165,60 @@ func TestStore_LateCloseDoesNotResurrectDeletedKey(t *testing.T) {
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestStore_BeginSetGenerationPrecedesDelayedSegmentOpen(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	realOpenSegmentWriter := openSegmentWriter
+	blockOpen := make(chan struct{})
+	openEntered := make(chan struct{}, 1)
+	openSegmentWriter = func(root, shard, segmentID string) (segmentWriter, error) {
+		openEntered <- struct{}{}
+		<-blockOpen
+		return realOpenSegmentWriter(root, shard, segmentID)
+	}
+	defer func() {
+		openSegmentWriter = realOpenSegmentWriter
+	}()
+
+	type beginResult struct {
+		sink daramjwee.WriteSink
+		err  error
+	}
+	beginDone := make(chan beginResult, 1)
+	go func() {
+		sink, err := store.BeginSet(ctx, "delayed-open-delete-race", &daramjwee.Metadata{CacheTag: "v1"})
+		beginDone <- beginResult{sink: sink, err: err}
+	}()
+
+	select {
+	case <-openEntered:
+	case <-time.After(time.Second):
+		t.Fatal("segment open hook was not reached")
+	}
+
+	require.NoError(t, store.Delete(ctx, "delayed-open-delete-race"))
+	close(blockOpen)
+
+	result := <-beginDone
+	require.NoError(t, result.err)
+	writer := result.sink
+	require.NotNil(t, writer)
+
+	_, err := io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	_, err = store.Stat(ctx, "delayed-open-delete-race")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
 func TestStore_AbortLeavesNoVisibleLocalEntry(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
