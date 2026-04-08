@@ -256,9 +256,10 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 			}
 		}()
 
-		candidates := fs.dataPathCandidates(key)
-		locked := fs.lockPaths(candidatePaths(candidates), nil)
-		defer fs.unlockPaths(locked)
+		locked := fs.lockPaths([]string{path}, nil)
+		defer func() {
+			fs.unlockPaths(locked)
+		}()
 
 		if current := fs.generationFloor(key); current > generation {
 			return nil
@@ -281,7 +282,11 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
 		}
 		fs.setGenerationFloor(key, generation)
-		if err := fs.removeLegacyPathOnly(key, heldSlotsForPaths(fs.lockManager, locked)); err != nil {
+
+		// Release the encoded-path publish lock before best-effort legacy cleanup.
+		fs.unlockPaths(locked)
+		locked = nil
+		if err := fs.removeLegacyPathOnly(key, nil); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
 		}
 
