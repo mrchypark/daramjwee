@@ -54,7 +54,11 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 		}
 		resolved, live, needsRepair, err := resolveLocalEntry(current)
 		if needsRepair {
-			resolved, live, _, err = resolveLocalEntry(repairedEntryWithoutLocalSegment(current))
+			repairedCurrent := repairedEntryWithoutLocalSegment(current)
+			if repairedCurrent.Missing {
+				return localCatalogEntry{}, false, errMissingLocalEntry
+			}
+			return localCatalogEntry{}, false, nil
 		}
 		return resolved, live, err
 	}
@@ -172,16 +176,22 @@ func (s *Store) deleteLocalEntry(key string) error {
 	return nil
 }
 
-func (s *Store) publishDeleteTombstone(key string, generation uint64) error {
+func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, error) {
 	if s.catalog == nil {
-		return nil
+		return true, nil
 	}
 	s.observeGeneration(generation)
-	var previousSegment string
+	var (
+		previousSegment string
+		applied         bool
+		staleSeen       bool
+	)
 	if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		if exists && current.Generation > generation {
+			staleSeen = true
 			return current, true
 		}
+		applied = true
 		if current.SegmentPath != "" {
 			previousSegment = current.SegmentPath
 		}
@@ -192,12 +202,15 @@ func (s *Store) publishDeleteTombstone(key string, generation uint64) error {
 		}
 		return tombstone, true
 	}); err != nil {
-		return err
+		return false, err
+	}
+	if staleSeen || !applied {
+		return false, nil
 	}
 	if previousSegment != "" {
 		s.markLocalSegmentReclaimable(previousSegment)
 	}
-	return nil
+	return true, nil
 }
 
 func removeLocalSegment(path string) error {

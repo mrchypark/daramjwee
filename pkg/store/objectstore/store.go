@@ -287,15 +287,19 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	generation := s.nextGeneration()
-	if err := s.publishDeleteTombstone(key, generation); err != nil {
+	applied, err := s.publishDeleteTombstone(key, generation)
+	if err != nil {
 		return err
+	}
+	if !applied {
+		return nil
 	}
 	s.enqueueFlush(key)
 	if err := s.flushPending(ctx); err != nil {
 		return err
 	}
 
-	err := s.bucket.Delete(ctx, s.manifestPath(key))
+	err = s.bucket.Delete(ctx, s.manifestPath(key))
 	if err == nil || s.bucket.IsObjNotFoundErr(err) {
 		return nil
 	}

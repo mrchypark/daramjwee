@@ -499,6 +499,45 @@ func TestStore_DeleteTombstoneHidesOlderPackedRecord(t *testing.T) {
 	require.ErrorIs(t, getErr, daramjwee.ErrNotFound)
 }
 
+func TestStore_DeleteDoesNotRemoveManifestWhenTombstoneIsStale(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	for _, tc := range []struct {
+		tag  string
+		body string
+	}{
+		{tag: "v1", body: "first body"},
+		{tag: "v2", body: "second body"},
+	} {
+		writer, err := store.BeginSet(ctx, "stale-delete-manifest", &daramjwee.Metadata{CacheTag: tc.tag})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, tc.body)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, store.flushPending(ctx))
+	}
+
+	entry, ok := store.catalog.Get("stale-delete-manifest")
+	require.True(t, ok)
+	require.NotEmpty(t, entry.RemotePath)
+	require.NoError(t, store.publishManifest(ctx, "stale-delete-manifest", entry.RemotePath, entry.Length, &entry.Metadata))
+
+	manifestPath := store.manifestPath("stale-delete-manifest")
+	reader, err := bucket.Get(ctx, manifestPath)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+
+	store.generationSeq.Store(0)
+	require.NoError(t, store.Delete(ctx, "stale-delete-manifest"))
+
+	reader, err = bucket.Get(ctx, manifestPath)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+}
+
 func TestStore_DeleteRemoteOnlyKeyPreservesOtherCheckpointEntriesInSameShard(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
