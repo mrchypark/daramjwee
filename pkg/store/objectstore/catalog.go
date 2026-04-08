@@ -52,7 +52,7 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 		if err != nil || !ok {
 			return localCatalogEntry{}, ok, err
 		}
-		resolved, live, needsRepair, err := resolveLocalEntry(current)
+		resolved, live, needsRepair, err = resolveLocalEntry(current)
 		if needsRepair {
 			repairedCurrent := repairedEntryWithoutLocalSegment(current)
 			if repairedCurrent.Missing {
