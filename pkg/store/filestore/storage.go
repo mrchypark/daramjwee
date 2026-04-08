@@ -30,6 +30,7 @@ type FileStore struct {
 
 	generationMu  sync.Mutex
 	generations   map[string]uint64
+	activeWriters map[string]int
 	generationSeq atomic.Uint64
 
 	// Policy-related fields
@@ -133,11 +134,12 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
 	}
 	fs := &FileStore{
-		baseDir:     dir,
-		logger:      logger,
-		lockManager: NewFileLockManager(2048),
-		generations: make(map[string]uint64),
-		fileSizes:   make(map[string]int64),
+		baseDir:       dir,
+		logger:        logger,
+		lockManager:   NewFileLockManager(2048),
+		generations:   make(map[string]uint64),
+		activeWriters: make(map[string]int),
+		fileSizes:     make(map[string]int64),
 	}
 	if now := time.Now().UnixNano(); now > 0 {
 		fs.generationSeq.Store(uint64(now))
@@ -185,7 +187,7 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 			return nil, nil, err
 		}
 
-		meta, storedKey, storedKeyPresent, _, dataOffset, err := readStoredMetadata(file)
+		meta, storedKey, storedKeyPresent, dataOffset, err := readStoredMetadata(file)
 		if err != nil {
 			file.Close()
 			fs.lockManager.RUnlock(candidate.path)
@@ -231,7 +233,7 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 	}
 
 	// Write metadata to the temporary file first.
-	if err := writeStoredMetadata(tmpFile, key, metadata, generation); err != nil {
+	if err := writeStoredMetadata(tmpFile, key, metadata); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
 		return nil, err
@@ -245,11 +247,15 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		return nil
 	}
 
+	fs.beginGenerationTracking(key)
+
 	abortCleanup := func() error {
+		defer fs.finishGenerationTracking(key)
 		return cleanupTemp()
 	}
 
 	onClose := func() (err error) {
+		defer fs.finishGenerationTracking(key)
 		defer func() {
 			if cleanupErr := cleanupTemp(); cleanupErr != nil && err == nil {
 				err = cleanupErr
@@ -320,6 +326,7 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	fs.policy.Remove(key)
 	fs.mu.Unlock()
 	fs.setGenerationFloor(key, generation)
+	fs.pruneGenerationIfIdle(key)
 
 	return nil
 }
@@ -338,7 +345,7 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 			return nil, err
 		}
 
-		meta, storedKey, storedKeyPresent, _, _, err := readStoredMetadata(file)
+		meta, storedKey, storedKeyPresent, _, err := readStoredMetadata(file)
 		closeErr := file.Close()
 		fs.lockManager.RUnlock(candidate.path)
 		if err != nil {
@@ -472,7 +479,7 @@ func (fs *FileStore) readStoredKeyForCandidate(path string) (string, bool, error
 	}
 	defer file.Close()
 
-	_, storedKey, storedKeyPresent, _, _, err := readStoredMetadata(file)
+	_, storedKey, storedKeyPresent, _, err := readStoredMetadata(file)
 	if err != nil {
 		return "", false, err
 	}
@@ -530,22 +537,13 @@ func removeFiles(paths []string) error {
 	return nil
 }
 
-func heldSlotsForPaths(lockManager *FileLockManager, paths []string) map[uint64]struct{} {
-	held := make(map[uint64]struct{}, len(paths))
-	for _, path := range paths {
-		held[lockManager.getSlot(path)] = struct{}{}
-	}
-	return held
-}
-
 // writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
 func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 	return writeStoredMetadataEnvelope(w, storedMetadata{Metadata: derefMetadata(meta)})
 }
 
-func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata, generation uint64) error {
+func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata) error {
 	storedKey := key
-	_ = generation
 	return writeStoredMetadataEnvelope(w, storedMetadata{
 		Metadata:  derefMetadata(meta),
 		StoredKey: &storedKey,
@@ -581,40 +579,40 @@ func derefMetadata(meta *daramjwee.Metadata) daramjwee.Metadata {
 // It expects the metadata length as a uint32 prefix, followed by the JSON-encoded metadata.
 // It returns the metadata, the offset where the data begins, and an error if any.
 func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
-	meta, _, _, _, dataOffset, err := readStoredMetadata(r)
+	meta, _, _, dataOffset, err := readStoredMetadata(r)
 	return meta, dataOffset, err
 }
 
-func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, uint64, int64, error) {
+func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, int64, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(r, lenBuf); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil, "", false, 0, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
+			return nil, "", false, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
 		}
-		return nil, "", false, 0, 0, fmt.Errorf("failed to read metadata length: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to read metadata length: %w", err)
 	}
 
 	metaLen := binary.BigEndian.Uint32(lenBuf)
 	// Add a sanity check for metaLen to avoid allocating huge buffers
 	if metaLen > 10*1024*1024 { // 10MB limit for metadata
-		return nil, "", false, 0, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
+		return nil, "", false, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
 	}
 
 	metaBytes := make([]byte, metaLen)
 	if _, err := io.ReadFull(r, metaBytes); err != nil {
-		return nil, "", false, 0, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
 	}
 
 	var meta storedMetadata
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, "", false, 0, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		return nil, "", false, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
 	dataOffset := int64(4 + metaLen)
 	if meta.StoredKey == nil {
-		return &meta.Metadata, "", false, 0, dataOffset, nil
+		return &meta.Metadata, "", false, dataOffset, nil
 	}
-	return &meta.Metadata, *meta.StoredKey, true, 0, dataOffset, nil
+	return &meta.Metadata, *meta.StoredKey, true, dataOffset, nil
 }
 
 // copyFile copies a file from src to dst.
@@ -768,23 +766,6 @@ func (fs *FileStore) nextGeneration() uint64 {
 	return fs.generationSeq.Add(1)
 }
 
-func (fs *FileStore) observeGeneration(key string, generation uint64) {
-	if generation == 0 {
-		return
-	}
-	fs.generationMu.Lock()
-	if generation > fs.generations[key] {
-		fs.generations[key] = generation
-	}
-	fs.generationMu.Unlock()
-	for {
-		current := fs.generationSeq.Load()
-		if current >= generation || fs.generationSeq.CompareAndSwap(current, generation) {
-			return
-		}
-	}
-}
-
 func (fs *FileStore) generationFloor(key string) uint64 {
 	fs.generationMu.Lock()
 	defer fs.generationMu.Unlock()
@@ -796,6 +777,34 @@ func (fs *FileStore) setGenerationFloor(key string, generation uint64) {
 	defer fs.generationMu.Unlock()
 	if generation > fs.generations[key] {
 		fs.generations[key] = generation
+	}
+}
+
+func (fs *FileStore) beginGenerationTracking(key string) {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	fs.activeWriters[key]++
+}
+
+func (fs *FileStore) finishGenerationTracking(key string) {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+
+	active := fs.activeWriters[key]
+	if active <= 1 {
+		delete(fs.activeWriters, key)
+		delete(fs.generations, key)
+		return
+	}
+	fs.activeWriters[key] = active - 1
+}
+
+func (fs *FileStore) pruneGenerationIfIdle(key string) {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	if fs.activeWriters[key] == 0 {
+		delete(fs.activeWriters, key)
+		delete(fs.generations, key)
 	}
 }
 

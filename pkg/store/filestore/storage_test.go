@@ -438,6 +438,72 @@ func TestFileStore_LateCloseDoesNotOverwriteNewerVisibleValue(t *testing.T) {
 	assert.Equal(t, "second", string(body))
 }
 
+func TestFileStore_GenerationStatePrunedWhenKeyBecomesIdle(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "generation-prune-idle"
+
+	first, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte("first"))
+	require.NoError(t, err)
+
+	second, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+	require.NoError(t, err)
+	_, err = second.Write([]byte("second"))
+	require.NoError(t, err)
+
+	require.NoError(t, second.Close())
+
+	fs.generationMu.Lock()
+	_, floorPresent := fs.generations[key]
+	activeWriters := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	require.True(t, floorPresent)
+	require.Equal(t, 1, activeWriters)
+
+	require.NoError(t, first.Close())
+
+	fs.generationMu.Lock()
+	_, floorPresent = fs.generations[key]
+	_, activePresent := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	assert.False(t, floorPresent)
+	assert.False(t, activePresent)
+}
+
+func TestFileStore_DeleteKeepsGenerationFloorUntilActiveWriterFinishes(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "generation-prune-delete"
+
+	writer, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("payload"))
+	require.NoError(t, err)
+
+	require.NoError(t, fs.Delete(ctx, key))
+
+	fs.generationMu.Lock()
+	_, floorPresent := fs.generations[key]
+	activeWriters := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	require.True(t, floorPresent)
+	require.Equal(t, 1, activeWriters)
+
+	require.NoError(t, writer.Close())
+
+	_, _, err = fs.GetStream(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	fs.generationMu.Lock()
+	_, floorPresent = fs.generations[key]
+	_, activePresent := fs.activeWriters[key]
+	fs.generationMu.Unlock()
+	assert.False(t, floorPresent)
+	assert.False(t, activePresent)
+}
+
 // TestFileStore_PathTraversal tests that path traversal attempts are prevented.
 func TestFileStore_PathTraversal(t *testing.T) {
 	fs := setupTestStore(t)
@@ -988,7 +1054,7 @@ func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t
 		f, err := os.Create(path)
 		require.NoError(t, err)
 		if storedKey != "" {
-			require.NoError(t, writeStoredMetadata(f, storedKey, &daramjwee.Metadata{CacheTag: etag}, 0))
+			require.NoError(t, writeStoredMetadata(f, storedKey, &daramjwee.Metadata{CacheTag: etag}))
 		} else {
 			require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: etag}))
 		}
