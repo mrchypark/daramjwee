@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-kit/log"
@@ -26,6 +27,10 @@ type FileStore struct {
 	logger       log.Logger
 	lockManager  *FileLockManager
 	useCopyWrite bool // useCopyWrite, if true, uses a copy-based write strategy instead of atomic rename.
+
+	generationMu  sync.Mutex
+	generations   map[string]uint64
+	generationSeq atomic.Uint64
 
 	// Policy-related fields
 	mu          sync.RWMutex
@@ -48,7 +53,8 @@ type dataPathCandidate struct {
 
 type storedMetadata struct {
 	daramjwee.Metadata
-	StoredKey *string `json:"__stored_key,omitempty"`
+	StoredKey  *string `json:"__stored_key,omitempty"`
+	Generation uint64  `json:"__generation,omitempty"`
 }
 
 func (m storedMetadata) MarshalJSON() ([]byte, error) {
@@ -57,12 +63,14 @@ func (m storedMetadata) MarshalJSON() ([]byte, error) {
 		IsNegative bool      `json:"IsNegative"`
 		CachedAt   time.Time `json:"CachedAt"`
 		StoredKey  *string   `json:"__stored_key,omitempty"`
+		Generation uint64    `json:"__generation,omitempty"`
 	}
 	return json.Marshal(payload{
 		CacheTag:   m.Metadata.CacheTag,
 		IsNegative: m.Metadata.IsNegative,
 		CachedAt:   m.Metadata.CachedAt,
 		StoredKey:  m.StoredKey,
+		Generation: m.Generation,
 	})
 }
 
@@ -73,6 +81,7 @@ func (m *storedMetadata) UnmarshalJSON(data []byte) error {
 		IsNegative bool      `json:"IsNegative"`
 		CachedAt   time.Time `json:"CachedAt"`
 		StoredKey  *string   `json:"__stored_key,omitempty"`
+		Generation uint64    `json:"__generation,omitempty"`
 	}
 	var p payload
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -87,6 +96,7 @@ func (m *storedMetadata) UnmarshalJSON(data []byte) error {
 		m.Metadata.CacheTag = p.LegacyETag
 	}
 	m.StoredKey = p.StoredKey
+	m.Generation = p.Generation
 	return nil
 }
 
@@ -131,6 +141,7 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 		baseDir:     dir,
 		logger:      logger,
 		lockManager: NewFileLockManager(2048),
+		generations: make(map[string]uint64),
 		fileSizes:   make(map[string]int64),
 	}
 
@@ -176,7 +187,7 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 			return nil, nil, err
 		}
 
-		meta, storedKey, storedKeyPresent, dataOffset, err := readStoredMetadata(file)
+		meta, storedKey, storedKeyPresent, _, dataOffset, err := readStoredMetadata(file)
 		if err != nil {
 			file.Close()
 			fs.lockManager.RUnlock(candidate.path)
@@ -209,34 +220,23 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 // upon closing the writer, or copied if WithCopyWrite option is used.
 func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	path := fs.toDataPath(key)
-	fs.lockManager.Lock(path)
+	generation := fs.nextGeneration()
 
 	// Ensure the directory exists for the target path
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		fs.lockManager.Unlock(path)
 		return nil, fmt.Errorf("failed to create directory for key %s: %w", key, err)
 	}
 
 	tmpFile, err := os.CreateTemp(fs.baseDir, "daramjwee-tmp-*.data")
 	if err != nil {
-		fs.lockManager.Unlock(path)
 		return nil, err
 	}
 
 	// Write metadata to the temporary file first.
-	if err := writeStoredMetadata(tmpFile, key, metadata); err != nil {
+	if err := writeStoredMetadata(tmpFile, key, metadata, generation); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
-		fs.lockManager.Unlock(path)
 		return nil, err
-	}
-
-	pathLocked := true
-	unlockPath := func() {
-		if pathLocked {
-			fs.lockManager.Unlock(path)
-			pathLocked = false
-		}
 	}
 
 	cleanupTemp := func() error {
@@ -248,17 +248,23 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 	}
 
 	abortCleanup := func() error {
-		defer unlockPath()
 		return cleanupTemp()
 	}
 
 	onClose := func() (err error) {
 		defer func() {
-			unlockPath()
 			if cleanupErr := cleanupTemp(); cleanupErr != nil && err == nil {
 				err = cleanupErr
 			}
 		}()
+
+		candidates := fs.dataPathCandidates(key)
+		locked := fs.lockPaths(candidatePaths(candidates), nil)
+		defer fs.unlockPaths(locked)
+
+		if current := fs.generationFloor(key); current > generation {
+			return nil
+		}
 
 		if fs.useCopyWrite {
 			// Non-atomic copy strategy for NFS compatibility.
@@ -276,8 +282,8 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		if err := fs.updateAfterSet(key, path); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
 		}
-		unlockPath()
-		if err := fs.removeLegacyPathOnly(key, nil); err != nil {
+		fs.setGenerationFloor(key, generation)
+		if err := fs.removeLegacyPathOnly(key, heldSlotsForPaths(fs.lockManager, locked)); err != nil {
 			level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
 		}
 
@@ -293,6 +299,7 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	paths := candidatePaths(candidates)
 	locked := fs.lockPaths(paths, nil)
 	defer fs.unlockPaths(locked)
+	generation := fs.nextGeneration()
 
 	removablePaths, err := fs.deletablePaths(candidates, key)
 	if err != nil {
@@ -309,6 +316,7 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	}
 	fs.policy.Remove(key)
 	fs.mu.Unlock()
+	fs.setGenerationFloor(key, generation)
 
 	return nil
 }
@@ -327,7 +335,7 @@ func (fs *FileStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata,
 			return nil, err
 		}
 
-		meta, storedKey, storedKeyPresent, _, err := readStoredMetadata(file)
+		meta, storedKey, storedKeyPresent, _, _, err := readStoredMetadata(file)
 		closeErr := file.Close()
 		fs.lockManager.RUnlock(candidate.path)
 		if err != nil {
@@ -461,7 +469,7 @@ func (fs *FileStore) readStoredKeyForCandidate(path string) (string, bool, error
 	}
 	defer file.Close()
 
-	_, storedKey, storedKeyPresent, _, err := readStoredMetadata(file)
+	_, storedKey, storedKeyPresent, _, _, err := readStoredMetadata(file)
 	if err != nil {
 		return "", false, err
 	}
@@ -519,16 +527,25 @@ func removeFiles(paths []string) error {
 	return nil
 }
 
+func heldSlotsForPaths(lockManager *FileLockManager, paths []string) map[uint64]struct{} {
+	held := make(map[uint64]struct{}, len(paths))
+	for _, path := range paths {
+		held[lockManager.getSlot(path)] = struct{}{}
+	}
+	return held
+}
+
 // writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
 func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 	return writeStoredMetadataEnvelope(w, storedMetadata{Metadata: derefMetadata(meta)})
 }
 
-func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata) error {
+func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata, generation uint64) error {
 	storedKey := key
 	return writeStoredMetadataEnvelope(w, storedMetadata{
-		Metadata:  derefMetadata(meta),
-		StoredKey: &storedKey,
+		Metadata:   derefMetadata(meta),
+		StoredKey:  &storedKey,
+		Generation: generation,
 	})
 }
 
@@ -561,40 +578,40 @@ func derefMetadata(meta *daramjwee.Metadata) daramjwee.Metadata {
 // It expects the metadata length as a uint32 prefix, followed by the JSON-encoded metadata.
 // It returns the metadata, the offset where the data begins, and an error if any.
 func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
-	meta, _, _, dataOffset, err := readStoredMetadata(r)
+	meta, _, _, _, dataOffset, err := readStoredMetadata(r)
 	return meta, dataOffset, err
 }
 
-func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, int64, error) {
+func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, uint64, int64, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(r, lenBuf); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil, "", false, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
+			return nil, "", false, 0, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
 		}
-		return nil, "", false, 0, fmt.Errorf("failed to read metadata length: %w", err)
+		return nil, "", false, 0, 0, fmt.Errorf("failed to read metadata length: %w", err)
 	}
 
 	metaLen := binary.BigEndian.Uint32(lenBuf)
 	// Add a sanity check for metaLen to avoid allocating huge buffers
 	if metaLen > 10*1024*1024 { // 10MB limit for metadata
-		return nil, "", false, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
+		return nil, "", false, 0, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
 	}
 
 	metaBytes := make([]byte, metaLen)
 	if _, err := io.ReadFull(r, metaBytes); err != nil {
-		return nil, "", false, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
+		return nil, "", false, 0, 0, fmt.Errorf("failed to read metadata bytes: %w", err)
 	}
 
 	var meta storedMetadata
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, "", false, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		return nil, "", false, 0, 0, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
 	dataOffset := int64(4 + metaLen)
 	if meta.StoredKey == nil {
-		return &meta.Metadata, "", false, dataOffset, nil
+		return &meta.Metadata, "", false, meta.Generation, dataOffset, nil
 	}
-	return &meta.Metadata, *meta.StoredKey, true, dataOffset, nil
+	return &meta.Metadata, *meta.StoredKey, true, meta.Generation, dataOffset, nil
 }
 
 // copyFile copies a file from src to dst.
@@ -730,6 +747,10 @@ func (fs *FileStore) initializeCurrentSize() error {
 		if err != nil {
 			return err
 		}
+		generation, err := fs.readGenerationForPath(path)
+		if err != nil {
+			return err
+		}
 		size := info.Size()
 
 		if oldSize, exists := fs.fileSizes[key]; exists {
@@ -739,9 +760,62 @@ func (fs *FileStore) initializeCurrentSize() error {
 		fs.fileSizes[key] = size
 		fs.currentSize += size
 		fs.policy.Add(key, size)
+		fs.observeGeneration(key, generation)
 
 		return nil
 	})
+}
+
+func (fs *FileStore) nextGeneration() uint64 {
+	return fs.generationSeq.Add(1)
+}
+
+func (fs *FileStore) observeGeneration(key string, generation uint64) {
+	if generation == 0 {
+		return
+	}
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	if generation > fs.generations[key] {
+		fs.generations[key] = generation
+	}
+	for {
+		current := fs.generationSeq.Load()
+		if current >= generation || fs.generationSeq.CompareAndSwap(current, generation) {
+			return
+		}
+	}
+}
+
+func (fs *FileStore) generationFloor(key string) uint64 {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	return fs.generations[key]
+}
+
+func (fs *FileStore) setGenerationFloor(key string, generation uint64) {
+	fs.generationMu.Lock()
+	defer fs.generationMu.Unlock()
+	if generation > fs.generations[key] {
+		fs.generations[key] = generation
+	}
+}
+
+func (fs *FileStore) readGenerationForPath(path string) (uint64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer file.Close()
+
+	_, _, _, generation, _, err := readStoredMetadata(file)
+	if err != nil {
+		return 0, err
+	}
+	return generation, nil
 }
 
 func (fs *FileStore) storedKeyForPath(path, relPath string) (string, error) {

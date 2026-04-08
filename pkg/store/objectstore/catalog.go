@@ -46,7 +46,8 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 	}
 	if latest.SegmentPath == entry.SegmentPath {
 		repaired := repairedEntryWithoutLocalSegment(latest)
-		if err := s.publishLocalEntry(key, repaired); err != nil {
+		_, err := s.publishLocalEntry(key, repaired)
+		if err != nil {
 			return localCatalogEntry{}, false, err
 		}
 		if repaired.Missing {
@@ -67,18 +68,35 @@ func repairedEntryWithoutLocalSegment(entry localCatalogEntry) localCatalogEntry
 	return entry
 }
 
-func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) error {
+func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) (bool, error) {
 	if s.catalog == nil {
-		return nil
+		return true, nil
 	}
-	prev, ok := s.catalog.Get(key)
-	if err := s.catalog.Set(key, entry); err != nil {
-		return err
+	s.observeGeneration(entry.Generation)
+	var (
+		prev      localCatalogEntry
+		ok        bool
+		applied   bool
+		staleSeen bool
+	)
+	if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		prev, ok = current, exists
+		if exists && current.Generation > entry.Generation {
+			staleSeen = true
+			return current, true
+		}
+		applied = true
+		return entry, true
+	}); err != nil {
+		return false, err
+	}
+	if staleSeen || !applied {
+		return false, nil
 	}
 	if ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
 		s.markLocalSegmentReclaimable(prev.SegmentPath)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) error {
@@ -131,6 +149,34 @@ func (s *Store) deleteLocalEntry(key string) error {
 	}
 	if ok && prev.SegmentPath != "" {
 		s.markLocalSegmentReclaimable(prev.SegmentPath)
+	}
+	return nil
+}
+
+func (s *Store) publishDeleteTombstone(key string, generation uint64) error {
+	if s.catalog == nil {
+		return nil
+	}
+	s.observeGeneration(generation)
+	var previousSegment string
+	if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		if exists && current.Generation > generation {
+			return current, true
+		}
+		if current.SegmentPath != "" {
+			previousSegment = current.SegmentPath
+		}
+		tombstone := localCatalogEntry{
+			Generation: generation,
+			Missing:    true,
+			Metadata:   current.Metadata,
+		}
+		return tombstone, true
+	}); err != nil {
+		return err
+	}
+	if previousSegment != "" {
+		s.markLocalSegmentReclaimable(previousSegment)
 	}
 	return nil
 }

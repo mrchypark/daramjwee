@@ -351,6 +351,93 @@ func TestFileStore_Overwrite(t *testing.T) {
 	assert.Equal(t, "version 2", string(content))
 }
 
+func TestFileStore_BeginSetDoesNotHoldPathLockForWriterLifetime(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "same-key-overlap"
+
+	first, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte("first"))
+	require.NoError(t, err)
+
+	type beginResult struct {
+		sink daramjwee.WriteSink
+		err  error
+	}
+	secondReady := make(chan beginResult, 1)
+	go func() {
+		sink, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+		secondReady <- beginResult{sink: sink, err: err}
+	}()
+
+	var second daramjwee.WriteSink
+	select {
+	case result := <-secondReady:
+		require.NoError(t, result.err)
+		second = result.sink
+	case <-time.After(100 * time.Millisecond):
+		require.NoError(t, first.Abort())
+		result := <-secondReady
+		if result.sink != nil {
+			_ = result.sink.Abort()
+		}
+		t.Fatal("second BeginSet blocked on first writer lifetime")
+	}
+
+	require.NoError(t, second.Abort())
+	require.NoError(t, first.Abort())
+}
+
+func TestFileStore_LateCloseDoesNotOverwriteNewerVisibleValue(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "same-key-late-close"
+
+	first, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = first.Write([]byte("first"))
+	require.NoError(t, err)
+
+	type beginResult struct {
+		sink daramjwee.WriteSink
+		err  error
+	}
+	secondReady := make(chan beginResult, 1)
+	go func() {
+		sink, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+		secondReady <- beginResult{sink: sink, err: err}
+	}()
+
+	var second daramjwee.WriteSink
+	select {
+	case result := <-secondReady:
+		require.NoError(t, result.err)
+		second = result.sink
+	case <-time.After(100 * time.Millisecond):
+		require.NoError(t, first.Abort())
+		result := <-secondReady
+		if result.sink != nil {
+			_ = result.sink.Abort()
+		}
+		t.Fatal("second BeginSet blocked on first writer lifetime")
+	}
+
+	_, err = second.Write([]byte("second"))
+	require.NoError(t, err)
+	require.NoError(t, second.Close())
+	require.NoError(t, first.Close())
+
+	reader, meta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", meta.CacheTag)
+	assert.Equal(t, "second", string(body))
+}
+
 // TestFileStore_PathTraversal tests that path traversal attempts are prevented.
 func TestFileStore_PathTraversal(t *testing.T) {
 	fs := setupTestStore(t)
@@ -901,7 +988,7 @@ func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t
 		f, err := os.Create(path)
 		require.NoError(t, err)
 		if storedKey != "" {
-			require.NoError(t, writeStoredMetadata(f, storedKey, &daramjwee.Metadata{CacheTag: etag}))
+			require.NoError(t, writeStoredMetadata(f, storedKey, &daramjwee.Metadata{CacheTag: etag}, 0))
 		} else {
 			require.NoError(t, writeMetadata(f, &daramjwee.Metadata{CacheTag: etag}))
 		}

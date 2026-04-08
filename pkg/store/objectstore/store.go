@@ -66,6 +66,7 @@ type Store struct {
 	blockLoads      singleflight.Group
 	pageLoads       singleflight.Group
 	versionSeq      atomic.Uint64
+	generationSeq   atomic.Uint64
 	initErr         error
 	segmentRefsMu   sync.Mutex
 	segmentRefs     map[string]int
@@ -255,21 +256,20 @@ func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Me
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.lockManager.Lock(key)
 
 	segmentID := s.nextVersion()
 	segmentWriter, err := segment.Open(s.dataDir, shardForKey(key), segmentID)
 	if err != nil {
-		s.lockManager.Unlock(key)
 		return nil, err
 	}
 
 	w := &writer{
-		ctx:      ctx,
-		store:    s,
-		key:      key,
-		segment:  segmentWriter,
-		metadata: cloneMetadata(metadata),
+		ctx:        ctx,
+		store:      s,
+		key:        key,
+		segment:    segmentWriter,
+		generation: s.nextGeneration(),
+		metadata:   cloneMetadata(metadata),
 	}
 
 	return w, nil
@@ -281,18 +281,8 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
-	s.lockManager.Lock(key)
-	defer s.lockManager.Unlock(key)
-
-	prev, ok, err := s.loadLocalEntry(key)
-	if err != nil {
-		return err
-	}
-	tombstone := localCatalogEntry{Missing: true}
-	if ok {
-		tombstone.Metadata = prev.Metadata
-	}
-	if err := s.publishLocalEntry(key, tombstone); err != nil {
+	generation := s.nextGeneration()
+	if err := s.publishDeleteTombstone(key, generation); err != nil {
 		return err
 	}
 	s.enqueueFlush(key)
@@ -300,7 +290,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		return err
 	}
 
-	err = s.bucket.Delete(ctx, s.manifestPath(key))
+	err := s.bucket.Delete(ctx, s.manifestPath(key))
 	if err == nil || s.bucket.IsObjNotFoundErr(err) {
 		return nil
 	}
@@ -579,6 +569,22 @@ func (m *keyLockManager) Lock(key string) {
 
 func (m *keyLockManager) Unlock(key string) {
 	m.locks[xxh3.HashString(key)%m.slots].Unlock()
+}
+
+func (s *Store) nextGeneration() uint64 {
+	return s.generationSeq.Add(1)
+}
+
+func (s *Store) observeGeneration(generation uint64) {
+	if generation == 0 {
+		return
+	}
+	for {
+		current := s.generationSeq.Load()
+		if current >= generation || s.generationSeq.CompareAndSwap(current, generation) {
+			return
+		}
+	}
 }
 
 func ignoreNotFound(err error, bucket objstore.Bucket) error {

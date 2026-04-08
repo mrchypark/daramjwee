@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/mrchypark/daramjwee"
@@ -43,6 +44,125 @@ func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello, local ingest", string(body))
 	assert.Equal(t, "v1", meta.CacheTag)
+}
+
+func TestStore_BeginSetDoesNotHoldKeyLockForWriterLifetime(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	first, err := store.BeginSet(ctx, "same-key-overlap", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(first, "first")
+	require.NoError(t, err)
+
+	type beginResult struct {
+		sink daramjwee.WriteSink
+		err  error
+	}
+	secondReady := make(chan beginResult, 1)
+	go func() {
+		sink, err := store.BeginSet(ctx, "same-key-overlap", &daramjwee.Metadata{CacheTag: "v2"})
+		secondReady <- beginResult{sink: sink, err: err}
+	}()
+
+	var second daramjwee.WriteSink
+	select {
+	case result := <-secondReady:
+		require.NoError(t, result.err)
+		second = result.sink
+	case <-time.After(100 * time.Millisecond):
+		require.NoError(t, first.Abort())
+		result := <-secondReady
+		if result.sink != nil {
+			_ = result.sink.Abort()
+		}
+		t.Fatal("second BeginSet blocked on first writer lifetime")
+	}
+
+	require.NoError(t, second.Abort())
+	require.NoError(t, first.Abort())
+}
+
+func TestStore_LateCloseDoesNotOverwriteNewerVisibleValue(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	first, err := store.BeginSet(ctx, "late-close", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(first, "first")
+	require.NoError(t, err)
+
+	type beginResult struct {
+		sink daramjwee.WriteSink
+		err  error
+	}
+	secondReady := make(chan beginResult, 1)
+	go func() {
+		sink, err := store.BeginSet(ctx, "late-close", &daramjwee.Metadata{CacheTag: "v2"})
+		secondReady <- beginResult{sink: sink, err: err}
+	}()
+
+	var second daramjwee.WriteSink
+	select {
+	case result := <-secondReady:
+		require.NoError(t, result.err)
+		second = result.sink
+	case <-time.After(100 * time.Millisecond):
+		require.NoError(t, first.Abort())
+		result := <-secondReady
+		if result.sink != nil {
+			_ = result.sink.Abort()
+		}
+		t.Fatal("second BeginSet blocked on first writer lifetime")
+	}
+
+	_, err = io.WriteString(second, "second")
+	require.NoError(t, err)
+	require.NoError(t, second.Close())
+	require.NoError(t, first.Close())
+
+	stream, meta, err := store.GetStream(ctx, "late-close")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", meta.CacheTag)
+	assert.Equal(t, "second", string(body))
+}
+
+func TestStore_LateCloseDoesNotResurrectDeletedKey(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "delete-race", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+
+	require.NoError(t, store.Delete(ctx, "delete-race"))
+	require.NoError(t, writer.Close())
+
+	_, err = store.Stat(ctx, "delete-race")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
 func TestStore_AbortLeavesNoVisibleLocalEntry(t *testing.T) {
