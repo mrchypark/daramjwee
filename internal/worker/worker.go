@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/go-kit/log"
@@ -41,8 +42,7 @@ func NewManager(strategyType string, logger log.Logger, poolSize int, queueSize 
 	case "pool":
 		strategy = NewPoolStrategy(logger, poolSize, queueSize, jobTimeout)
 	default:
-		level.Info(logger).Log("msg", "unknown strategy, defaulting to 'pool'", "strategy", strategyType)
-		strategy = NewPoolStrategy(logger, poolSize, queueSize, jobTimeout)
+		return nil, fmt.Errorf("unknown worker strategy %q", strategyType)
 	}
 
 	return &Manager{

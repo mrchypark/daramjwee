@@ -273,12 +273,22 @@ func TestNew_WithWorkerStrategyAllUsesAllStrategy(t *testing.T) {
 	typedCache := cache.(*DaramjweeCache)
 	t.Cleanup(typedCache.Close)
 
-	strategyField := reflect.ValueOf(typedCache.Worker).Elem().FieldByName("strategy")
+	strategyField := reflect.ValueOf(typedCache.worker).Elem().FieldByName("strategy")
 	require.True(t, strategyField.IsValid())
 	require.False(t, strategyField.IsNil())
 
 	strategyType := strategyField.Elem().Type()
 	assert.Equal(t, reflect.TypeOf((*worker.AllStrategy)(nil)), strategyType)
+}
+
+func TestNew_WithUnknownWorkerStrategyFails(t *testing.T) {
+	cache, err := New(nil,
+		WithTiers(&optionsTestMockStore{id: 1}),
+		WithWorkerStrategy("bogus"),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown worker strategy")
+	assert.Nil(t, cache)
 }
 
 func TestNew_WithManualNegativeTierFreshnessOverrideFails(t *testing.T) {

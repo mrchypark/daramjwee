@@ -5,6 +5,11 @@ import (
 	"time"
 )
 
+var validWorkerStrategies = map[string]struct{}{
+	"pool": {},
+	"all":  {},
+}
+
 // ConfigError represents an error that occurs during the configuration process.
 type ConfigError struct {
 	Message string
@@ -51,10 +56,14 @@ func WithTiers(stores ...Store) Option {
 }
 
 // WithWorkerStrategy sets the background worker strategy.
+// Supported values are "pool" and "all"; unknown values return a configuration error.
 func WithWorkerStrategy(strategy string) Option {
 	return func(cfg *Config) error {
 		if strategy == "" {
 			return &ConfigError{"worker strategy cannot be empty"}
+		}
+		if _, ok := validWorkerStrategies[strategy]; !ok {
+			return &ConfigError{fmt.Sprintf("unknown worker strategy %q", strategy)}
 		}
 		cfg.WorkerStrategy = strategy
 		return nil

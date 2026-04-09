@@ -17,9 +17,9 @@ func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *te
 		meta: Metadata{CacheTag: "live"},
 	}
 	cache := &DaramjweeCache{
-		Tiers:        []Store{store},
-		OpTimeout:    time.Second,
-		CloseTimeout: time.Second,
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: time.Second,
 	}
 	cache.noteTopWriteGeneration("key")
 
@@ -39,9 +39,9 @@ func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *te
 func TestSetStreamToStoreWithTopGenerationRestoresGenerationOnBeginSetFailure(t *testing.T) {
 	store := &failingBeginSetStore{err: errors.New("boom")}
 	cache := &DaramjweeCache{
-		Tiers:        []Store{store},
-		OpTimeout:    time.Second,
-		CloseTimeout: time.Second,
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: time.Second,
 	}
 
 	expectedGeneration := uint64(0)
@@ -71,9 +71,9 @@ func TestCurrentTopWriteGenerationDoesNotCreateCoordinatorForMissingKey(t *testi
 func TestSetStreamToTopStoreWithGenerationHonorsCanceledContextWhileDeleteInProgress(t *testing.T) {
 	store := &failingBeginSetStore{}
 	cache := &DaramjweeCache{
-		Tiers:        []Store{store},
-		OpTimeout:    time.Second,
-		CloseTimeout: time.Second,
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: time.Second,
 	}
 
 	coord := cache.topWrites.coordinator("key")
