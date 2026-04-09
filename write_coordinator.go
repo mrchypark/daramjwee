@@ -8,10 +8,12 @@ import (
 
 var ErrTopWriteInvalidated = errors.New("daramjwee: top-tier write invalidated")
 
-var errTopWriteInvalidated = ErrTopWriteInvalidated
-
 type topWriteManager struct {
 	coords sync.Map
+}
+
+type fanoutWriteManager struct {
+	locks sync.Map
 }
 
 type writeCoordinator struct {
@@ -40,6 +42,17 @@ type conditionalGenerationWriteSink struct {
 	err           error
 }
 
+type fanoutWriteLock struct {
+	mu    sync.Mutex
+	refMu sync.Mutex
+	refs  int
+}
+
+type fanoutLockKey struct {
+	destTierIndex int
+	key           string
+}
+
 func (m *topWriteManager) coordinator(key string) *writeCoordinator {
 	if coord, ok := m.coords.Load(key); ok {
 		return coord.(*writeCoordinator)
@@ -56,6 +69,58 @@ func (m *topWriteManager) coordinatorIfPresent(key string) *writeCoordinator {
 		return nil
 	}
 	return coord.(*writeCoordinator)
+}
+
+func (m *fanoutWriteManager) lock(destTierIndex int, key string) func() {
+	lockKey := fanoutLockKey{destTierIndex: destTierIndex, key: key}
+	lock := m.acquire(lockKey)
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		m.release(lockKey, lock)
+	}
+}
+
+func (m *fanoutWriteManager) acquire(lockKey fanoutLockKey) *fanoutWriteLock {
+	for {
+		if existing, ok := m.locks.Load(lockKey); ok {
+			lock := existing.(*fanoutWriteLock)
+			lock.refMu.Lock()
+			current, stillPresent := m.locks.Load(lockKey)
+			if !stillPresent || current != existing {
+				lock.refMu.Unlock()
+				continue
+			}
+			lock.refs++
+			lock.refMu.Unlock()
+			return lock
+		}
+
+		lock := &fanoutWriteLock{refs: 1}
+		actual, loaded := m.locks.LoadOrStore(lockKey, lock)
+		if !loaded {
+			return lock
+		}
+		resolved := actual.(*fanoutWriteLock)
+		resolved.refMu.Lock()
+		current, stillPresent := m.locks.Load(lockKey)
+		if !stillPresent || current != actual {
+			resolved.refMu.Unlock()
+			continue
+		}
+		resolved.refs++
+		resolved.refMu.Unlock()
+		return resolved
+	}
+}
+
+func (m *fanoutWriteManager) release(lockKey fanoutLockKey, lock *fanoutWriteLock) {
+	lock.refMu.Lock()
+	defer lock.refMu.Unlock()
+	lock.refs--
+	if lock.refs == 0 {
+		m.locks.CompareAndDelete(lockKey, lock)
+	}
 }
 
 func (m *topWriteManager) currentGeneration(key string) uint64 {
@@ -136,7 +201,7 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 	coord := c.topWrites.coordinator(key)
 	generation, ok := coord.begin(expectedGeneration)
 	if !ok {
-		return nil, errTopWriteInvalidated
+		return nil, ErrTopWriteInvalidated
 	}
 
 	sink, err := store.BeginSet(ctx, key, metadata)
@@ -164,7 +229,7 @@ func (s *coordinatedTopWriteSink) Close() error {
 		if s.coord.committedGeneration != s.generation {
 			s.coord.stateMu.Unlock()
 			abortErr := s.WriteSink.Abort()
-			s.err = errTopWriteInvalidated
+			s.err = ErrTopWriteInvalidated
 			if abortErr != nil {
 				s.err = errors.Join(s.err, abortErr)
 			}
@@ -185,7 +250,7 @@ func (s *coordinatedTopWriteSink) Close() error {
 			return
 		}
 		if s.coord.committedGeneration != s.generation {
-			s.err = errTopWriteInvalidated
+			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {
 				if cleanupErr := s.onInvalidated(); cleanupErr != nil {
 					s.err = errors.Join(s.err, cleanupErr)
@@ -240,7 +305,7 @@ func (s *conditionalGenerationWriteSink) Close() error {
 		if s.coord.committedGeneration != s.generation {
 			s.coord.stateMu.Unlock()
 			abortErr := s.WriteSink.Abort()
-			s.err = errTopWriteInvalidated
+			s.err = ErrTopWriteInvalidated
 			if abortErr != nil {
 				s.err = errors.Join(s.err, abortErr)
 			}
@@ -261,7 +326,7 @@ func (s *conditionalGenerationWriteSink) Close() error {
 			return
 		}
 		if s.coord.committedGeneration != s.generation {
-			s.err = errTopWriteInvalidated
+			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {
 				if cleanupErr := s.onInvalidated(); cleanupErr != nil {
 					s.err = errors.Join(s.err, cleanupErr)

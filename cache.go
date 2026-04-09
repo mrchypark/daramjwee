@@ -30,6 +30,7 @@ type DaramjweeCache struct {
 	loggingDisabled        bool
 	isClosed               atomic.Bool
 	topWrites              topWriteManager
+	fanoutWrites           fanoutWriteManager
 }
 
 var _ Cache = (*DaramjweeCache)(nil)
@@ -215,7 +216,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 
 		writer, err := c.setStreamToTopStoreWithGeneration(jobCtx, key, result.Metadata, &expectedGeneration)
 		if err != nil {
-			if errors.Is(err, errTopWriteInvalidated) {
+			if errors.Is(err, ErrTopWriteInvalidated) {
 				c.infoLog("msg", "skipping background refresh publish because top-tier state changed", "key", key)
 				return
 			}
@@ -369,7 +370,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 		target := c.topWriteStore()
 		writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, &expectedGeneration)
 		if err != nil {
-			if errors.Is(err, errTopWriteInvalidated) {
+			if errors.Is(err, ErrTopWriteInvalidated) {
 				_ = src.Close()
 				cancel()
 				return newGetResponse(GetStatusNotFound, nil, meta), nil
@@ -397,7 +398,7 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 	target := c.topWriteStore()
 	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, &expectedGeneration)
 	if err != nil {
-		if errors.Is(err, errTopWriteInvalidated) {
+		if errors.Is(err, ErrTopWriteInvalidated) {
 			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
 		}
 		c.warnLog("msg", "failed to acquire top-tier sink for promotion", "key", key, "err", err)
@@ -420,7 +421,7 @@ func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.C
 	target := c.topWriteStore()
 	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metadata, &expectedGeneration)
 	if err != nil {
-		if errors.Is(err, errTopWriteInvalidated) {
+		if errors.Is(err, ErrTopWriteInvalidated) {
 			return nil
 		}
 		return err
@@ -476,7 +477,7 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 	if metaToPromote.IsNegative {
 		writer, err := c.setStreamToTopStoreWithGeneration(ctx, key, metaToPromote, &expectedGeneration)
 		if err != nil {
-			if errors.Is(err, errTopWriteInvalidated) {
+			if errors.Is(err, ErrTopWriteInvalidated) {
 				return nil
 			}
 			return err
@@ -498,7 +499,7 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 
 	writer, err := c.setStreamToTopStoreWithGeneration(ctx, key, metaToPromote, &expectedGeneration)
 	if err != nil {
-		if errors.Is(err, errTopWriteInvalidated) {
+		if errors.Is(err, ErrTopWriteInvalidated) {
 			return nil
 		}
 		return err
@@ -548,7 +549,7 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 	if metaToRefresh.IsNegative {
 		writer, err := c.setStreamToTopStoreWithGeneration(ctx, key, &metaToRefresh, &expectedGeneration)
 		if err != nil {
-			if errors.Is(err, errTopWriteInvalidated) {
+			if errors.Is(err, ErrTopWriteInvalidated) {
 				return nil
 			}
 			return err
@@ -571,7 +572,7 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 
 	writer, err := c.setStreamToTopStoreWithGeneration(ctx, key, &metaToRefresh, &expectedGeneration)
 	if err != nil {
-		if errors.Is(err, errTopWriteInvalidated) {
+		if errors.Is(err, ErrTopWriteInvalidated) {
 			return nil
 		}
 		return err
@@ -633,7 +634,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 	target := c.topWriteStore()
 	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, result.Metadata, &expectedGeneration)
 	if err != nil {
-		if errors.Is(err, errTopWriteInvalidated) {
+		if errors.Is(err, ErrTopWriteInvalidated) {
 			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(result.Body, cancel), result.Metadata), nil
 		}
 		c.warnLog("msg", "failed to acquire top sink on miss", "key", key, "err", err)
@@ -656,7 +657,7 @@ func (c *DaramjweeCache) handleNegativeCacheWithGeneration(requestCtx, setupCtx 
 
 	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, c.topWriteStore()), key, meta, expectedGeneration)
 	if err != nil {
-		if errors.Is(err, errTopWriteInvalidated) {
+		if errors.Is(err, ErrTopWriteInvalidated) {
 			if cancel != nil {
 				cancel()
 			}
@@ -851,6 +852,9 @@ func (c *DaramjweeCache) schedulePersistFromTop(key string, expectedGeneration u
 				return
 			}
 			defer srcStream.Close()
+
+			unlockFanout := c.fanoutWrites.lock(destTierIndex, key)
+			defer unlockFanout()
 
 			destWriter, err := c.setStreamToStore(jobCtx, dest, key, meta)
 			if err != nil {
