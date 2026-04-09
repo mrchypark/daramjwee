@@ -819,20 +819,21 @@ func (c *DaramjweeCache) setStreamToStore(ctx context.Context, store Store, key 
 }
 
 func (c *DaramjweeCache) setStreamToStoreWithTopGeneration(ctx context.Context, store Store, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
-	sink, err := store.BeginSet(ctx, key, metadata)
-	if err != nil {
-		return nil, err
-	}
-
 	if !sameStoreInstance(store, c.topWriteStore()) {
-		return sink, nil
+		return store.BeginSet(ctx, key, metadata)
 	}
 
-	state, generation, ok := c.reserveTopWrite(key, expectedGeneration)
+	state, generation, ok := c.beginTopWriteReservation(key, expectedGeneration)
 	if !ok {
-		_ = sink.Abort()
 		return nil, errTopWriteInvalidated
 	}
+
+	sink, err := store.BeginSet(ctx, key, metadata)
+	if err != nil {
+		c.cancelTopWriteReservation(state, generation)
+		return nil, err
+	}
+	c.finishTopWriteReservation(state)
 	return &topWriteSink{
 		WriteSink:  sink,
 		cache:      c,
@@ -883,6 +884,7 @@ func (c *DaramjweeCache) deleteDestinationIfMetadataMatches(ctx context.Context,
 }
 
 type topWriteState struct {
+	beginMu     sync.Mutex
 	commitMu    sync.Mutex
 	generation  atomic.Uint64
 	lastTouched atomic.Int64
@@ -914,26 +916,37 @@ func (c *DaramjweeCache) currentTopWriteGeneration(key string) uint64 {
 	return typed.generation.Load()
 }
 
-func (c *DaramjweeCache) reserveTopWrite(key string, expectedGeneration *uint64) (*topWriteState, uint64, bool) {
+func (c *DaramjweeCache) beginTopWriteReservation(key string, expectedGeneration *uint64) (*topWriteState, uint64, bool) {
 	state := c.topWriteStateForKey(key)
-	state.commitMu.Lock()
-	for {
-		currentGeneration := state.generation.Load()
-		if expectedGeneration != nil && currentGeneration != *expectedGeneration {
-			state.commitMu.Unlock()
-			return nil, 0, false
-		}
-		if state.generation.CompareAndSwap(currentGeneration, currentGeneration+1) {
-			state.commitMu.Unlock()
-			return state, currentGeneration + 1, true
-		}
+	state.beginMu.Lock()
+	currentGeneration := state.generation.Load()
+	if expectedGeneration != nil && currentGeneration != *expectedGeneration {
+		state.beginMu.Unlock()
+		return nil, 0, false
 	}
+	generation := currentGeneration + 1
+	state.generation.Store(generation)
+	state.lastTouched.Store(time.Now().UnixNano())
+	return state, generation, true
+}
+
+func (c *DaramjweeCache) finishTopWriteReservation(state *topWriteState) {
+	state.lastTouched.Store(time.Now().UnixNano())
+	state.beginMu.Unlock()
+}
+
+func (c *DaramjweeCache) cancelTopWriteReservation(state *topWriteState, generation uint64) {
+	state.generation.Store(generation - 1)
+	state.lastTouched.Store(time.Now().UnixNano())
+	state.beginMu.Unlock()
 }
 
 func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 	state := c.topWriteStateForKey(key)
+	state.beginMu.Lock()
 	state.generation.Add(1)
 	state.lastTouched.Store(time.Now().UnixNano())
+	state.beginMu.Unlock()
 }
 
 type topWriteSink struct {
@@ -951,7 +964,11 @@ func (s *topWriteSink) Close() error {
 	s.once.Do(func() {
 		s.state.commitMu.Lock()
 		if s.generation != s.state.generation.Load() {
-			s.err = s.WriteSink.Abort()
+			abortErr := s.WriteSink.Abort()
+			s.err = errTopWriteInvalidated
+			if abortErr != nil {
+				s.err = errors.Join(s.err, abortErr)
+			}
 			s.state.commitMu.Unlock()
 			return
 		}
@@ -1011,6 +1028,10 @@ func (c *DaramjweeCache) pruneIdleTopWriteStates(now time.Time) {
 		if state.lastTouched.Load() > cutoff {
 			return true
 		}
+		if !state.beginMu.TryLock() {
+			return true
+		}
+		defer state.beginMu.Unlock()
 		if !state.commitMu.TryLock() {
 			return true
 		}
