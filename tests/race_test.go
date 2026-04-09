@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,13 @@ func createTestCacheForRace() (daramjwee.Cache, error) {
 		daramjwee.WithOpTimeout(10*time.Second),
 		daramjwee.WithFreshness(1*time.Minute, 0),
 	)
+}
+
+func isAllowedConcurrentSetError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "top-tier write invalidated")
 }
 
 // TestConcurrentAccess tests the actual production code for race conditions
@@ -70,7 +78,7 @@ func TestConcurrentAccess(t *testing.T) {
 					// Set
 					value := fmt.Sprintf("set-value-%d-%d", id, j)
 					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "test"})
-					if err != nil {
+					if err != nil && !isAllowedConcurrentSetError(err) {
 						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
 					}
 				}
@@ -175,7 +183,7 @@ func TestConcurrentMixedOperations(t *testing.T) {
 				case 1: // Set
 					value := fmt.Sprintf("set-%d-%d", id, j)
 					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "test"})
-					if err != nil {
+					if err != nil && !isAllowedConcurrentSetError(err) {
 						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
 					}
 

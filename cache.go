@@ -936,17 +936,15 @@ func (c *DaramjweeCache) finishTopWriteReservation(state *topWriteState) {
 }
 
 func (c *DaramjweeCache) cancelTopWriteReservation(state *topWriteState, generation uint64) {
-	state.generation.Store(generation - 1)
+	state.generation.CompareAndSwap(generation, generation-1)
 	state.lastTouched.Store(time.Now().UnixNano())
 	state.beginMu.Unlock()
 }
 
 func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 	state := c.topWriteStateForKey(key)
-	state.beginMu.Lock()
 	state.generation.Add(1)
 	state.lastTouched.Store(time.Now().UnixNano())
-	state.beginMu.Unlock()
 }
 
 type topWriteSink struct {

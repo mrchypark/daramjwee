@@ -128,6 +128,26 @@ func TestSetStreamToStoreWithTopGenerationRestoresGenerationOnBeginSetFailure(t 
 	}
 }
 
+func TestCancelTopWriteReservationDoesNotUndoConcurrentInvalidation(t *testing.T) {
+	cache := &DaramjweeCache{
+		OpTimeout:     time.Second,
+		WorkerTimeout: time.Second,
+		CloseTimeout:  time.Second,
+	}
+
+	state, generation, ok := cache.beginTopWriteReservation("key", nil)
+	if !ok {
+		t.Fatal("expected reservation to succeed")
+	}
+
+	cache.noteTopWriteGeneration("key")
+	cache.cancelTopWriteReservation(state, generation)
+
+	if got := cache.currentTopWriteGeneration("key"); got != generation+1 {
+		t.Fatalf("expected concurrent invalidation to survive rollback, got %d", got)
+	}
+}
+
 func TestTopWriteSinkCloseReturnsInvalidationErrorWhenAbortSucceeds(t *testing.T) {
 	state := &topWriteState{}
 	state.generation.Store(2)
