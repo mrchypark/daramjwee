@@ -743,6 +743,50 @@ func TestCache_DeleteDoesNotAllowLowerTierPromotionWhileDeleteInProgress(t *test
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestCache_ConditionalLowerTierHitDoesNotReturnNotModifiedWhenPromotionInvalidated(t *testing.T) {
+	top := &blockingDeleteStore{
+		mockStore: newMockStore(),
+		started:   make(chan struct{}, 1),
+		blocker:   make(chan struct{}),
+	}
+	lower := newMockStore()
+	lower.setData("conditional-lower-race", "cached-value", &daramjwee.Metadata{
+		CacheTag: "cache-v1",
+		CachedAt: time.Now(),
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- cache.Delete(context.Background(), "conditional-lower-race")
+	}()
+
+	select {
+	case <-top.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("top-tier delete did not start")
+	}
+
+	resp, err := cache.Get(context.Background(), "conditional-lower-race", daramjwee.GetRequest{IfNoneMatch: "cache-v1"}, noopFetcher{})
+	require.NoError(t, err)
+	require.Equal(t, daramjwee.GetStatusOK, resp.Status)
+	body, err := io.ReadAll(resp)
+	require.NoError(t, err)
+	require.Equal(t, "cached-value", string(body))
+	require.NoError(t, resp.Close())
+
+	close(top.blocker)
+	require.NoError(t, <-deleteDone)
+}
+
 func TestCache_MissFetchDoesNotOverwriteNewerSetWithValueStoreWrapper(t *testing.T) {
 	hot := valueStoreWrapper{inner: newMockStore()}
 

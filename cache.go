@@ -17,6 +17,18 @@ var ErrCacheClosed = errors.New("daramjwee: cache is closed")
 var ErrNilMetadata = errors.New("daramjwee: nil metadata encountered")
 var ErrBackgroundJobRejected = errors.New("daramjwee: background job rejected")
 
+type lowerTierPromotionInvalidatedError struct {
+	preserveBody bool
+}
+
+func (e lowerTierPromotionInvalidatedError) Error() string {
+	return ErrTopWriteInvalidated.Error()
+}
+
+func (e lowerTierPromotionInvalidatedError) Is(target error) bool {
+	return target == ErrTopWriteInvalidated
+}
+
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
 	Tiers                  []Store
@@ -341,6 +353,17 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 	if !meta.IsNegative && ifNoneMatchMatchesCacheTag(req.IfNoneMatch, meta.CacheTag) {
 		if !isStale {
 			if err := c.promoteLowerTierHitToTop(requestCtx, setupCtx, key, tierIndex, src, metaToPromote, expectedGeneration); err != nil {
+				var invalidated lowerTierPromotionInvalidatedError
+				if errors.As(err, &invalidated) {
+					if invalidated.preserveBody {
+						return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
+					}
+					cancel()
+					return newGetResponse(GetStatusNotFound, nil, nil), nil
+				}
+				if errors.Is(err, ErrTopWriteInvalidated) {
+					return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
+				}
 				c.warnLog("msg", "failed to promote conditional lower-tier hit to top tier", "key", key, "tier_index", tierIndex, "err", err)
 			}
 		} else if err := src.Close(); err != nil {
@@ -416,22 +439,29 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 }
 
 func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, metadata *Metadata, expectedGeneration uint64) error {
-	defer src.Close()
-
 	target := c.topWriteStore()
 	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metadata, &expectedGeneration)
 	if err != nil {
 		if errors.Is(err, ErrTopWriteInvalidated) {
-			return nil
+			return lowerTierPromotionInvalidatedError{preserveBody: true}
+		}
+		if !errors.Is(err, ErrTopWriteInvalidated) {
+			_ = src.Close()
 		}
 		return err
 	}
 	if _, copyErr := io.Copy(writer, src); copyErr != nil {
 		abortErr := writer.Abort()
-		return errors.Join(copyErr, abortErr)
+		closeErr := src.Close()
+		return errors.Join(copyErr, abortErr, closeErr)
 	}
-	if err := writer.Close(); err != nil {
-		return err
+	closeErr := writer.Close()
+	srcErr := src.Close()
+	if closeErr != nil || srcErr != nil {
+		if errors.Is(closeErr, ErrTopWriteInvalidated) {
+			return errors.Join(lowerTierPromotionInvalidatedError{preserveBody: false}, closeErr, srcErr)
+		}
+		return errors.Join(closeErr, srcErr)
 	}
 	if destinations := c.regularFanoutDestinations(tierIndex); len(destinations) > 0 {
 		c.schedulePersistFromCurrentTop(key, destinations...)

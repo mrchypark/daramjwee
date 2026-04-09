@@ -140,26 +140,44 @@ func (c *writeCoordinator) current() uint64 {
 // begin serializes same-key top writes and snapshots the committed generation
 // visible to readers. Successful publish advances the committed generation only
 // after the underlying sink has been closed.
-func (c *writeCoordinator) begin(expected *uint64) (uint64, bool) {
+func (c *writeCoordinator) begin(ctx context.Context, expected *uint64) (uint64, error) {
 	c.writeMu.Lock()
 	c.stateMu.Lock()
 	if expected == nil {
+		if c.activeDeletes > 0 {
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					c.stateMu.Lock()
+					c.stateChanged.Broadcast()
+					c.stateMu.Unlock()
+				case <-done:
+				}
+			}()
+			defer close(done)
+		}
 		for c.activeDeletes > 0 {
+			if err := ctx.Err(); err != nil {
+				c.stateMu.Unlock()
+				c.writeMu.Unlock()
+				return 0, err
+			}
 			c.stateChanged.Wait()
 		}
 	} else if c.activeDeletes > 0 {
 		c.stateMu.Unlock()
 		c.writeMu.Unlock()
-		return 0, false
+		return 0, ErrTopWriteInvalidated
 	}
 	if expected != nil && c.committedGeneration != *expected {
 		c.stateMu.Unlock()
 		c.writeMu.Unlock()
-		return 0, false
+		return 0, ErrTopWriteInvalidated
 	}
 	generation := c.committedGeneration
 	c.stateMu.Unlock()
-	return generation, true
+	return generation, nil
 }
 
 func (c *writeCoordinator) rollbackAndUnlock(_ uint64) {
@@ -199,9 +217,9 @@ func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
 	store := c.topWriteStore()
 	coord := c.topWrites.coordinator(key)
-	generation, ok := coord.begin(expectedGeneration)
-	if !ok {
-		return nil, ErrTopWriteInvalidated
+	generation, err := coord.begin(ctx, expectedGeneration)
+	if err != nil {
+		return nil, err
 	}
 
 	sink, err := store.BeginSet(ctx, key, metadata)

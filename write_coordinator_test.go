@@ -68,6 +68,37 @@ func TestCurrentTopWriteGenerationDoesNotCreateCoordinatorForMissingKey(t *testi
 	}
 }
 
+func TestSetStreamToTopStoreWithGenerationHonorsCanceledContextWhileDeleteInProgress(t *testing.T) {
+	store := &failingBeginSetStore{}
+	cache := &DaramjweeCache{
+		Tiers:        []Store{store},
+		OpTimeout:    time.Second,
+		CloseTimeout: time.Second,
+	}
+
+	coord := cache.topWrites.coordinator("key")
+	coord.beginDelete()
+	defer coord.finishDelete(false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := cache.setStreamToTopStoreWithGeneration(ctx, "key", &Metadata{CacheTag: "v1"}, nil)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context cancellation, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("setStreamToTopStoreWithGeneration did not return after context cancellation")
+	}
+}
+
 func TestFanoutWriteManagerSerializesSameDestinationKey(t *testing.T) {
 	var manager fanoutWriteManager
 
