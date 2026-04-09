@@ -997,7 +997,11 @@ func (s *topWriteSink) Abort() error {
 }
 
 func (s *topWriteSink) Write(p []byte) (int, error) {
-	return s.WriteSink.Write(p)
+	n, err := s.WriteSink.Write(p)
+	if n > 0 {
+		s.state.lastTouched.Store(time.Now().UnixNano())
+	}
+	return n, err
 }
 
 func (c *DaramjweeCache) cleanupInvalidatedTopWrite(store Store, key string) error {

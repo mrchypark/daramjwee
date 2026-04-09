@@ -224,6 +224,47 @@ func TestTopWriteSinkCloseReturnsInvalidationErrorWhenAbortSucceeds(t *testing.T
 	}
 }
 
+func TestTopWriteSinkWriteKeepsStateAliveForInvalidation(t *testing.T) {
+	cache := &DaramjweeCache{
+		OpTimeout:     time.Second,
+		WorkerTimeout: time.Second,
+		CloseTimeout:  time.Second,
+	}
+	state := cache.topWriteStateForKey("key")
+	state.generation.Store(1)
+	state.lastTouched.Store(time.Now().Add(-10 * time.Second).UnixNano())
+
+	writeSink := &trackingTopWriteSink{}
+	sink := &topWriteSink{
+		WriteSink:  writeSink,
+		cache:      cache,
+		key:        "key",
+		state:      state,
+		generation: 1,
+	}
+
+	if _, err := sink.Write([]byte("payload")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	cache.pruneIdleTopWriteStates(time.Now())
+	cache.noteTopWriteGeneration("key")
+
+	err := sink.Close()
+	if !errors.Is(err, errTopWriteInvalidated) {
+		t.Fatalf("expected invalidation after concurrent generation bump, got %v", err)
+	}
+	if writeSink.closeCalls != 0 {
+		t.Fatalf("expected invalidated sink not to close underlying writer, got %d closes", writeSink.closeCalls)
+	}
+	if writeSink.abortCalls != 1 {
+		t.Fatalf("expected invalidated sink to abort once, got %d aborts", writeSink.abortCalls)
+	}
+	if current, ok := cache.topWriteStates.Load("key"); !ok || current != state {
+		t.Fatal("expected active top write state to survive pruning")
+	}
+}
+
 type destructiveReservationStore struct {
 	beginSetCalls int
 	data          []byte
@@ -277,3 +318,20 @@ type stubWriteSink struct{}
 func (s *stubWriteSink) Write(p []byte) (int, error) { return len(p), nil }
 func (s *stubWriteSink) Close() error                { return nil }
 func (s *stubWriteSink) Abort() error                { return nil }
+
+type trackingTopWriteSink struct {
+	closeCalls int
+	abortCalls int
+}
+
+func (s *trackingTopWriteSink) Write(p []byte) (int, error) { return len(p), nil }
+
+func (s *trackingTopWriteSink) Close() error {
+	s.closeCalls++
+	return nil
+}
+
+func (s *trackingTopWriteSink) Abort() error {
+	s.abortCalls++
+	return nil
+}
