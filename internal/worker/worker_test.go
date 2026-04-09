@@ -39,15 +39,21 @@ func TestWorkerManager_NewManager(t *testing.T) {
 		pSize        int
 		qSize        int
 		expectedType interface{}
+		expectErr    bool
 	}{
-		{"Pool Strategy", "pool", 1, 1, &PoolStrategy{}},
-		{"All Strategy", "all", 1, 1, &AllStrategy{}},
-		{"Invalid Strategy Should Default to Pool", "invalid-strategy", 1, 1, &PoolStrategy{}},
+		{"Pool Strategy", "pool", 1, 1, &PoolStrategy{}, false},
+		{"All Strategy", "all", 1, 1, &AllStrategy{}, false},
+		{"Invalid Strategy Returns Error", "invalid-strategy", 1, 1, nil, true},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			manager, err := NewManager(tc.strategy, log.NewNopLogger(), tc.pSize, tc.qSize, 1*time.Second)
+			if tc.expectErr {
+				require.Error(t, err)
+				require.Nil(t, manager)
+				return
+			}
 			require.NoError(t, err)
 			defer manager.Shutdown(1 * time.Second)
 

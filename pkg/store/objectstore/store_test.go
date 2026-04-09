@@ -3,6 +3,7 @@ package objectstore
 import (
 	"context"
 	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -133,4 +134,49 @@ func TestStore_MetadataRoundTrip(t *testing.T) {
 	assert.Equal(t, "meta-v1", meta.CacheTag)
 	assert.True(t, meta.IsNegative)
 	assert.True(t, meta.CachedAt.Equal(now))
+}
+
+func TestStore_InitErrorIsReturnedConsistentlyAcrossOperations(t *testing.T) {
+	ctx := context.Background()
+	file, err := os.CreateTemp(t.TempDir(), "objectstore-dir-file")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(file.Name()),
+	)
+	require.Error(t, store.ensureReady())
+
+	_, _, err = store.GetStream(ctx, "key")
+	require.Error(t, err)
+	assert.Equal(t, store.initErr, err)
+
+	_, err = store.BeginSet(ctx, "key", &daramjwee.Metadata{CacheTag: "v1"})
+	require.Error(t, err)
+	assert.Equal(t, store.initErr, err)
+
+	err = store.Delete(ctx, "key")
+	require.Error(t, err)
+	assert.Equal(t, store.initErr, err)
+
+	_, err = store.Stat(ctx, "key")
+	require.Error(t, err)
+	assert.Equal(t, store.initErr, err)
+}
+
+func TestStore_InitErrorPreservesUnderlyingFilesystemFailure(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "objectstore-dir-file")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(file.Name()),
+	)
+
+	require.Error(t, store.initErr)
+	assert.Contains(t, store.initErr.Error(), file.Name())
 }

@@ -85,6 +85,7 @@ func (s *Store) GetStreamUsesContext() bool { return true }
 func (s *Store) BeginSetUsesContext() bool { return true }
 
 var _ daramjwee.Store = (*Store)(nil)
+var _ daramjwee.TierValidator = (*Store)(nil)
 
 // New creates a new object storage backend.
 func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
@@ -151,6 +152,13 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		}
 	}
 	return store
+}
+
+func (s *Store) ValidateTier(index int) error {
+	if s.initErr != nil {
+		return fmt.Errorf("objectstore: initialization failed: %w", s.initErr)
+	}
+	return nil
 }
 
 // GetStream returns the current published generation for a key.

@@ -235,7 +235,9 @@ final tier list and any `WithTierFreshness(...)` overrides together in the same
 
 Background refresh jobs use the `"pool"` worker strategy by default. If you
 need the old fire-one-goroutine-per-job behavior, set
-`WithWorkerStrategy("all")` explicitly.
+`WithWorkerStrategy("all")` explicitly. Supported strategies are `"pool"` and
+`"all"`; unknown strategy values now fail cache construction instead of silently
+falling back to `"pool"`.
 
 ## objectstore Configuration
 
