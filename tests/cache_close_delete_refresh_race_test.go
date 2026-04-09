@@ -13,7 +13,7 @@ import (
 
 func TestCache_ConcurrentCloseDeleteAndScheduleRefresh(t *testing.T) {
 	for iter := 0; iter < 5; iter++ {
-		hot := newMockStore()
+		hot := &signalingDeleteStore{mockStore: newMockStore(), started: make(chan struct{}, 1), blocker: make(chan struct{})}
 		cold := newMockStore()
 		cache, err := daramjwee.New(
 			nil,
@@ -78,15 +78,19 @@ func TestCache_ConcurrentCloseDeleteAndScheduleRefresh(t *testing.T) {
 			}()
 		}
 
+		close(start)
+		select {
+		case <-hot.started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: delete did not start", iter)
+		}
+
 		closeDone := make(chan struct{})
 		go func() {
-			<-start
 			cache.Close()
 			close(closeDone)
 		}()
-
-		close(start)
-		time.Sleep(20 * time.Millisecond)
+		close(hot.blocker)
 
 		close(blocker)
 		wg.Wait()
@@ -102,7 +106,7 @@ func TestCache_ConcurrentCloseDeleteAndScheduleRefresh(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		hotState, err := currentMockStoreState(hot, key)
+		hotState, err := currentMockStoreState(hot.mockStore, key)
 		require.NoError(t, err)
 		coldState, err := currentMockStoreState(cold, key)
 		require.NoError(t, err)
@@ -123,6 +127,24 @@ func acceptedCloseDeleteRaceError(err error) bool {
 
 func isAllowedCloseRaceState(state entryExpectation) bool {
 	return state == (entryExpectation{}) ||
-		state == (entryExpectation{present: true, value: "seed", cacheTag: "seed"}) ||
 		state == (entryExpectation{present: true, value: "refresh-value", cacheTag: "refresh-value"})
+}
+
+type signalingDeleteStore struct {
+	*mockStore
+	started chan struct{}
+	blocker chan struct{}
+}
+
+func (s *signalingDeleteStore) Delete(ctx context.Context, key string) error {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.blocker:
+	}
+	return s.mockStore.Delete(ctx, key)
 }

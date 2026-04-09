@@ -117,11 +117,28 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	c.noteTopWriteGeneration(key)
-
+	coord := c.topWrites.coordinator(key)
+	coord.beginDelete()
+	topDeleteSucceeded := false
+	defer func() {
+		coord.finishDelete(topDeleteSucceeded)
+	}()
 	var firstErr error
+	top := c.topWriteStore()
+	startIndex := 0
+	if hasRealStore(top) {
+		topErr := c.deleteFromStore(ctx, top, key)
+		if topErr == nil || errors.Is(topErr, ErrNotFound) {
+			topDeleteSucceeded = true
+		} else {
+			c.errorLog("msg", "failed to delete from tier", "key", key, "tier_index", 0, "err", topErr)
+			firstErr = topErr
+		}
+		startIndex = 1
+	}
 
-	for i, tier := range c.Tiers {
+	for i := startIndex; i < len(c.Tiers); i++ {
+		tier := c.Tiers[i]
 		if err := c.deleteFromStore(ctx, tier, key); err != nil && !errors.Is(err, ErrNotFound) {
 			c.errorLog("msg", "failed to delete from tier", "key", key, "tier_index", i, "err", err)
 			if firstErr == nil {
@@ -828,11 +845,6 @@ func (c *DaramjweeCache) schedulePersistFromTop(key string, expectedGeneration u
 		dest := destStore
 		job := func(jobCtx context.Context) {
 			c.infoLog("msg", "starting background set", "key", key, "dest_tier", destTierIndex)
-			if c.currentTopWriteGeneration(key) != expectedGeneration {
-				c.infoLog("msg", "skipping background set because top-tier state changed", "key", key, "dest_tier", destTierIndex)
-				return
-			}
-
 			srcStream, meta, err := c.getStreamFromStore(jobCtx, srcStore, key)
 			if err != nil {
 				c.errorLog("msg", "failed to get stream from top store for background set", "key", key, "err", err)
@@ -845,7 +857,11 @@ func (c *DaramjweeCache) schedulePersistFromTop(key string, expectedGeneration u
 				c.errorLog("msg", "failed to get writer for destination store", "key", key, "dest_tier", destTierIndex, "err", err)
 				return
 			}
-			destWriter = newConditionalGenerationWriteSink(destWriter, c.topWrites.coordinator(key), expectedGeneration)
+			destWriter = newConditionalGenerationWriteSink(destWriter, c.topWrites.coordinator(key), expectedGeneration, func() error {
+				cleanupCtx, cancel := c.newCtxWithTimeout(context.Background())
+				defer cancel()
+				return c.deleteFromStore(cleanupCtx, dest, key)
+			})
 
 			_, copyErr := io.Copy(destWriter, srcStream)
 			var closeErr error

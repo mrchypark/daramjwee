@@ -2,6 +2,7 @@ package objectstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -74,6 +75,16 @@ func (s *Store) loadRemoteEntry(ctx context.Context, key string) (*checkpointEnt
 
 func (s *Store) openRemoteEntry(ctx context.Context, entry checkpointEntry) (io.ReadCloser, error) {
 	if s.isPackedRemotePath(entry.SegmentPath) {
+		if s.blockCache == nil {
+			reader, err := s.bucket.GetRange(ctx, entry.SegmentPath, entry.Offset, entry.Length)
+			if err != nil {
+				if s.bucket.IsObjNotFoundErr(err) {
+					return nil, daramjwee.ErrNotFound
+				}
+				return nil, err
+			}
+			return reader, nil
+		}
 		packedCtx, cancel := context.WithCancel(ctx)
 		return &packedRemoteReader{
 			ctx:       packedCtx,
@@ -118,7 +129,7 @@ func (s *Store) loadPackedBlock(ctx context.Context, remotePath string, blockInd
 		}
 		defer reader.Close()
 
-		block, err := io.ReadAll(reader)
+		block, err := readUpToSize(reader, s.pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -129,6 +140,23 @@ func (s *Store) loadPackedBlock(ctx context.Context, remotePath string, blockInd
 		return nil, err
 	}
 	return value.([]byte), nil
+}
+
+func readUpToSize(reader io.Reader, size int64) ([]byte, error) {
+	if size <= 0 {
+		return nil, nil
+	}
+
+	buf := make([]byte, size)
+	n, err := io.ReadFull(reader, buf)
+	switch {
+	case err == nil:
+		return buf, nil
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return buf[:n], nil
+	default:
+		return nil, err
+	}
 }
 
 type packedRemoteReader struct {

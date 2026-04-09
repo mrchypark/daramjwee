@@ -3,6 +3,7 @@ package daramjwee_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -239,6 +240,37 @@ func TestCache_CanceledDeleteDoesNotInvalidateOpenWriter(t *testing.T) {
 
 	err = cache.Delete(deleteCtx, key)
 	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, sink.Close())
+
+	reader, meta, err := hot.GetStream(context.Background(), key)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, "new-value", string(body))
+	require.Equal(t, "v1", meta.CacheTag)
+}
+
+func TestCache_FailedTopDeleteDoesNotInvalidateOpenWriter(t *testing.T) {
+	hot := newMockStore()
+	hot.deleteErr = assert.AnError
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	key := "failed-delete-keeps-open-writer"
+	sink, err := cache.Set(context.Background(), key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = sink.Write([]byte("new-value"))
+	require.NoError(t, err)
+
+	err = cache.Delete(context.Background(), key)
+	require.ErrorIs(t, err, assert.AnError)
 	require.NoError(t, sink.Close())
 
 	reader, meta, err := hot.GetStream(context.Background(), key)
@@ -654,12 +686,61 @@ func TestCache_FanoutDeleteDuringLowerTierCloseKeepsKeyDeleted(t *testing.T) {
 	}
 
 	require.NoError(t, cache.Delete(context.Background(), key))
-	time.Sleep(250 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		_, _, topErr := top.GetStream(context.Background(), key)
+		_, _, coldErr := cold.GetStream(context.Background(), key)
+		return errors.Is(topErr, daramjwee.ErrNotFound) && errors.Is(coldErr, daramjwee.ErrNotFound)
+	}, 2*time.Second, 10*time.Millisecond)
+}
 
-	_, _, topErr := top.GetStream(context.Background(), key)
-	_, _, coldErr := cold.GetStream(context.Background(), key)
-	require.ErrorIs(t, topErr, daramjwee.ErrNotFound)
-	require.ErrorIs(t, coldErr, daramjwee.ErrNotFound)
+func TestCache_DeleteDoesNotAllowLowerTierPromotionWhileDeleteInProgress(t *testing.T) {
+	hot := newMockStore()
+	cold := &blockingDeleteStore{
+		mockStore: newMockStore(),
+		started:   make(chan struct{}, 1),
+		blocker:   make(chan struct{}),
+	}
+
+	key := "delete-fence-lower-tier"
+	seedMeta := &daramjwee.Metadata{CacheTag: "seed", CachedAt: time.Now()}
+	hot.setData(key, "seed", seedMeta)
+	cold.mockStore.setData(key, "seed", seedMeta)
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot, cold),
+		daramjwee.WithFreshness(time.Hour, 0),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- cache.Delete(context.Background(), key)
+	}()
+
+	select {
+	case <-cold.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("lower-tier delete did not start")
+	}
+
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, noopFetcher{})
+	require.NoError(t, err)
+	require.Equal(t, daramjwee.GetStatusOK, resp.Status)
+	body, err := io.ReadAll(resp)
+	require.NoError(t, err)
+	require.Equal(t, "seed", string(body))
+	require.NoError(t, resp.Close())
+
+	close(cold.blocker)
+	require.NoError(t, <-deleteDone)
+
+	_, _, err = hot.GetStream(context.Background(), key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	_, _, err = cold.GetStream(context.Background(), key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
 func TestCache_MissFetchDoesNotOverwriteNewerSetWithValueStoreWrapper(t *testing.T) {
@@ -826,7 +907,7 @@ func TestCache_DeleteDuringSlowCloseKeepsKeyDeleted(t *testing.T) {
 	require.NoError(t, cache.Delete(context.Background(), "slow-close-delete"))
 
 	closeErr := <-closeDone
-	require.NoError(t, closeErr)
+	require.ErrorIs(t, closeErr, daramjwee.ErrTopWriteInvalidated)
 
 	_, _, err = top.GetStream(context.Background(), "slow-close-delete")
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
@@ -857,12 +938,31 @@ type notifyingSlowSetStore struct {
 	delay        time.Duration
 }
 
+type blockingDeleteStore struct {
+	*mockStore
+	started chan struct{}
+	blocker chan struct{}
+}
+
 func newNotifyingSlowSetStore(delay time.Duration) *notifyingSlowSetStore {
 	return &notifyingSlowSetStore{
 		mockStore:    newMockStore(),
 		closeStarted: make(chan struct{}, 1),
 		delay:        delay,
 	}
+}
+
+func (s *blockingDeleteStore) Delete(ctx context.Context, key string) error {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.blocker:
+	}
+	return s.mockStore.Delete(ctx, key)
 }
 
 func (f blockingFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
@@ -911,6 +1011,12 @@ func (f *controlledFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Me
 			Metadata: &daramjwee.Metadata{CacheTag: f.cacheTag},
 		}, nil
 	}
+}
+
+type noopFetcher struct{}
+
+func (noopFetcher) Fetch(context.Context, *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	return nil, errors.New("noop fetcher should not be called")
 }
 
 func (s *notifyingSlowSetStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {

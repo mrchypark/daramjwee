@@ -37,6 +37,27 @@ func BenchmarkStore_ReadRemotePackedWarm(b *testing.B) {
 	benchmarkReadAll(b, store, "bench-key")
 }
 
+func BenchmarkStore_ReadRemotePackedColdConcurrentSameKey(b *testing.B) {
+	store := benchmarkRemotePackedStore(b, false)
+	benchmarkReadAllParallel(b, store, "bench-key")
+}
+
+func BenchmarkStore_ReadRemotePackedWarmConcurrentSameKey(b *testing.B) {
+	store := benchmarkRemotePackedStore(b, true)
+	stream, _, err := store.GetStream(context.Background(), "bench-key")
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, stream); err != nil {
+		b.Fatal(err)
+	}
+	if err := stream.Close(); err != nil {
+		b.Fatal(err)
+	}
+
+	benchmarkReadAllParallel(b, store, "bench-key")
+}
+
 func benchmarkLocalPublishedStore(b *testing.B) *Store {
 	store := New(objstore.NewInMemBucket(), log.NewNopLogger(),
 		WithPackThreshold(1<<20),
@@ -114,4 +135,25 @@ func benchmarkReadAll(b *testing.B, store *Store, key string) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func benchmarkReadAllParallel(b *testing.B, store *Store, key string) {
+	b.Helper()
+	b.ReportAllocs()
+	ctx := context.Background()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			stream, _, err := store.GetStream(ctx, key)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if _, err := io.Copy(io.Discard, stream); err != nil {
+				b.Fatal(err)
+			}
+			if err := stream.Close(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

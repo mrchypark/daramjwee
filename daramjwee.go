@@ -212,8 +212,12 @@ type Store interface {
 	// Successful lookups must return non-nil metadata.
 	GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error)
 	// BeginSet returns a sink that stages data into the store.
+	// The currently readable value for key must remain unchanged until the
+	// returned sink is successfully closed or aborted.
 	BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error)
-	// Delete removes an object from the store.
+	// Delete removes the last committed object from the store.
+	// It must not wait for an uncommitted BeginSet sink on the same key to
+	// close or abort.
 	Delete(ctx context.Context, key string) error
 	// Stat retrieves metadata for an object without its data.
 	Stat(ctx context.Context, key string) (*Metadata, error)

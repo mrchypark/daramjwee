@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -220,12 +221,16 @@ func BenchmarkConcurrentAccess(b *testing.B) {
 
 	stringCache := cache.NewGeneric[string](baseCache)
 	ctx := context.Background()
+	var firstErr atomic.Value
+	var conflictCount atomic.Int64
+	var shardSeq atomic.Int64
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		var i int64
+		shard := shardSeq.Add(1)
 		for pb.Next() {
-			key := fmt.Sprintf("bench-key-%d", i%10)
+			key := fmt.Sprintf("bench-key-%d-%d", shard, i%10)
 
 			if i%2 == 0 {
 				// Get operation
@@ -233,13 +238,30 @@ func BenchmarkConcurrentAccess(b *testing.B) {
 				fetcher := cache.GenericFetcher[string](func(_ context.Context, _ *daramjwee.Metadata) (string, *daramjwee.Metadata, error) {
 					return fmt.Sprintf("bench-value-%d", currentI), &daramjwee.Metadata{CacheTag: "bench"}, nil
 				})
-				_, _ = stringCache.Get(ctx, key, fetcher)
+				if _, err := stringCache.Get(ctx, key, fetcher); err != nil {
+					firstErr.CompareAndSwap(nil, fmt.Errorf("get failed: %w", err))
+					return
+				}
 			} else {
 				// Set operation
 				value := fmt.Sprintf("bench-set-%d", i)
-				_ = stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "bench"})
+				err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "bench"})
+				if err != nil {
+					if isExpectedTopWriteConflict(err) {
+						conflictCount.Add(1)
+					}
+					firstErr.CompareAndSwap(nil, fmt.Errorf("set failed: %w", err))
+					return
+				}
 			}
 			i++
 		}
 	})
+	if err, _ := firstErr.Load().(error); err != nil {
+		b.Fatal(err)
+	}
+	if conflicts := conflictCount.Load(); conflicts != 0 {
+		b.Fatalf("benchmark saw %d unexpected top-write conflicts", conflicts)
+	}
+	b.ReportMetric(float64(conflictCount.Load())/float64(b.N), "conflicts/op")
 }
