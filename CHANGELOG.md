@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.6.2
+
+### 🐛 Bug Fixes & Refinements
+
+*   **Top-tier writes now coordinate by committed generation**: same-key foreground writes, deletes, stale refreshes, and promotions no longer let late closes overwrite newer visible state in tier 0.
+*   **Lower-tier fanout and conditional promotion were hardened**: stale lower-tier promotion no longer leaks false `304 Not Modified` decisions, and same-destination fanout now avoids stale cleanup deleting a newer persisted value.
+*   **Store write/delete contracts are now explicit and enforced**: built-in stores are covered by contract tests that require `BeginSet(...)` to keep the previously visible value intact until `Close()`/`Abort()`, and require `Delete(...)` not to wait on pending staged writes.
+
+### 🚀 Performance & Validation
+
+*   **Objectstore packed cold reads are cheaper without a block cache**: no-cache packed reads now use a single logical range read instead of block-by-block materialization, reducing cold-read latency and allocations.
+*   **Concurrency verification coverage expanded substantially**: added write coordinator regression tests, store contract tests, background-worker stress tests, race tests, fuzz targets, and benchmark fixtures that separate cache-core costs from mock I/O overhead.
+
+### 🧰 Notes
+
+*   This release keeps the v0.6 public API surface, but custom `Store` implementations must preserve the currently visible value after `BeginSet(...)` until the returned sink is terminally closed or aborted.
+*   Same-key write/delete timing is stricter than in `v0.6.1`; callers that relied on stale late closes winning races should expect newer visible state to win consistently instead.
+
+### ✅ Verification
+
+*   `go test ./...`
+*   `go test ./... -race`
+*   `go test ./pkg/store/objectstore -run '^$' -bench 'BenchmarkStore_ReadRemotePacked(Cold|Warm)$' -benchmem -cpu=1 -benchtime=2s -count=5`
+
 ## v0.6.1
 
 ### 🐛 Bug Fixes & Refinements
