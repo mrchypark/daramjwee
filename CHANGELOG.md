@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.7.0
+
+### ⚠️ Breaking Changes & API Updates
+
+*   **`DaramjweeCache` runtime fields are no longer part of the public surface**: the concrete cache type remains exported, but `Tiers`, `Worker`, logger state, timeout fields, and freshness fields are now internal implementation details instead of exported struct fields.
+*   **Unknown worker strategies now fail fast**: `WithWorkerStrategy(...)` accepts only `"pool"` and `"all"`, and invalid values now return a configuration error instead of silently falling back to `"pool"`.
+*   **Objectstore tier initialization is now validated during `daramjwee.New(...)`**: misconfigured `objectstore` tiers fail cache construction immediately instead of deferring the failure until first store operation.
+
+### 🧰 Migration Notes
+
+*   Stop reading or mutating runtime fields on `*DaramjweeCache` directly. Treat `daramjwee.New(...)` as the construction boundary and keep concrete cache state internal to the package.
+*   Audit any custom configuration that relied on unknown worker strategy strings being accepted. Use `WithWorkerStrategy("pool")` or `WithWorkerStrategy("all")` explicitly.
+*   If you build `objectstore` tiers dynamically, expect `daramjwee.New(...)` to return initialization errors earlier when the local directory or other objectstore prerequisites are invalid.
+
+### 🐛 Bug Fixes & Refinements
+
+*   **Cache orchestration is split into focused units**: stale reads, background refresh, persistence fanout, and context policy now live in dedicated files instead of one monolithic `cache.go`, making maintenance and review substantially easier.
+*   **Background jobs now preserve request-scoped values without inheriting request cancellation**: refresh and persist work keep caller context values available to context-sensitive stores and fetchers, while still running under worker-managed deadlines.
+*   **Invalidated fanout cleanup regained best-effort semantics**: destination-tier cleanup after generation invalidation now runs under a fresh timeout context again, so worker shutdown or timeout races do not leave stale persisted objects behind.
+*   **Constructor and helper regressions are pinned by direct tests**: response/cancel wrappers, lower-tier promotion cleanup, objectstore init failures, and internal block/page/segment caches now have explicit regression coverage.
+
+### ✅ Verification
+
+*   `go test ./...`
+
 ## v0.6.2
 
 ### 🐛 Bug Fixes & Refinements
