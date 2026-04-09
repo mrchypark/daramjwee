@@ -192,6 +192,95 @@ func TestScheduleRefresh_ContinuesAfterCallerContextCancel(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
+// Background refresh validation reuses the worker job context, so a fetch that
+// outlives OpTimeout but stays within WorkerTimeout must still publish.
+func TestScheduleRefresh_SlowFetchDoesNotInvalidateWithinWorkerTimeout(t *testing.T) {
+	hotInner := newMockStore()
+	hot := newContextAwareStatStore(hotInner)
+	key := "refresh-slow-fetch"
+	hotInner.setData(key, "old-value", &daramjwee.Metadata{
+		CacheTag: "v0",
+		CachedAt: time.Now().Add(-time.Hour),
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithOpTimeout(20*time.Millisecond),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(300*time.Millisecond),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	fetcher := &mockFetcher{
+		content:    "fresh-value",
+		etag:       "v1",
+		fetchDelay: 60 * time.Millisecond,
+	}
+
+	require.NoError(t, cache.ScheduleRefresh(context.Background(), key, fetcher))
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := hot.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(body) == "fresh-value" && meta.CacheTag == "v1"
+	}, time.Second, 10*time.Millisecond)
+}
+
+// Fanout validation shares the worker job context for the same reason: a slow
+// source copy should persist as long as the job itself has not timed out.
+func TestScheduleRefresh_FanoutSlowCopyDoesNotInvalidateWithinWorkerTimeout(t *testing.T) {
+	top := newContextAwareStatStore(newDelayedReadStore(newMockStore(), 60*time.Millisecond))
+	mid := newMockStore()
+	low := newMockStore()
+	key := "fanout-slow-copy"
+	low.setData(key, "lower-value", &daramjwee.Metadata{
+		CacheTag: "v1",
+		CachedAt: time.Now(),
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, mid, low),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+		daramjwee.WithOpTimeout(20*time.Millisecond),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(300*time.Millisecond),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, &mockFetcher{})
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp)
+	require.NoError(t, err)
+	require.Equal(t, "lower-value", string(body))
+	require.NoError(t, resp.Close())
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := mid.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		copied, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(copied) == "lower-value" && meta.CacheTag == "v1"
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestScheduleRefresh_DoesNotOverwriteNewerTopEntry(t *testing.T) {
 	hot := newMockStore()
 
@@ -316,6 +405,74 @@ func TestScheduleRefresh_CloseWindowDoesNotOverwriteNewerSet(t *testing.T) {
 type blockingFetcher struct {
 	started chan struct{}
 	blocker chan struct{}
+}
+
+type delayedReadStore struct {
+	inner *mockStore
+	delay time.Duration
+}
+
+func newDelayedReadStore(inner *mockStore, delay time.Duration) *delayedReadStore {
+	return &delayedReadStore{inner: inner, delay: delay}
+}
+
+func (s *delayedReadStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	reader, meta, err := s.inner.GetStream(ctx, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &delayedReadCloser{ReadCloser: reader, delay: s.delay}, meta, nil
+}
+
+func (s *delayedReadStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return s.inner.BeginSet(ctx, key, metadata)
+}
+
+func (s *delayedReadStore) Delete(ctx context.Context, key string) error {
+	return s.inner.Delete(ctx, key)
+}
+
+func (s *delayedReadStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	return s.inner.Stat(ctx, key)
+}
+
+type delayedReadCloser struct {
+	io.ReadCloser
+	delay time.Duration
+}
+
+func (r *delayedReadCloser) Read(p []byte) (int, error) {
+	time.Sleep(r.delay)
+	return r.ReadCloser.Read(p)
+}
+
+type contextAwareStatStore struct {
+	inner daramjwee.Store
+}
+
+func newContextAwareStatStore(inner daramjwee.Store) *contextAwareStatStore {
+	return &contextAwareStatStore{inner: inner}
+}
+
+func (s *contextAwareStatStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	return s.inner.GetStream(ctx, key)
+}
+
+func (s *contextAwareStatStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return s.inner.BeginSet(ctx, key, metadata)
+}
+
+func (s *contextAwareStatStore) Delete(ctx context.Context, key string) error {
+	return s.inner.Delete(ctx, key)
+}
+
+func (s *contextAwareStatStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	return s.inner.Stat(ctx, key)
 }
 
 func (f blockingFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
