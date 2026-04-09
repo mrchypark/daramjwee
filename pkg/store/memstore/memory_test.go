@@ -2,6 +2,7 @@ package memstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math/rand"
 	"sync"
@@ -544,6 +545,113 @@ func TestMemStore_OldSinkTerminalCallsDoNotAffectNewWrite(t *testing.T) {
 	require.Equal(t, "second-value", string(body))
 	require.NotNil(t, meta)
 	require.Equal(t, "v2", meta.CacheTag)
+}
+
+func TestMemStoreSink_ConcurrentTerminalCallsDoNotTearState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := New(0, nil)
+
+	for i := 0; i < 32; i++ {
+		key := "terminal-key"
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+		require.NoError(t, err)
+		_, err = writer.Write([]byte("value"))
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		for j := 0; j < 16; j++ {
+			wg.Add(1)
+			go func(call int) {
+				defer wg.Done()
+				if call%2 == 0 {
+					_ = writer.Close()
+					return
+				}
+				_ = writer.Abort()
+			}(j)
+		}
+		wg.Wait()
+
+		_, err = writer.Write([]byte("after-close"))
+		require.ErrorIs(t, err, io.ErrClosedPipe)
+
+		reader, meta, err := store.GetStream(ctx, key)
+		if err == nil {
+			body, readErr := io.ReadAll(reader)
+			_ = reader.Close()
+			require.NoError(t, readErr)
+			require.Equal(t, "value", string(body))
+			require.NotNil(t, meta)
+			require.Equal(t, "v1", meta.CacheTag)
+		} else {
+			require.ErrorIs(t, err, daramjwee.ErrNotFound)
+		}
+
+		require.NoError(t, store.Delete(ctx, key))
+	}
+}
+
+func TestMemStoreSink_ConcurrentWriteAndCloseDoNotRace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := New(0, nil)
+
+	for i := 0; i < 32; i++ {
+		writer, err := store.BeginSet(ctx, "write-close-key", &daramjwee.Metadata{CacheTag: "v1"})
+		require.NoError(t, err)
+
+		writeDone := make(chan error, 1)
+		go func() {
+			_, writeErr := writer.Write([]byte("value"))
+			writeDone <- writeErr
+		}()
+
+		closeErr := writer.Close()
+		writeErr := <-writeDone
+
+		if closeErr != nil {
+			t.Fatalf("unexpected close error: %v", closeErr)
+		}
+		if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
+			t.Fatalf("unexpected write error: %v", writeErr)
+		}
+
+		require.NoError(t, store.Delete(ctx, "write-close-key"))
+	}
+}
+
+func TestMemStoreSink_ConcurrentWriteAndAbortDoNotRace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := New(0, nil)
+
+	for i := 0; i < 32; i++ {
+		writer, err := store.BeginSet(ctx, "write-abort-key", &daramjwee.Metadata{CacheTag: "v1"})
+		require.NoError(t, err)
+
+		writeDone := make(chan error, 1)
+		go func() {
+			_, writeErr := writer.Write([]byte("value"))
+			writeDone <- writeErr
+		}()
+
+		abortErr := writer.Abort()
+		writeErr := <-writeDone
+
+		if abortErr != nil {
+			t.Fatalf("unexpected abort error: %v", abortErr)
+		}
+		if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
+			t.Fatalf("unexpected write error: %v", writeErr)
+		}
+
+		_, _, err = store.GetStream(ctx, "write-abort-key")
+		require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	}
 }
 
 func TestMemStore_ReturnsMetadataCopies(t *testing.T) {

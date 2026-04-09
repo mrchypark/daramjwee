@@ -1,7 +1,6 @@
 package daramjwee
 
 import (
-	"errors"
 	"io"
 	"sync"
 )
@@ -87,10 +86,13 @@ func (r *fillReadCloser) Read(p []byte) (int, error) {
 			return n, writeErr
 		}
 	}
+	if err == nil {
+		return n, nil
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if errors.Is(err, io.EOF) {
+	if err == io.EOF {
 		r.sawEOF = true
 		return n, err
 	}
@@ -124,7 +126,7 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 					break
 				}
 			}
-			if errors.Is(readErr, io.EOF) {
+			if readErr == io.EOF {
 				err = nil
 				break
 			}
@@ -169,7 +171,12 @@ func (r *fillReadCloser) Close() error {
 	} else {
 		err = r.sink.Abort()
 	}
-	err = errors.Join(err, r.src.Close())
+	srcCloseErr := r.src.Close()
+	if err == nil {
+		err = srcCloseErr
+	} else if srcCloseErr != nil {
+		err = joinTwoErrors(err, srcCloseErr)
+	}
 	if r.cancel != nil {
 		r.cancel()
 	}
@@ -220,6 +227,29 @@ func (c *cancelWriteSink) Close() error {
 		}
 	})
 	return c.err
+}
+
+func joinTwoErrors(first, second error) error {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return multiError{first: first, second: second}
+}
+
+type multiError struct {
+	first  error
+	second error
+}
+
+func (e multiError) Error() string {
+	return e.first.Error() + "\n" + e.second.Error()
+}
+
+func (e multiError) Unwrap() []error {
+	return []error{e.first, e.second}
 }
 
 func (c *cancelWriteSink) Abort() error {

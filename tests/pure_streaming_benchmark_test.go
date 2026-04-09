@@ -58,6 +58,10 @@ func BenchmarkCacheGet_Miss_1MiB_PrebuiltFetcher_DirectSink(b *testing.B) {
 	benchmarkMissStreamThroughWithFixtures(b, bytes.Repeat([]byte("c"), benchmarkLargePayload), &benchmarkDirectSinkStore{}, benchmarkFetcherModePrebuilt)
 }
 
+func BenchmarkCacheGet_Miss_1MiB_PrebuiltFetcher_AsyncFanoutTwoTiers(b *testing.B) {
+	benchmarkMissStreamThroughWithFanout(b, benchmarkLargePayload, 2)
+}
+
 func BenchmarkCacheGet_MissPartialReadAbort(b *testing.B) {
 	hot := newMockStore()
 	payload := strings.Repeat("p", benchmarkLargePayload)
@@ -322,6 +326,44 @@ func benchmarkMissStreamThroughWithFixtures(b *testing.B, payload []byte, hot da
 	}
 }
 
+func benchmarkMissStreamThroughWithFanout(b *testing.B, payloadSize int, fanoutTiers int) {
+	hot := newMockStore()
+	payload := bytes.Repeat([]byte("f"), payloadSize)
+
+	tiers := make([]daramjwee.Store, 0, fanoutTiers+1)
+	tiers = append(tiers, hot)
+	for i := 0; i < fanoutTiers; i++ {
+		tiers = append(tiers, &benchmarkDirectSinkStore{id: i + 1})
+	}
+
+	cache := mustNewBenchmarkCache(
+		b,
+		daramjwee.WithTiers(tiers...),
+		daramjwee.WithWorkers(fanoutTiers),
+		daramjwee.WithWorkerQueue(fanoutTiers*4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	fetcher := &benchmarkBytesFetcher{body: payload, etag: "v1"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		key := benchmarkKey("miss-fanout", i)
+		stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+		if err != nil {
+			b.Fatalf("get: %v", err)
+		}
+		if _, err := io.Copy(io.Discard, stream); err != nil {
+			b.Fatalf("copy: %v", err)
+		}
+		if err := stream.Close(); err != nil {
+			b.Fatalf("close: %v", err)
+		}
+	}
+}
+
 func mustNewBenchmarkCache(b *testing.B, opts ...daramjwee.Option) daramjwee.Cache {
 	b.Helper()
 
@@ -382,7 +424,9 @@ func (f *benchmarkBytesFetcher) Fetch(ctx context.Context, oldMetadata *daramjwe
 	}, nil
 }
 
-type benchmarkDirectSinkStore struct{}
+type benchmarkDirectSinkStore struct {
+	id int
+}
 
 func (s *benchmarkDirectSinkStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	return nil, nil, daramjwee.ErrNotFound

@@ -192,6 +192,127 @@ func TestScheduleRefresh_ContinuesAfterCallerContextCancel(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
+func TestScheduleRefresh_DoesNotOverwriteNewerTopEntry(t *testing.T) {
+	hot := newMockStore()
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	ctx := context.Background()
+	key := "refresh-does-not-clobber"
+
+	wc, err := cache.Set(ctx, key, &daramjwee.Metadata{CacheTag: "v0"})
+	require.NoError(t, err)
+	_, err = wc.Write([]byte("old-value"))
+	require.NoError(t, err)
+	require.NoError(t, wc.Close())
+
+	started := make(chan struct{}, 1)
+	blocker := make(chan struct{})
+	fetcher := blockingSuccessFetcher{
+		started:  started,
+		blocker:  blocker,
+		content:  "background-value",
+		cacheTag: "v1",
+	}
+
+	require.NoError(t, cache.ScheduleRefresh(ctx, key, fetcher))
+	<-started
+
+	newer, err := cache.Set(ctx, key, &daramjwee.Metadata{CacheTag: "user-v2"})
+	require.NoError(t, err)
+	_, err = newer.Write([]byte("user-value"))
+	require.NoError(t, err)
+	require.NoError(t, newer.Close())
+
+	close(blocker)
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := hot.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(body) == "user-value" && meta.CacheTag == "user-v2"
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestScheduleRefresh_CloseWindowDoesNotOverwriteNewerSet(t *testing.T) {
+	top := newNotifyingSlowSetStore(150 * time.Millisecond)
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	key := "refresh-close-window-no-clobber"
+	top.setData(key, "old-value", &daramjwee.Metadata{
+		CacheTag: "v0",
+		CachedAt: time.Now().Add(-time.Hour),
+	})
+
+	started := make(chan struct{}, 1)
+	blocker := make(chan struct{})
+	fetcher := blockingSuccessFetcher{
+		started:  started,
+		blocker:  blocker,
+		content:  "background-value",
+		cacheTag: "v1",
+	}
+
+	require.NoError(t, cache.ScheduleRefresh(context.Background(), key, fetcher))
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background refresh did not start")
+	}
+	close(blocker)
+
+	select {
+	case <-top.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background refresh did not reach top-tier close")
+	}
+
+	newer, err := cache.Set(context.Background(), key, &daramjwee.Metadata{CacheTag: "user-v2"})
+	require.NoError(t, err)
+	_, err = newer.Write([]byte("user-value"))
+	require.NoError(t, err)
+	require.NoError(t, newer.Close())
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := top.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		current, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(current) == "user-value" && meta.CacheTag == "user-v2"
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
 type blockingFetcher struct {
 	started chan struct{}
 	blocker chan struct{}
@@ -209,6 +330,71 @@ func (f blockingFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metad
 	case <-f.blocker:
 		return nil, daramjwee.ErrCacheableNotFound
 	}
+}
+
+type blockingSuccessFetcher struct {
+	started  chan struct{}
+	blocker  chan struct{}
+	content  string
+	cacheTag string
+}
+
+func (f blockingSuccessFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-f.blocker:
+		return &daramjwee.FetchResult{
+			Body:     io.NopCloser(strings.NewReader(f.content)),
+			Metadata: &daramjwee.Metadata{CacheTag: f.cacheTag},
+		}, nil
+	}
+}
+
+type notifyingSlowSetStore struct {
+	*mockStore
+	closeStarted chan struct{}
+	delay        time.Duration
+}
+
+func newNotifyingSlowSetStore(delay time.Duration) *notifyingSlowSetStore {
+	return &notifyingSlowSetStore{
+		mockStore:    newMockStore(),
+		closeStarted: make(chan struct{}, 1),
+		delay:        delay,
+	}
+}
+
+func (s *notifyingSlowSetStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	sink, err := s.mockStore.BeginSet(ctx, key, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return &notifyingSlowSetSink{
+		WriteSink:    sink,
+		closeStarted: s.closeStarted,
+		delay:        s.delay,
+	}, nil
+}
+
+type notifyingSlowSetSink struct {
+	daramjwee.WriteSink
+	closeStarted chan struct{}
+	delay        time.Duration
+}
+
+func (s *notifyingSlowSetSink) Close() error {
+	select {
+	case s.closeStarted <- struct{}{}:
+	default:
+	}
+	time.Sleep(s.delay)
+	return s.WriteSink.Close()
 }
 
 type failingRefreshFetcher struct {

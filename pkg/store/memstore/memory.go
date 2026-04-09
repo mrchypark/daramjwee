@@ -118,11 +118,14 @@ type memStoreSink struct {
 	key      string
 	metadata *daramjwee.Metadata
 	buf      *bytes.Buffer
+	mu       sync.Mutex
 	done     bool
 }
 
 // Write writes the provided data to the internal buffer.
 func (w *memStoreSink) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.done {
 		return 0, io.ErrClosedPipe
 	}
@@ -132,12 +135,15 @@ func (w *memStoreSink) Write(p []byte) (n int, err error) {
 // Close is called when the write operation is complete.
 // It commits the buffered data to the MemStore and handles eviction if capacity is exceeded.
 func (w *memStoreSink) Close() error {
+	w.mu.Lock()
 	if w.done {
+		w.mu.Unlock()
 		return nil
 	}
 	w.done = true
 	w.ms.mu.Lock()
 	defer w.ms.mu.Unlock()
+	defer w.mu.Unlock()
 
 	finalData := make([]byte, w.buf.Len())
 	copy(finalData, w.buf.Bytes())
@@ -193,11 +199,15 @@ func (w *memStoreSink) Close() error {
 }
 
 func (w *memStoreSink) Abort() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.done {
 		return nil
 	}
 	w.done = true
-	w.buf.Reset()
+	if w.buf != nil {
+		w.buf.Reset()
+	}
 	w.release()
 	return nil
 }

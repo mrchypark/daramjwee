@@ -162,6 +162,36 @@ func TestCache_PartialMissReadCloseDoesNotPublishToHot(t *testing.T) {
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestCache_MissContextCancellationMidStreamDoesNotPublishPartialEntry(t *testing.T) {
+	hot := newMockStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	fetcher := &contextBoundFetcher{
+		body:     bytes.Repeat([]byte("c"), 32*1024),
+		metadata: &daramjwee.Metadata{CacheTag: "v1"},
+	}
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(2*time.Second))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	stream, err := cache.Get(ctx, "cancelled-miss-key", daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+
+	buf := make([]byte, 4096)
+	n, err := io.ReadFull(stream, buf)
+	require.NoError(t, err)
+	require.Equal(t, len(buf), n)
+
+	cancel()
+
+	_, err = io.ReadAll(stream)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, stream.Close())
+
+	_, _, err = hot.GetStream(context.Background(), "cancelled-miss-key")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
 func TestCache_PartialColdHitReadCloseDoesNotPublishToHot(t *testing.T) {
 	hot := newMockStore()
 	cold := newMockStore()

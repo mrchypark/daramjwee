@@ -327,6 +327,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		Worker:                 workerManager,
 		OpTimeout:              cfg.OpTimeout,
 		CloseTimeout:           cfg.CloseTimeout,
+		WorkerTimeout:          cfg.WorkerTimeout,
 		PositiveFreshness:      cfg.PositiveFreshness,
 		NegativeFreshness:      cfg.NegativeFreshness,
 		TierFreshnessOverrides: cloneTierFreshnessOverrides(cfg.TierFreshnessOverrides),

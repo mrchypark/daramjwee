@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -122,6 +124,79 @@ func TestStreamThrough_CopyShortWriteWithWriterToAborts(t *testing.T) {
 	assert.False(t, sink.closed)
 }
 
+func TestStreamThrough_ConcurrentClosePublishesOnceAfterEOF(t *testing.T) {
+	sink := &countingWriteSink{}
+	var published atomic.Int32
+
+	stream := streamThrough(
+		io.NopCloser(bytes.NewReader([]byte("hello"))),
+		sink,
+		nil,
+		func() { published.Add(1) },
+	)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(body))
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- stream.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 1, sink.closeCalls())
+	assert.Equal(t, 0, sink.abortCalls())
+	assert.Equal(t, int32(1), published.Load())
+	assert.Equal(t, []byte("hello"), sink.snapshot())
+}
+
+func TestStreamThrough_ConcurrentCloseBeforeEOFAbortsOnce(t *testing.T) {
+	sink := &countingWriteSink{}
+	var published atomic.Int32
+
+	stream := streamThrough(
+		io.NopCloser(bytes.NewReader([]byte("hello"))),
+		sink,
+		nil,
+		func() { published.Add(1) },
+	)
+
+	buf := make([]byte, 2)
+	n, err := stream.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- stream.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 0, sink.closeCalls())
+	assert.Equal(t, 1, sink.abortCalls())
+	assert.Equal(t, int32(0), published.Load())
+	assert.Equal(t, []byte("he"), sink.snapshot())
+}
+
 type recordingWriteSink struct {
 	buf        bytes.Buffer
 	closeErr   error
@@ -183,4 +258,49 @@ func (r *writerToSpyReadCloser) WriteTo(w io.Writer) (int64, error) {
 
 func (r *writerToSpyReadCloser) Close() error {
 	return nil
+}
+
+type countingWriteSink struct {
+	mu         sync.Mutex
+	buf        bytes.Buffer
+	closeCount int
+	abortCount int
+}
+
+func (s *countingWriteSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *countingWriteSink) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeCount++
+	return nil
+}
+
+func (s *countingWriteSink) Abort() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.abortCount++
+	return nil
+}
+
+func (s *countingWriteSink) closeCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeCount
+}
+
+func (s *countingWriteSink) abortCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.abortCount
+}
+
+func (s *countingWriteSink) snapshot() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return bytes.Clone(s.buf.Bytes())
 }

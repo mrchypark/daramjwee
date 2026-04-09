@@ -2,6 +2,7 @@ package daramjwee_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -346,6 +347,57 @@ func TestCache_LowerTierConditionalHitPromotesFreshEntryToTop(t *testing.T) {
 	assert.Equal(t, "cached-value", string(body))
 	assert.Equal(t, "cache-v1", meta.CacheTag)
 	assert.Equal(t, cachedAt.UnixNano(), meta.CachedAt.UnixNano())
+}
+
+func TestCache_LowerTierConditionalStaleHitReturnsNotModifiedAndPromotesFallbackOnNotModified(t *testing.T) {
+	top := newMockStore()
+	lower := newMockStore()
+	oldCachedAt := time.Now().Add(-time.Hour)
+	lower.setData("conditional-stale-lower-key", "stale-value", &daramjwee.Metadata{
+		CacheTag: "cache-v1",
+		CachedAt: oldCachedAt,
+	})
+	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithFreshness(time.Second, time.Second),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	resp, err := cache.Get(context.Background(), "conditional-stale-lower-key", daramjwee.GetRequest{IfNoneMatch: "cache-v1"}, fetcher)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Equal(t, daramjwee.GetStatusNotModified, resp.Status)
+	require.Nil(t, resp.Body)
+	assert.Equal(t, "cache-v1", resp.Metadata.CacheTag)
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := top.GetStream(context.Background(), "conditional-stale-lower-key")
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(body) == "stale-value" && meta.CacheTag == "cache-v1" && meta.CachedAt.After(oldCachedAt)
+	}, 2*time.Second, 10*time.Millisecond)
+
+	fetchCount := fetcher.getFetchCount()
+	resp, err = cache.Get(context.Background(), "conditional-stale-lower-key", daramjwee.GetRequest{IfNoneMatch: "cache-v1"}, fetcher)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Equal(t, daramjwee.GetStatusNotModified, resp.Status)
+	require.Nil(t, resp.Body)
+
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, fetchCount, fetcher.getFetchCount())
 }
 
 func TestCache_LowerTierNegativeStaleHitNotModifiedPromotesNegativeToTop(t *testing.T) {
@@ -961,6 +1013,243 @@ func TestCache_DeleteRemovesFromAllOrderedTiers(t *testing.T) {
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestCache_DeleteDoesNotAllowBackgroundPersistToResurrectLowerTier(t *testing.T) {
+	top := newMockStore()
+	lower := newBlockingCloseStore()
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	key := "delete-race-lower-resurrection"
+	fetcher := &mockFetcher{content: "fresh-value", etag: "v1"}
+
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(resp)
+	require.NoError(t, err)
+	require.Equal(t, "fresh-value", string(body))
+	require.NoError(t, resp.Close())
+
+	select {
+	case <-lower.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background persist did not reach lower-tier publish")
+	}
+
+	require.NoError(t, cache.Delete(context.Background(), key))
+	close(lower.unblockClose)
+
+	require.Eventually(t, func() bool {
+		_, _, topErr := top.GetStream(context.Background(), key)
+		_, _, lowerErr := lower.GetStream(context.Background(), key)
+		return errors.Is(topErr, daramjwee.ErrNotFound) && errors.Is(lowerErr, daramjwee.ErrNotFound)
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestCache_DeleteCleanupDoesNotRemoveRecreatedLowerTierValue(t *testing.T) {
+	top := newMockStore()
+	lower := newPostCloseBlockingStore()
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	key := "delete-cleanup-recreate"
+	fetcher := &mockFetcher{content: "fresh-value", etag: "v1"}
+
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+	_, err = io.ReadAll(resp)
+	require.NoError(t, err)
+	require.NoError(t, resp.Close())
+
+	select {
+	case <-lower.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background persist did not reach lower-tier publish")
+	}
+
+	require.NoError(t, cache.Delete(context.Background(), key))
+	close(lower.releaseWrite)
+	close(lower.releaseReturn)
+
+	select {
+	case <-lower.statBlocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup path did not reach lower-tier stat")
+	}
+
+	lower.setData(key, "recreated-value", &daramjwee.Metadata{
+		CacheTag: "v2",
+		CachedAt: time.Now(),
+	})
+	close(lower.blockStat)
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := lower.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(body) == "recreated-value" && meta.CacheTag == "v2"
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestCache_DeleteDoesNotAllowFallbackPromotionAfterNotModifiedRefresh(t *testing.T) {
+	top := newBlockingCloseStore()
+	lower := newMockStore()
+	key := "delete-race-fallback-promotion"
+	lower.setData(key, "stale-value", &daramjwee.Metadata{
+		CacheTag: "v0",
+		CachedAt: time.Now().Add(-time.Hour),
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Millisecond, 0),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
+
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp)
+	require.NoError(t, err)
+	require.Equal(t, "stale-value", string(body))
+	require.NoError(t, resp.Close())
+
+	select {
+	case <-top.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fallback promotion did not reach top-tier publish")
+	}
+
+	require.NoError(t, cache.Delete(context.Background(), key))
+	close(top.unblockClose)
+
+	require.Eventually(t, func() bool {
+		_, _, topErr := top.GetStream(context.Background(), key)
+		return errors.Is(topErr, daramjwee.ErrNotFound)
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestCache_DeleteDoesNotAllowTopMetadataRefreshAfterNotModified(t *testing.T) {
+	tier := newBlockingCloseStore()
+	key := "delete-race-top-refresh"
+	tier.setData(key, "stale-value", &daramjwee.Metadata{
+		CacheTag: "v0",
+		CachedAt: time.Now().Add(-time.Hour),
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(tier),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Millisecond, 0),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
+
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{IfNoneMatch: `"v0"`}, fetcher)
+	require.NoError(t, err)
+	require.Equal(t, daramjwee.GetStatusNotModified, resp.Status)
+
+	select {
+	case <-tier.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("top-tier metadata refresh did not reach publish")
+	}
+
+	require.NoError(t, cache.Delete(context.Background(), key))
+	close(tier.unblockClose)
+
+	require.Eventually(t, func() bool {
+		_, _, err := tier.GetStream(context.Background(), key)
+		return errors.Is(err, daramjwee.ErrNotFound)
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestCache_DeleteDoesNotAllowNegativeRefreshAfterOwnershipCheck(t *testing.T) {
+	tier := newBlockingBeginSetStore()
+	key := "delete-race-negative-refresh-beginset"
+	tier.setData(key, "stale-value", &daramjwee.Metadata{
+		CacheTag: "v0",
+		CachedAt: time.Now().Add(-time.Hour),
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(tier),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Millisecond, 0),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	fetcher := &mockFetcher{err: daramjwee.ErrCacheableNotFound}
+
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp)
+	require.NoError(t, err)
+	require.Equal(t, "stale-value", string(body))
+	require.NoError(t, resp.Close())
+
+	select {
+	case <-tier.beginSetStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("negative refresh did not reach top-tier BeginSet")
+	}
+
+	require.NoError(t, cache.Delete(context.Background(), key))
+	close(tier.unblockBeginSet)
+	select {
+	case <-tier.beginSetDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("negative refresh did not finish BeginSet after delete")
+	}
+
+	require.Eventually(t, func() bool {
+		_, _, err := tier.GetStream(context.Background(), key)
+		return errors.Is(err, daramjwee.ErrNotFound)
+	}, 5*time.Second, 20*time.Millisecond)
+}
+
 type slowSetStore struct {
 	*mockStore
 	delay time.Duration
@@ -988,5 +1277,141 @@ type slowSetSink struct {
 
 func (s *slowSetSink) Close() error {
 	time.Sleep(s.delay)
+	return s.WriteSink.Close()
+}
+
+type blockingCloseStore struct {
+	*mockStore
+	closeStarted chan struct{}
+	unblockClose chan struct{}
+}
+
+type blockingBeginSetStore struct {
+	*mockStore
+	beginSetStarted chan struct{}
+	beginSetDone    chan struct{}
+	unblockBeginSet chan struct{}
+}
+
+type postCloseBlockingStore struct {
+	*mockStore
+	closeStarted  chan struct{}
+	releaseWrite  chan struct{}
+	releaseReturn chan struct{}
+	blockStat     chan struct{}
+	statBlocked   chan struct{}
+}
+
+func newPostCloseBlockingStore() *postCloseBlockingStore {
+	return &postCloseBlockingStore{
+		mockStore:     newMockStore(),
+		closeStarted:  make(chan struct{}, 1),
+		releaseWrite:  make(chan struct{}),
+		releaseReturn: make(chan struct{}),
+		blockStat:     make(chan struct{}),
+		statBlocked:   make(chan struct{}, 1),
+	}
+}
+
+func (s *postCloseBlockingStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	sink, err := s.mockStore.BeginSet(ctx, key, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return &postCloseBlockingSink{
+		WriteSink:     sink,
+		closeStarted:  s.closeStarted,
+		releaseWrite:  s.releaseWrite,
+		releaseReturn: s.releaseReturn,
+	}, nil
+}
+
+func (s *postCloseBlockingStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	if s.blockStat != nil {
+		select {
+		case s.statBlocked <- struct{}{}:
+		default:
+		}
+		<-s.blockStat
+		s.blockStat = nil
+	}
+	return s.mockStore.Stat(ctx, key)
+}
+
+type postCloseBlockingSink struct {
+	daramjwee.WriteSink
+	closeStarted  chan struct{}
+	releaseWrite  chan struct{}
+	releaseReturn chan struct{}
+}
+
+func (s *postCloseBlockingSink) Close() error {
+	select {
+	case s.closeStarted <- struct{}{}:
+	default:
+	}
+	<-s.releaseWrite
+	if err := s.WriteSink.Close(); err != nil {
+		return err
+	}
+	<-s.releaseReturn
+	return nil
+}
+
+func newBlockingCloseStore() *blockingCloseStore {
+	return &blockingCloseStore{
+		mockStore:    newMockStore(),
+		closeStarted: make(chan struct{}, 1),
+		unblockClose: make(chan struct{}),
+	}
+}
+
+func newBlockingBeginSetStore() *blockingBeginSetStore {
+	return &blockingBeginSetStore{
+		mockStore:       newMockStore(),
+		beginSetStarted: make(chan struct{}, 1),
+		beginSetDone:    make(chan struct{}, 1),
+		unblockBeginSet: make(chan struct{}),
+	}
+}
+
+func (s *blockingCloseStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	sink, err := s.mockStore.BeginSet(ctx, key, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return &blockingCloseSink{
+		WriteSink:    sink,
+		closeStarted: s.closeStarted,
+		unblockClose: s.unblockClose,
+	}, nil
+}
+
+func (s *blockingBeginSetStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	select {
+	case s.beginSetStarted <- struct{}{}:
+	default:
+	}
+	<-s.unblockBeginSet
+	sink, err := s.mockStore.BeginSet(ctx, key, metadata)
+	select {
+	case s.beginSetDone <- struct{}{}:
+	default:
+	}
+	return sink, err
+}
+
+type blockingCloseSink struct {
+	daramjwee.WriteSink
+	closeStarted chan struct{}
+	unblockClose chan struct{}
+}
+
+func (s *blockingCloseSink) Close() error {
+	select {
+	case s.closeStarted <- struct{}{}:
+	default:
+	}
+	<-s.unblockClose
 	return s.WriteSink.Close()
 }

@@ -2,7 +2,9 @@ package daramjwee_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -205,6 +207,82 @@ func TestConcurrentMixedOperations(t *testing.T) {
 	}
 }
 
+func TestConcurrentStaleLowerTierHitsDoNotPublishPartialTopOnRefreshFailure(t *testing.T) {
+	top := newMockStore()
+	lower := newMockStore()
+	key := "stale-lower-refresh-failure"
+	lower.setData(key, "stale-value", &daramjwee.Metadata{
+		CacheTag: "v0",
+		CachedAt: time.Now().Add(-time.Hour),
+	})
+
+	cache, err := daramjwee.New(
+		log.NewNopLogger(),
+		daramjwee.WithTiers(top, lower),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Millisecond, 0),
+		daramjwee.WithWorkers(4),
+		daramjwee.WithWorkerQueue(64),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+	defer cache.Close()
+
+	fetcher := &concurrentFailingRefreshFetcher{
+		contentPrefix: []byte("new-"),
+		err:           errors.New("midstream refresh failure"),
+	}
+
+	const numGoroutines = 32
+	var wg sync.WaitGroup
+	readErrors := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+			if err != nil {
+				readErrors <- err
+				return
+			}
+			defer resp.Close()
+
+			body, err := io.ReadAll(resp)
+			if err != nil {
+				readErrors <- err
+				return
+			}
+			if resp.Status != daramjwee.GetStatusOK {
+				readErrors <- fmt.Errorf("unexpected status: %s", resp.Status)
+				return
+			}
+			if string(body) != "stale-value" {
+				readErrors <- fmt.Errorf("unexpected body: %q", string(body))
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(readErrors)
+	for err := range readErrors {
+		t.Error(err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	_, _, err = top.GetStream(context.Background(), key)
+	if !errors.Is(err, daramjwee.ErrNotFound) {
+		t.Fatalf("expected top tier to remain empty after failed refreshes, got %v", err)
+	}
+	if fetcher.getFetchCount() == 0 {
+		t.Fatal("expected at least one background refresh attempt")
+	}
+}
+
 // BenchmarkConcurrentAccess benchmarks concurrent cache operations
 func BenchmarkConcurrentAccess(b *testing.B) {
 	baseCache, err := createTestCacheForRace()
@@ -237,4 +315,28 @@ func BenchmarkConcurrentAccess(b *testing.B) {
 			i++
 		}
 	})
+}
+
+type concurrentFailingRefreshFetcher struct {
+	mu            sync.Mutex
+	fetchCount    int
+	contentPrefix []byte
+	err           error
+}
+
+func (f *concurrentFailingRefreshFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	f.mu.Lock()
+	f.fetchCount++
+	f.mu.Unlock()
+
+	return &daramjwee.FetchResult{
+		Body:     newFailingReadCloser(f.contentPrefix, f.err),
+		Metadata: &daramjwee.Metadata{CacheTag: "v1"},
+	}, nil
+}
+
+func (f *concurrentFailingRefreshFetcher) getFetchCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fetchCount
 }
