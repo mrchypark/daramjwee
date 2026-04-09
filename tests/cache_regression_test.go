@@ -395,6 +395,101 @@ func TestScheduleRefresh_QueuedJobDoesNotOverwriteNewerSet(t *testing.T) {
 	require.Equal(t, "user-v2", meta.CacheTag)
 }
 
+func TestScheduleRefresh_CloseTriggeredTopTierRefreshDoesNotOverwriteNewerSet(t *testing.T) {
+	hot := newMockStore()
+	key := "top-stale-close-refresh-no-clobber"
+	hot.setData(key, "stale-value", &daramjwee.Metadata{
+		CacheTag: "stale-v0",
+		CachedAt: time.Now().Add(-time.Hour),
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Minute, 0),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	fetcher := &mockFetcher{content: "refresh-value", etag: "refresh-v1"}
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+
+	newer, err := cache.Set(context.Background(), key, &daramjwee.Metadata{CacheTag: "user-v2"})
+	require.NoError(t, err)
+	_, err = newer.Write([]byte("user-value"))
+	require.NoError(t, err)
+	require.NoError(t, newer.Close())
+
+	require.NoError(t, resp.Close())
+
+	require.Eventually(t, func() bool { return fetcher.getFetchCount() > 0 }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		reader, meta, err := hot.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		current, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(current) == "user-value" && meta.CacheTag == "user-v2"
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestScheduleRefresh_CloseTriggeredLowerTierRefreshDoesNotOverwriteNewerSet(t *testing.T) {
+	hot := newMockStore()
+	lower := newMockStore()
+	key := "lower-stale-close-refresh-no-clobber"
+	lower.setData(key, "lower-stale-value", &daramjwee.Metadata{
+		CacheTag: "lower-stale-v0",
+		CachedAt: time.Now().Add(-time.Hour),
+	})
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot, lower),
+		daramjwee.WithOpTimeout(2*time.Second),
+		daramjwee.WithFreshness(time.Minute, 0),
+		daramjwee.WithWorkers(1),
+		daramjwee.WithWorkerQueue(4),
+		daramjwee.WithWorkerTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	fetcher := &mockFetcher{content: "refresh-value", etag: "refresh-v1"}
+	resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+
+	newer, err := cache.Set(context.Background(), key, &daramjwee.Metadata{CacheTag: "user-v2"})
+	require.NoError(t, err)
+	_, err = newer.Write([]byte("user-value"))
+	require.NoError(t, err)
+	require.NoError(t, newer.Close())
+
+	require.NoError(t, resp.Close())
+
+	require.Eventually(t, func() bool { return fetcher.getFetchCount() > 0 }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		reader, meta, err := hot.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		current, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(current) == "user-value" && meta.CacheTag == "user-v2"
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
 func TestScheduleRefresh_CloseWindowDeleteKeepsKeyDeleted(t *testing.T) {
 	top := newNotifyingSlowSetStore(150 * time.Millisecond)
 
@@ -532,6 +627,74 @@ func TestCache_FanoutDeleteDuringLowerTierCloseKeepsKeyDeleted(t *testing.T) {
 	_, _, coldErr := cold.GetStream(context.Background(), key)
 	require.ErrorIs(t, topErr, daramjwee.ErrNotFound)
 	require.ErrorIs(t, coldErr, daramjwee.ErrNotFound)
+}
+
+func TestCache_MissFetchDoesNotOverwriteNewerSetWithValueStoreWrapper(t *testing.T) {
+	hot := valueStoreWrapper{inner: newMockStore()}
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	ctx := context.Background()
+	key := "miss-does-not-clobber-value-wrapper"
+	started := make(chan struct{}, 1)
+	blocker := make(chan struct{})
+	fetcher := blockingSuccessFetcher{
+		started:  started,
+		blocker:  blocker,
+		content:  "fetched-value",
+		cacheTag: "origin-v1",
+	}
+
+	type getResult struct {
+		resp *daramjwee.GetResponse
+		err  error
+	}
+	done := make(chan getResult, 1)
+	go func() {
+		resp, err := cache.Get(ctx, key, daramjwee.GetRequest{}, fetcher)
+		done <- getResult{resp: resp, err: err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fetch did not start")
+	}
+
+	newer, err := cache.Set(ctx, key, &daramjwee.Metadata{CacheTag: "user-v2"})
+	require.NoError(t, err)
+	_, err = newer.Write([]byte("user-value"))
+	require.NoError(t, err)
+	require.NoError(t, newer.Close())
+
+	close(blocker)
+
+	result := <-done
+	require.NoError(t, result.err)
+	require.NotNil(t, result.resp)
+	defer result.resp.Close()
+	body, err := io.ReadAll(result.resp)
+	require.NoError(t, err)
+	require.Equal(t, "fetched-value", string(body))
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := hot.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		current, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(current) == "user-value" && meta.CacheTag == "user-v2"
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestCache_DeleteDuringSlowCloseKeepsKeyDeleted(t *testing.T) {
@@ -746,4 +909,24 @@ func drainMockStoreWrites(store *mockStore) {
 			return
 		}
 	}
+}
+
+type valueStoreWrapper struct {
+	inner *mockStore
+}
+
+func (s valueStoreWrapper) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	return s.inner.GetStream(ctx, key)
+}
+
+func (s valueStoreWrapper) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return s.inner.BeginSet(ctx, key, metadata)
+}
+
+func (s valueStoreWrapper) Delete(ctx context.Context, key string) error {
+	return s.inner.Delete(ctx, key)
+}
+
+func (s valueStoreWrapper) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	return s.inner.Stat(ctx, key)
 }

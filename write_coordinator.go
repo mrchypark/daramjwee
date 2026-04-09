@@ -6,7 +6,9 @@ import (
 	"sync"
 )
 
-var errTopWriteInvalidated = errors.New("daramjwee: top-tier write invalidated")
+var ErrTopWriteInvalidated = errors.New("daramjwee: top-tier write invalidated")
+
+var errTopWriteInvalidated = ErrTopWriteInvalidated
 
 type topWriteManager struct {
 	coords sync.Map
@@ -101,11 +103,8 @@ func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 	coord.stateMu.Unlock()
 }
 
-func (c *DaramjweeCache) setStreamToStoreWithTopGeneration(ctx context.Context, store Store, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
-	if !sameStoreInstance(store, c.topWriteStore()) {
-		return store.BeginSet(ctx, key, metadata)
-	}
-
+func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
+	store := c.topWriteStore()
 	coord := c.topWrites.coordinator(key)
 	generation, ok := coord.begin(expectedGeneration)
 	if !ok {

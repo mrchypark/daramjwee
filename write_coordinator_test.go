@@ -22,7 +22,7 @@ func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *te
 	cache.noteTopWriteGeneration("key")
 
 	expectedGeneration := uint64(0)
-	writer, err := cache.setStreamToStoreWithTopGeneration(context.Background(), store, "key", &Metadata{CacheTag: "stale"}, &expectedGeneration)
+	writer, err := cache.setStreamToTopStoreWithGeneration(context.Background(), "key", &Metadata{CacheTag: "stale"}, &expectedGeneration)
 	if !errors.Is(err, errTopWriteInvalidated) {
 		t.Fatalf("expected invalidated error, got writer=%v err=%v", writer, err)
 	}
@@ -43,7 +43,7 @@ func TestSetStreamToStoreWithTopGenerationRestoresGenerationOnBeginSetFailure(t 
 	}
 
 	expectedGeneration := uint64(0)
-	writer, err := cache.setStreamToStoreWithTopGeneration(context.Background(), store, "key", &Metadata{CacheTag: "v1"}, &expectedGeneration)
+	writer, err := cache.setStreamToTopStoreWithGeneration(context.Background(), "key", &Metadata{CacheTag: "v1"}, &expectedGeneration)
 	if writer != nil {
 		t.Fatalf("expected no writer on BeginSet failure, got %T", writer)
 	}

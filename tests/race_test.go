@@ -2,8 +2,8 @@ package daramjwee_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,7 +29,7 @@ func createTestCacheForRace() (daramjwee.Cache, error) {
 }
 
 func isExpectedTopWriteConflict(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "top-tier write invalidated")
+	return errors.Is(err, daramjwee.ErrTopWriteInvalidated)
 }
 
 // TestConcurrentAccess tests the actual production code for race conditions
