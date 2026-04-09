@@ -198,6 +198,9 @@ type FetchUsesContext interface {
 
 // WriteSink is the terminal write contract for cache stores.
 // Close publishes the staged write, and Abort discards it.
+// Implementations used by Store.BeginSet must not call back into Cache methods
+// from Close or Abort because cache tiers may coordinate commit ordering while
+// those terminal methods run.
 type WriteSink interface {
 	io.WriteCloser
 	Abort() error
