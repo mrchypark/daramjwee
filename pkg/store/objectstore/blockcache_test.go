@@ -122,6 +122,67 @@ func TestStore_BlockCacheUsesSegmentPathAndBlockIndexNotLogicalKey(t *testing.T)
 	assert.Equal(t, 2, bucket.rangeCalls())
 }
 
+func TestStore_RemotePackedReadWithoutBlockCacheUsesSingleLogicalRange(t *testing.T) {
+	ctx := context.Background()
+	bucket := &countingRangeBucket{Bucket: objstore.NewInMemBucket()}
+	seedRemotePackedStore(t, ctx, bucket, "cold-packed-key", strings.Repeat("x", 256))
+
+	store := New(bucket, log.NewNopLogger(),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1024),
+		WithPageSize(64),
+	)
+	store.autoFlush = false
+
+	body := readAllStoreKey(t, ctx, store, "cold-packed-key")
+	assert.Equal(t, strings.Repeat("x", 256), body)
+	assert.Equal(t, 1, bucket.rangeCalls())
+}
+
+func TestStore_RemotePackedReadWithoutBlockCacheDoesNotCoalesceConcurrentReaders(t *testing.T) {
+	ctx := context.Background()
+	bucket := &countingRangeBucket{
+		Bucket: objstore.NewInMemBucket(),
+		delay:  25 * time.Millisecond,
+	}
+	seedRemotePackedStore(t, ctx, bucket, "cold-packed-concurrent", strings.Repeat("z", 256))
+
+	store := New(bucket, log.NewNopLogger(),
+		WithDir(t.TempDir()),
+		WithPackThreshold(1024),
+		WithPageSize(64),
+	)
+	store.autoFlush = false
+
+	const readers = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, readers)
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			stream, _, err := store.GetStream(ctx, "cold-packed-concurrent")
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer stream.Close()
+			_, err = io.ReadAll(stream)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	assert.Greater(t, bucket.rangeCalls(), 1)
+}
+
 func seedRemotePackedStore(t *testing.T, ctx context.Context, bucket objstore.Bucket, key, body string) {
 	t.Helper()
 	store := New(bucket, log.NewNopLogger(),

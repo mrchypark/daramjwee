@@ -20,6 +20,7 @@ type mockStore struct {
 	data           map[string][]byte
 	meta           map[string]*daramjwee.Metadata
 	err            error
+	deleteErr      error
 	writeCompleted chan string
 	forceSetError  bool // forceSetError, if true, makes BeginSet return an error.
 }
@@ -91,6 +92,9 @@ func (s *mockStore) BeginSet(ctx context.Context, key string, metadata *daramjwe
 
 // Delete simulates deleting an entry from the store.
 func (s *mockStore) Delete(ctx context.Context, key string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.data, key)

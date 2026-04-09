@@ -2,6 +2,7 @@ package objectstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,6 +18,34 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
 )
+
+func TestReadUpToSize_ReturnsFullBufferOnExactRead(t *testing.T) {
+	got, err := readUpToSize(strings.NewReader("abcd"), 4)
+	require.NoError(t, err)
+	require.Equal(t, []byte("abcd"), got)
+}
+
+func TestReadUpToSize_TrimsShortRead(t *testing.T) {
+	got, err := readUpToSize(strings.NewReader("ab"), 4)
+	require.NoError(t, err)
+	require.Equal(t, []byte("ab"), got)
+}
+
+func TestReadUpToSize_PropagatesReadError(t *testing.T) {
+	boom := errors.New("boom")
+	reader := io.MultiReader(strings.NewReader("ab"), errReader{err: boom})
+	got, err := readUpToSize(reader, 4)
+	require.ErrorIs(t, err, boom)
+	require.Nil(t, got)
+}
+
+type errReader struct {
+	err error
+}
+
+func (r errReader) Read(_ []byte) (int, error) {
+	return 0, r.err
+}
 
 func TestStore_GetStream_LocalPublishedHitReadsFromLocalSegment(t *testing.T) {
 	ctx := context.Background()
