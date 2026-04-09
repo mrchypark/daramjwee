@@ -76,12 +76,21 @@ func (s *Store) loadRemoteEntry(ctx context.Context, key string) (*checkpointEnt
 func (s *Store) openRemoteEntry(ctx context.Context, entry checkpointEntry) (io.ReadCloser, error) {
 	if s.isPackedRemotePath(entry.SegmentPath) {
 		if s.blockCache == nil {
+			if reader, ok, err := s.packedWholeCache.open(entry); err != nil {
+				return nil, err
+			} else if ok {
+				return reader, nil
+			}
+
 			reader, err := s.bucket.GetRange(ctx, entry.SegmentPath, entry.Offset, entry.Length)
 			if err != nil {
 				if s.bucket.IsObjNotFoundErr(err) {
 					return nil, daramjwee.ErrNotFound
 				}
 				return nil, err
+			}
+			if s.packedWholeCache != nil {
+				return s.packedWholeCache.wrapRemoteReader(entry, reader)
 			}
 			return reader, nil
 		}

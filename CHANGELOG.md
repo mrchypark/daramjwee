@@ -20,6 +20,7 @@
 *   **Background jobs now preserve request-scoped values without inheriting request cancellation**: refresh and persist work keep caller context values available to context-sensitive stores and fetchers, while still running under worker-managed deadlines.
 *   **Invalidated fanout cleanup regained best-effort semantics**: destination-tier cleanup after generation invalidation now runs under a fresh timeout context again, so worker shutdown or timeout races do not leave stale persisted objects behind.
 *   **Constructor and helper regressions are pinned by direct tests**: response/cancel wrappers, lower-tier promotion cleanup, objectstore init failures, and internal block/page/segment caches now have explicit regression coverage.
+*   **Objectstore can now reuse optional local whole-object files for packed remote reads**: when block cache is disabled, packed remote reads can populate a bounded ephemeral local file cache that only publishes after a full successful read and close.
 
 ### ✅ Verification
 

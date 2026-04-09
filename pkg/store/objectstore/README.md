@@ -140,6 +140,23 @@ Recommended starting values:
 - `32 MiB` when `FileStore` is already in front
 - `64 MiB ~ 128 MiB` when `objectstore` serves more remote hits directly
 
+### `WithPackedWholeObjectCache(capacityBytes int64)`
+
+Enables an optional local whole-object file cache for packed remote reads when block cache is disabled.
+
+Properties:
+
+- first read still streams directly from remote storage
+- the local cache entry is published only after the reader reaches EOF and `Close()` succeeds
+- partial reads or interrupted materialization are discarded
+- cached files are local-process best-effort reuse, not durable published entries
+- restart persistence is not guaranteed; old cache files are cleaned up on next initialization
+
+Recommended starting values:
+
+- `32 MiB ~ 128 MiB` when block cache is intentionally disabled but packed remote reuse still matters
+- keep this disabled when `FileStore` already provides the desired whole-object local tier
+
 ### `WithCheckpointCache(capacityBytes int64)`
 
 Enables an in-process cache for decoded shard checkpoints such as `checkpoints/<shard>/latest.json`.

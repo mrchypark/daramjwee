@@ -58,6 +58,23 @@ func BenchmarkStore_ReadRemotePackedWarmConcurrentSameKey(b *testing.B) {
 	benchmarkReadAllParallel(b, store, "bench-key")
 }
 
+func BenchmarkStore_ReadRemotePackedWholeObjectCacheCold(b *testing.B) {
+	store := benchmarkRemotePackedStoreWithWholeObjectCache(b)
+	benchmarkReadAll(b, store, "bench-key")
+}
+
+func BenchmarkStore_ReadRemotePackedWholeObjectCacheWarm(b *testing.B) {
+	store := benchmarkRemotePackedStoreWithWholeObjectCache(b)
+	warmWholeObjectCache(b, store)
+	benchmarkReadAll(b, store, "bench-key")
+}
+
+func BenchmarkStore_ReadRemotePackedWholeObjectCacheWarmConcurrentSameKey(b *testing.B) {
+	store := benchmarkRemotePackedStoreWithWholeObjectCache(b)
+	warmWholeObjectCache(b, store)
+	benchmarkReadAllParallel(b, store, "bench-key")
+}
+
 func benchmarkLocalPublishedStore(b *testing.B) *Store {
 	store := New(objstore.NewInMemBucket(), log.NewNopLogger(),
 		WithPackThreshold(1<<20),
@@ -116,6 +133,52 @@ func benchmarkRemotePackedStore(b *testing.B, enableCache bool) *Store {
 	remote := New(bucket, log.NewNopLogger(), remoteOpts...)
 	remote.autoFlush = false
 	return remote
+}
+
+func benchmarkRemotePackedStoreWithWholeObjectCache(b *testing.B) *Store {
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(),
+		WithPackThreshold(1<<20),
+		WithPageSize(32<<10),
+		WithDir(b.TempDir()),
+	)
+	store.autoFlush = false
+	writer, err := store.BeginSet(context.Background(), "bench-key", &daramjwee.Metadata{CacheTag: "bench"})
+	if err != nil {
+		panic(err)
+	}
+	if _, err := writer.Write(bytes.Repeat([]byte("0123456789abcdef"), 1<<16)); err != nil {
+		panic(err)
+	}
+	if err := writer.Close(); err != nil {
+		panic(err)
+	}
+	if err := store.flushPending(context.Background()); err != nil {
+		panic(err)
+	}
+
+	remote := New(bucket, log.NewNopLogger(),
+		WithPackThreshold(1<<20),
+		WithPageSize(32<<10),
+		WithDir(b.TempDir()),
+		WithPackedWholeObjectCache(8<<20),
+	)
+	remote.autoFlush = false
+	return remote
+}
+
+func warmWholeObjectCache(b *testing.B, store *Store) {
+	b.Helper()
+	stream, _, err := store.GetStream(context.Background(), "bench-key")
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, stream); err != nil {
+		b.Fatal(err)
+	}
+	if err := stream.Close(); err != nil {
+		b.Fatal(err)
+	}
 }
 
 func benchmarkReadAll(b *testing.B, store *Store, key string) {

@@ -282,6 +282,9 @@ Recommended starting points:
   - Local ingest/catalog workspace for the backend.
 - `WithBlockCache(...)`
   - In-process payload block cache for packed remote reads.
+- `WithPackedWholeObjectCache(...)`
+  - Optional local file cache for packed remote reads when block cache is disabled.
+  - Publishes only after a full successful read+close and does not become a persistent local tier.
 - `WithCheckpointCache(...)`
   - In-process metadata cache for decoded shard checkpoints such as `latest.json`.
 - `WithCheckpointTTL(...)`

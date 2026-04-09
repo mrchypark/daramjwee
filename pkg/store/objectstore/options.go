@@ -5,16 +5,17 @@ import "time"
 type Option func(*config)
 
 type config struct {
-	dir                  string
-	prefix               string
-	gcGrace              time.Duration
-	packThreshold        int64
-	pagedThreshold       int64
-	pageSize             int64
-	pageCacheBytes       int64
-	blockCacheBytes      int64
-	checkpointCacheBytes int64
-	checkpointTTL        time.Duration
+	dir                   string
+	prefix                string
+	gcGrace               time.Duration
+	packThreshold         int64
+	pagedThreshold        int64
+	pageSize              int64
+	pageCacheBytes        int64
+	blockCacheBytes       int64
+	packedWholeCacheBytes int64
+	checkpointCacheBytes  int64
+	checkpointTTL         time.Duration
 }
 
 // WithDir configures the local objectstore working directory used for
@@ -77,6 +78,15 @@ func WithPageCache(capacityBytes int64) Option {
 func WithBlockCache(capacityBytes int64) Option {
 	return func(cfg *config) {
 		cfg.blockCacheBytes = capacityBytes
+	}
+}
+
+// WithPackedWholeObjectCache enables an optional local whole-object file cache
+// for packed remote reads when block cache is disabled. A non-positive capacity
+// disables the cache.
+func WithPackedWholeObjectCache(capacityBytes int64) Option {
+	return func(cfg *config) {
+		cfg.packedWholeCacheBytes = capacityBytes
 	}
 }
 

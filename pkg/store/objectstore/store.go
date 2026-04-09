@@ -60,6 +60,7 @@ type Store struct {
 	pageSize          int64
 	blockCache        *blockcache.Cache
 	pageCache         *pagecache.Cache
+	packedWholeCache  *packedWholeObjectCache
 	checkpointCache   *checkpointCache
 	catalog           *internalcatalog.Catalog
 	lockManager       *keyLockManager
@@ -136,6 +137,9 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		openSegmentWriter: func(root, shard, segmentID string) (segmentWriter, error) {
 			return segment.Open(root, shard, segmentID)
 		},
+	}
+	if store.initErr == nil {
+		store.packedWholeCache, store.initErr = newPackedWholeObjectCache(filepath.Join(dataDir, "readcache"), cfg.packedWholeCacheBytes, logger)
 	}
 	store.checkpointCache = newCheckpointCache(cfg.checkpointCacheBytes, cfg.checkpointTTL, func() time.Time {
 		return store.now()
