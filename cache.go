@@ -114,6 +114,9 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	}
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.noteTopWriteGeneration(key)
 
 	var firstErr error

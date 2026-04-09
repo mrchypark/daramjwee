@@ -217,6 +217,39 @@ func TestCache_DeleteInvalidatesOpenWriter(t *testing.T) {
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestCache_CanceledDeleteDoesNotInvalidateOpenWriter(t *testing.T) {
+	hot := newMockStore()
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	key := "canceled-delete-keeps-open-writer"
+	sink, err := cache.Set(context.Background(), key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = sink.Write([]byte("new-value"))
+	require.NoError(t, err)
+
+	deleteCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = cache.Delete(deleteCtx, key)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, sink.Close())
+
+	reader, meta, err := hot.GetStream(context.Background(), key)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, "new-value", string(body))
+	require.Equal(t, "v1", meta.CacheTag)
+}
+
 func TestScheduleRefresh_DoesNotOverwriteNewerTopEntry(t *testing.T) {
 	hot := newMockStore()
 
