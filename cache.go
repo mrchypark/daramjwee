@@ -890,6 +890,8 @@ type topWriteState struct {
 	lastTouched atomic.Int64
 }
 
+var testHookAfterTopWriteReservationValidation func()
+
 func (c *DaramjweeCache) topWriteStateForKey(key string) *topWriteState {
 	if state, ok := c.topWriteStates.Load(key); ok {
 		typed := state.(*topWriteState)
@@ -919,15 +921,21 @@ func (c *DaramjweeCache) currentTopWriteGeneration(key string) uint64 {
 func (c *DaramjweeCache) beginTopWriteReservation(key string, expectedGeneration *uint64) (*topWriteState, uint64, bool) {
 	state := c.topWriteStateForKey(key)
 	state.beginMu.Lock()
-	currentGeneration := state.generation.Load()
-	if expectedGeneration != nil && currentGeneration != *expectedGeneration {
-		state.beginMu.Unlock()
-		return nil, 0, false
+	for {
+		currentGeneration := state.generation.Load()
+		if expectedGeneration != nil && currentGeneration != *expectedGeneration {
+			state.beginMu.Unlock()
+			return nil, 0, false
+		}
+		if testHookAfterTopWriteReservationValidation != nil {
+			testHookAfterTopWriteReservationValidation()
+		}
+		generation := currentGeneration + 1
+		if state.generation.CompareAndSwap(currentGeneration, generation) {
+			state.lastTouched.Store(time.Now().UnixNano())
+			return state, generation, true
+		}
 	}
-	generation := currentGeneration + 1
-	state.generation.Store(generation)
-	state.lastTouched.Store(time.Now().UnixNano())
-	return state, generation, true
 }
 
 func (c *DaramjweeCache) finishTopWriteReservation(state *topWriteState) {

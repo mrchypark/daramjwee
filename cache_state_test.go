@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
@@ -145,6 +146,63 @@ func TestCancelTopWriteReservationDoesNotUndoConcurrentInvalidation(t *testing.T
 
 	if got := cache.currentTopWriteGeneration("key"); got != generation+1 {
 		t.Fatalf("expected concurrent invalidation to survive rollback, got %d", got)
+	}
+}
+
+func TestBeginTopWriteReservationRejectsStaleWriterAfterConcurrentInvalidation(t *testing.T) {
+	cache := &DaramjweeCache{
+		OpTimeout:     time.Second,
+		WorkerTimeout: time.Second,
+		CloseTimeout:  time.Second,
+	}
+
+	expectedGeneration := uint64(0)
+	var once sync.Once
+	testHookAfterTopWriteReservationValidation = func() {
+		once.Do(func() {
+			cache.noteTopWriteGeneration("key")
+		})
+	}
+	defer func() {
+		testHookAfterTopWriteReservationValidation = nil
+	}()
+
+	state, generation, ok := cache.beginTopWriteReservation("key", &expectedGeneration)
+	if ok || state != nil || generation != 0 {
+		t.Fatalf("expected stale reservation to be rejected, got state=%v generation=%d ok=%v", state, generation, ok)
+	}
+	if got := cache.currentTopWriteGeneration("key"); got != 1 {
+		t.Fatalf("expected delete invalidation generation to survive, got %d", got)
+	}
+}
+
+func TestBeginTopWriteReservationRetriesPublicWriterAfterConcurrentInvalidation(t *testing.T) {
+	cache := &DaramjweeCache{
+		OpTimeout:     time.Second,
+		WorkerTimeout: time.Second,
+		CloseTimeout:  time.Second,
+	}
+
+	var once sync.Once
+	testHookAfterTopWriteReservationValidation = func() {
+		once.Do(func() {
+			cache.noteTopWriteGeneration("key")
+		})
+	}
+	defer func() {
+		testHookAfterTopWriteReservationValidation = nil
+	}()
+
+	state, generation, ok := cache.beginTopWriteReservation("key", nil)
+	if !ok || state == nil {
+		t.Fatalf("expected public writer reservation to retry and succeed, got state=%v generation=%d ok=%v", state, generation, ok)
+	}
+	cache.finishTopWriteReservation(state)
+	if generation != 2 {
+		t.Fatalf("expected reservation to advance past concurrent invalidation, got %d", generation)
+	}
+	if got := cache.currentTopWriteGeneration("key"); got != 2 {
+		t.Fatalf("expected current generation to include invalidation and reservation, got %d", got)
 	}
 }
 
