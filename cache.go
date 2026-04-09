@@ -114,10 +114,7 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	}
 	ctx, cancel := c.newCtxWithTimeout(ctx)
 	defer cancel()
-	coord := c.topWrites.coordinator(key)
-	coord.stateMu.Lock()
-	coord.generation++
-	coord.stateMu.Unlock()
+	c.noteTopWriteGeneration(key)
 
 	var firstErr error
 
@@ -626,11 +623,6 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 	return newGetResponse(GetStatusOK, streamThrough(result.Body, writer, cancel, func() {
 		c.schedulePersistFromCurrentTop(key, c.persistDestinationsAfterTop()...)
 	}), result.Metadata), nil
-}
-
-// handleNegativeCache processes the logic for storing a negative cache entry.
-func (c *DaramjweeCache) handleNegativeCache(requestCtx, setupCtx context.Context, key string, cancel context.CancelFunc) (*GetResponse, error) {
-	return c.handleNegativeCacheWithGeneration(requestCtx, setupCtx, key, cancel, nil)
 }
 
 func (c *DaramjweeCache) handleNegativeCacheWithGeneration(requestCtx, setupCtx context.Context, key string, cancel context.CancelFunc, expectedGeneration *uint64) (*GetResponse, error) {

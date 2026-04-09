@@ -697,6 +697,72 @@ func TestCache_MissFetchDoesNotOverwriteNewerSetWithValueStoreWrapper(t *testing
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
+func TestCache_MissDuringInFlightSetDoesNotOverwriteCommittedSet(t *testing.T) {
+	top := newMockStore()
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(top),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	key := "miss-during-inflight-set"
+	sink, err := cache.Set(context.Background(), key, &daramjwee.Metadata{CacheTag: "user-v1"})
+	require.NoError(t, err)
+	_, err = sink.Write([]byte("user-value"))
+	require.NoError(t, err)
+
+	started := make(chan struct{}, 1)
+	blocker := make(chan struct{})
+	fetcher := &controlledFetcher{
+		started:  started,
+		blocker:  blocker,
+		content:  "origin-value",
+		cacheTag: "origin-v1",
+	}
+	type getResult struct {
+		resp *daramjwee.GetResponse
+		err  error
+	}
+	done := make(chan getResult, 1)
+	go func() {
+		resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, fetcher)
+		done <- getResult{resp: resp, err: err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("miss fetch did not start")
+	}
+
+	require.NoError(t, sink.Close())
+	close(blocker)
+
+	result := <-done
+	require.NoError(t, result.err)
+	require.NotNil(t, result.resp)
+	body, err := io.ReadAll(result.resp)
+	require.NoError(t, err)
+	require.Equal(t, "origin-value", string(body))
+	require.NoError(t, result.resp.Close())
+
+	require.Eventually(t, func() bool {
+		reader, meta, err := top.GetStream(context.Background(), key)
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		current, err := io.ReadAll(reader)
+		if err != nil {
+			return false
+		}
+		return string(current) == "user-value" && meta.CacheTag == "user-v1"
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
 func TestCache_DeleteDuringSlowCloseKeepsKeyDeleted(t *testing.T) {
 	top := newNotifyingSlowSetStore(150 * time.Millisecond)
 
@@ -738,6 +804,13 @@ type blockingFetcher struct {
 	blocker chan struct{}
 }
 
+type controlledFetcher struct {
+	started  chan struct{}
+	blocker  chan struct{}
+	content  string
+	cacheTag string
+}
+
 type blockingSuccessFetcher struct {
 	started  chan struct{}
 	blocker  chan struct{}
@@ -774,6 +847,23 @@ func (f blockingFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metad
 }
 
 func (f blockingSuccessFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-f.blocker:
+		return &daramjwee.FetchResult{
+			Body:     io.NopCloser(strings.NewReader(f.content)),
+			Metadata: &daramjwee.Metadata{CacheTag: f.cacheTag},
+		}, nil
+	}
+}
+
+func (f *controlledFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	select {
 	case f.started <- struct{}{}:
 	default:

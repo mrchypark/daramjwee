@@ -15,9 +15,9 @@ type topWriteManager struct {
 }
 
 type writeCoordinator struct {
-	writeMu    sync.Mutex
-	stateMu    sync.Mutex
-	generation uint64
+	writeMu             sync.Mutex
+	stateMu             sync.Mutex
+	committedGeneration uint64
 }
 
 type coordinatedTopWriteSink struct {
@@ -64,31 +64,26 @@ func (m *topWriteManager) currentGeneration(key string) uint64 {
 func (c *writeCoordinator) current() uint64 {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	return c.generation
+	return c.committedGeneration
 }
 
-// begin serializes same-key top writes while reserving a generation that lets
-// concurrent deletes and stale conditional writers invalidate later commit.
+// begin serializes same-key top writes and snapshots the committed generation
+// visible to readers. Successful publish advances the committed generation only
+// after the underlying sink has been closed.
 func (c *writeCoordinator) begin(expected *uint64) (uint64, bool) {
 	c.writeMu.Lock()
 	c.stateMu.Lock()
-	if expected != nil && c.generation != *expected {
+	if expected != nil && c.committedGeneration != *expected {
 		c.stateMu.Unlock()
 		c.writeMu.Unlock()
 		return 0, false
 	}
-	c.generation++
-	generation := c.generation
+	generation := c.committedGeneration
 	c.stateMu.Unlock()
 	return generation, true
 }
 
-func (c *writeCoordinator) rollbackAndUnlock(reserved uint64) {
-	c.stateMu.Lock()
-	if c.generation == reserved {
-		c.generation--
-	}
-	c.stateMu.Unlock()
+func (c *writeCoordinator) rollbackAndUnlock(_ uint64) {
 	c.writeMu.Unlock()
 }
 
@@ -99,7 +94,7 @@ func (c *DaramjweeCache) currentTopWriteGeneration(key string) uint64 {
 func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 	coord := c.topWrites.coordinator(key)
 	coord.stateMu.Lock()
-	coord.generation++
+	coord.committedGeneration++
 	coord.stateMu.Unlock()
 }
 
@@ -130,7 +125,7 @@ func (s *coordinatedTopWriteSink) Close() error {
 		s.coord.stateMu.Lock()
 		defer s.coord.stateMu.Unlock()
 
-		if s.coord.generation != s.generation {
+		if s.coord.committedGeneration != s.generation {
 			abortErr := s.WriteSink.Abort()
 			s.err = errTopWriteInvalidated
 			if abortErr != nil {
@@ -140,6 +135,9 @@ func (s *coordinatedTopWriteSink) Close() error {
 		}
 
 		s.err = s.WriteSink.Close()
+		if s.err == nil {
+			s.coord.committedGeneration++
+		}
 	})
 	return s.err
 }
@@ -165,7 +163,7 @@ func (s *conditionalGenerationWriteSink) Close() error {
 		s.coord.stateMu.Lock()
 		defer s.coord.stateMu.Unlock()
 
-		if s.coord.generation != s.generation {
+		if s.coord.committedGeneration != s.generation {
 			abortErr := s.WriteSink.Abort()
 			s.err = errTopWriteInvalidated
 			if abortErr != nil {
