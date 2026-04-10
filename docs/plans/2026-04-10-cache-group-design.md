@@ -175,9 +175,9 @@ For group-attached caches, `WithCloseTimeout(...)` is a per-cache quiescence tim
 
 Move shared runtime knobs to group configuration:
 
-- `WithWorkers(...)`
-- `WithWorkerTimeout(...)`
-- `WithWorkerQueueDefault(...)`
+- `WithGroupWorkers(...)`
+- `WithGroupWorkerTimeout(...)`
+- `WithGroupWorkerQueueDefault(...)`
 - `WithGroupCloseTimeout(...)`
 
 If `WithQueueLimit(...)` is omitted for a cache, the group default applies.
@@ -212,7 +212,7 @@ type CacheRuntimeConfig struct {
 type backgroundRuntime interface {
 	Register(cacheID string, cfg CacheRuntimeConfig) error
 	Submit(cacheID string, kind JobKind, job worker.Job) bool
-	Unregister(cacheID string)
+	CloseCache(cacheID string, timeout time.Duration) error
 	Shutdown(timeout time.Duration) error
 }
 ```
@@ -221,7 +221,7 @@ type backgroundRuntime interface {
 
 - register itself with a cache ID and runtime config
 - submit background jobs with its cache ID
-- unregister on close
+- close its own runtime handle on close
 
 The runtime should not need to know tier details or fetch semantics.
 
