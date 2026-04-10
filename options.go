@@ -28,6 +28,8 @@ type Config struct {
 	Workers        int
 	WorkerQueue    int
 	WorkerTimeout  time.Duration
+	Weight         int
+	QueueLimit     int
 
 	OpTimeout    time.Duration
 	CloseTimeout time.Duration
@@ -99,6 +101,28 @@ func WithWorkerTimeout(timeout time.Duration) Option {
 			return &ConfigError{"worker job timeout must be positive"}
 		}
 		cfg.WorkerTimeout = timeout
+		return nil
+	}
+}
+
+// WithWeight sets the relative dequeue weight for a cache attached to a shared group runtime.
+func WithWeight(weight int) Option {
+	return func(cfg *Config) error {
+		if weight <= 0 {
+			return &ConfigError{"cache weight must be positive"}
+		}
+		cfg.Weight = weight
+		return nil
+	}
+}
+
+// WithQueueLimit sets the bounded queue capacity for a cache attached to a shared group runtime.
+func WithQueueLimit(limit int) Option {
+	return func(cfg *Config) error {
+		if limit <= 0 {
+			return &ConfigError{"cache queue limit must be positive"}
+		}
+		cfg.QueueLimit = limit
 		return nil
 	}
 }

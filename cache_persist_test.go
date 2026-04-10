@@ -140,7 +140,8 @@ func TestSchedulePersistFromTop_InvalidationCleanupUsesFreshContext(t *testing.T
 
 	cache := &DaramjweeCache{
 		tiers:        []Store{src},
-		worker:       workerManager,
+		runtime:      newStandaloneRuntime(workerManager),
+		cacheID:      "persist-cleanup",
 		logger:       log.NewNopLogger(),
 		opTimeout:    time.Second,
 		closeTimeout: time.Second,

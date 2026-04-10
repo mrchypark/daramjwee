@@ -281,57 +281,125 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		logger = log.NewNopLogger()
 	}
 
+	cfg, err := buildCacheConfig(cacheConstructionStandalone, nil, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	manager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.Workers, cfg.WorkerQueue, cfg.WorkerTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	runtime := newStandaloneRuntime(manager)
+	cacheID := "standalone"
+	return newCacheFromConfig(logger, runtime, cacheID, cfg)
+}
+
+func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ...Option) (Config, error) {
 	cfg := Config{
-		WorkerStrategy:    "pool",
 		OpTimeout:         30 * time.Second,
-		Workers:           1,
-		WorkerQueue:       500,
-		WorkerTimeout:     30 * time.Second,
-		CloseTimeout:      30 * time.Second,
 		PositiveFreshness: 0,
 		NegativeFreshness: 0,
 	}
 
 	for _, opt := range opts {
 		if err := opt(&cfg); err != nil {
-			return nil, err
+			return Config{}, err
+		}
+	}
+
+	switch mode {
+	case cacheConstructionStandalone:
+		if cfg.Weight > 0 || cfg.QueueLimit > 0 {
+			return Config{}, &ConfigError{"group-attached cache option cannot be used with New"}
+		}
+		if cfg.WorkerStrategy == "" {
+			cfg.WorkerStrategy = "pool"
+		}
+		if cfg.Workers == 0 {
+			cfg.Workers = 1
+		}
+		if cfg.WorkerQueue == 0 {
+			cfg.WorkerQueue = 500
+		}
+		if cfg.WorkerTimeout == 0 {
+			cfg.WorkerTimeout = 30 * time.Second
+		}
+		if cfg.CloseTimeout == 0 {
+			cfg.CloseTimeout = 30 * time.Second
+		}
+	case cacheConstructionGroup:
+		if groupCfg != nil {
+			if cfg.WorkerStrategy != "" {
+				return Config{}, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
+			}
+			if cfg.Workers != 0 {
+				return Config{}, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
+			}
+			if cfg.WorkerQueue != 0 {
+				return Config{}, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
+			}
+			if cfg.WorkerTimeout != 0 {
+				return Config{}, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
+			}
+			if cfg.Workers == 0 {
+				cfg.Workers = groupCfg.Workers
+			}
+			if cfg.WorkerQueue == 0 {
+				cfg.WorkerQueue = groupCfg.WorkerQueueDefault
+			}
+			if cfg.WorkerTimeout == 0 {
+				cfg.WorkerTimeout = groupCfg.WorkerTimeout
+			}
+			if cfg.QueueLimit == 0 {
+				cfg.QueueLimit = groupCfg.WorkerQueueDefault
+			}
+		}
+		if cfg.CloseTimeout == 0 {
+			cfg.CloseTimeout = 30 * time.Second
+		}
+		if cfg.OpTimeout == 0 {
+			cfg.OpTimeout = 30 * time.Second
 		}
 	}
 
 	if len(cfg.Tiers) == 0 {
-		return nil, &ConfigError{"at least one tier is required"}
+		return Config{}, &ConfigError{"at least one tier is required"}
 	}
 
 	seen := make([]Store, 0, len(cfg.Tiers))
 	for idx, tier := range cfg.Tiers {
 		if isNilStore(tier) {
-			return nil, &ConfigError{"tier cannot be nil"}
+			return Config{}, &ConfigError{"tier cannot be nil"}
 		}
 		if containsSameStore(seen, tier) {
-			return nil, &ConfigError{"duplicate tier store instance"}
+			return Config{}, &ConfigError{"duplicate tier store instance"}
 		}
 		if validator, ok := tier.(TierValidator); ok {
 			if err := validator.ValidateTier(idx); err != nil {
-				return nil, &ConfigError{fmt.Sprintf("tier %d %s", idx, err.Error())}
+				return Config{}, &ConfigError{fmt.Sprintf("tier %d %s", idx, err.Error())}
 			}
 		}
 		seen = append(seen, tier)
 	}
 	for idx := range cfg.TierFreshnessOverrides {
 		if idx < 0 || idx >= len(cfg.Tiers) {
-			return nil, &ConfigError{fmt.Sprintf("tier freshness override index %d is out of range", idx)}
+			return Config{}, &ConfigError{fmt.Sprintf("tier freshness override index %d is out of range", idx)}
 		}
 	}
 
-	workerManager, err := worker.NewManager(cfg.WorkerStrategy, logger, cfg.Workers, cfg.WorkerQueue, cfg.WorkerTimeout)
-	if err != nil {
-		return nil, err
-	}
+	return cfg, nil
+}
 
-	c := &DaramjweeCache{
+func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID string, cfg Config) (Cache, error) {
+	cache := &DaramjweeCache{
 		logger:                 logger,
+		runtime:                runtime,
+		cacheID:                cacheID,
 		tiers:                  append([]Store(nil), cfg.Tiers...),
-		worker:                 workerManager,
+		runtimeWeight:          cfg.Weight,
+		runtimeQueueLimit:      cfg.QueueLimit,
 		opTimeout:              cfg.OpTimeout,
 		closeTimeout:           cfg.CloseTimeout,
 		positiveFreshness:      cfg.PositiveFreshness,
@@ -340,8 +408,21 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		loggingDisabled:        isNoopLogger(logger),
 	}
 
-	level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", c.opTimeout)
-	return c, nil
+	if runtime != nil {
+		if err := runtime.Register(cacheID, CacheRuntimeConfig{Weight: maxInt(cfg.Weight, 1), QueueLimit: maxInt(cfg.QueueLimit, 1)}); err != nil {
+			return nil, err
+		}
+	}
+
+	level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", cache.opTimeout)
+	return cache, nil
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func containsSameStore(stores []Store, candidate Store) bool {

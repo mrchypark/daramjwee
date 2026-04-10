@@ -3,11 +3,10 @@ package daramjwee
 import (
 	"context"
 	"io"
-	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/mrchypark/daramjwee/internal/worker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,6 +69,29 @@ func (s comparableValueStore) Delete(ctx context.Context, key string) error {
 
 func (s comparableValueStore) Stat(ctx context.Context, key string) (*Metadata, error) {
 	return nil, ErrNotFound
+}
+
+type optionsTestNoopFetcher struct{}
+
+func (optionsTestNoopFetcher) Fetch(context.Context, *Metadata) (*FetchResult, error) {
+	return &FetchResult{
+		Body:     io.NopCloser(strings.NewReader("noop")),
+		Metadata: &Metadata{CacheTag: "noop"},
+	}, nil
+}
+
+type optionsTestBlockingFetcher struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f optionsTestBlockingFetcher) Fetch(context.Context, *Metadata) (*FetchResult, error) {
+	close(f.started)
+	<-f.release
+	return &FetchResult{
+		Body:     io.NopCloser(strings.NewReader("block")),
+		Metadata: &Metadata{CacheTag: "block"},
+	}, nil
 }
 
 func TestNew_OptionValidation(t *testing.T) {
@@ -169,6 +191,24 @@ func TestNew_OptionValidation(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			name: "failure with group-attached cache weight",
+			options: []Option{
+				WithTiers(regularA),
+				WithWeight(2),
+			},
+			expectErr:   true,
+			expectedMsg: "group-attached cache option",
+		},
+		{
+			name: "failure with group-attached cache queue limit",
+			options: []Option{
+				WithTiers(regularA),
+				WithQueueLimit(8),
+			},
+			expectErr:   true,
+			expectedMsg: "group-attached cache option",
+		},
+		{
 			name: "failure with empty worker strategy",
 			options: []Option{
 				WithTiers(regularA),
@@ -241,6 +281,145 @@ func TestNew_OptionValidation(t *testing.T) {
 	}
 }
 
+func TestNewGroup_OptionValidation(t *testing.T) {
+	group, err := NewGroup(nil,
+		WithGroupWorkers(2),
+		WithGroupWorkerTimeout(5*time.Second),
+		WithGroupWorkerQueueDefault(8),
+		WithGroupCloseTimeout(10*time.Second),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, group)
+
+	typedGroup := group.(*cacheGroup)
+	require.Equal(t, 2, typedGroup.cfg.Workers)
+	require.Equal(t, 5*time.Second, typedGroup.cfg.WorkerTimeout)
+	require.Equal(t, 8, typedGroup.cfg.WorkerQueueDefault)
+	require.Equal(t, 10*time.Second, typedGroup.cfg.CloseTimeout)
+
+	cache, err := group.NewCache("shared", WithTiers(&optionsTestMockStore{id: 1}), WithWeight(3), WithQueueLimit(11))
+	require.NoError(t, err)
+	require.NotNil(t, cache)
+	typedCache := cache.(*DaramjweeCache)
+	require.Equal(t, 3, typedCache.runtimeWeight)
+	require.Equal(t, 11, typedCache.runtimeQueueLimit)
+
+	defaultCache, err := group.NewCache("shared-default", WithTiers(&optionsTestMockStore{id: 2}), WithWeight(2))
+	require.NoError(t, err)
+	require.NotNil(t, defaultCache)
+	require.Equal(t, 8, defaultCache.(*DaramjweeCache).runtimeQueueLimit)
+	cache.Close()
+	defaultCache.Close()
+	group.Close()
+}
+
+func TestNewGroup_RejectsEmptyAndDuplicateNames(t *testing.T) {
+	group, err := NewGroup(nil, WithGroupWorkers(1))
+	require.NoError(t, err)
+	defer group.Close()
+
+	_, err = group.NewCache("", WithTiers(&optionsTestMockStore{id: 1}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cache name cannot be empty")
+
+	_, err = group.NewCache("dup", WithTiers(&optionsTestMockStore{id: 1}))
+	require.NoError(t, err)
+
+	_, err = group.NewCache("dup", WithTiers(&optionsTestMockStore{id: 1}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate cache name")
+}
+
+func TestGroupNewCache_RejectsStandaloneWorkerOptions(t *testing.T) {
+	group, err := NewGroup(nil, WithGroupWorkers(1))
+	require.NoError(t, err)
+	defer group.Close()
+
+	testCases := []struct {
+		name string
+		opt  Option
+		msg  string
+	}{
+		{name: "WithWorkers", opt: WithWorkers(2), msg: "standalone worker option"},
+		{name: "WithWorkerQueue", opt: WithWorkerQueue(8), msg: "standalone worker option"},
+		{name: "WithWorkerTimeout", opt: WithWorkerTimeout(5 * time.Second), msg: "standalone worker option"},
+		{name: "WithWorkerStrategy", opt: WithWorkerStrategy("pool"), msg: "standalone worker option"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := group.NewCache("bad", WithTiers(&optionsTestMockStore{id: 1}), tc.opt)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.msg)
+		})
+	}
+}
+
+func TestNewGroup_CloseClosesCreatedCaches(t *testing.T) {
+	group, err := NewGroup(nil, WithGroupWorkers(1), WithGroupCloseTimeout(2*time.Second))
+	require.NoError(t, err)
+
+	cache, err := group.NewCache("closable", WithTiers(&optionsTestMockStore{id: 1}))
+	require.NoError(t, err)
+
+	group.Close()
+
+	_, err = cache.Get(context.Background(), "k", GetRequest{}, optionsTestNoopFetcher{})
+	require.ErrorIs(t, err, ErrCacheClosed)
+}
+
+func TestNewGroup_ReusesClosedCacheName(t *testing.T) {
+	group, err := NewGroup(nil, WithGroupWorkers(1))
+	require.NoError(t, err)
+	defer group.Close()
+
+	first, err := group.NewCache("reusable", WithTiers(&optionsTestMockStore{id: 1}))
+	require.NoError(t, err)
+
+	first.Close()
+
+	second, err := group.NewCache("reusable", WithTiers(&optionsTestMockStore{id: 1}))
+	require.NoError(t, err)
+	defer second.Close()
+}
+
+func TestNewGroup_CloseTimeoutKeepsCacheNameTombstoned(t *testing.T) {
+	group, err := NewGroup(nil, WithGroupWorkers(1), WithGroupCloseTimeout(10*time.Millisecond))
+	require.NoError(t, err)
+
+	cache, err := group.NewCache("tombstone", WithTiers(&optionsTestMockStore{id: 1}), WithCloseTimeout(10*time.Millisecond))
+	require.NoError(t, err)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+		group.Close()
+	})
+
+	require.NoError(t, cache.ScheduleRefresh(context.Background(), "k", optionsTestBlockingFetcher{
+		started: started,
+		release: release,
+	}))
+	<-started
+
+	done := make(chan struct{})
+	go func() {
+		cache.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for cache close to return")
+	}
+
+	_, err = group.NewCache("tombstone", WithTiers(&optionsTestMockStore{id: 1}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate cache name")
+}
+
 func TestOptionOverrides(t *testing.T) {
 	cfg := Config{}
 
@@ -262,23 +441,6 @@ func TestOptionOverrides(t *testing.T) {
 	assert.Equal(t, 20*time.Minute, cfg.TierFreshnessOverrides[1].Negative)
 	assert.Equal(t, 30*time.Minute, cfg.TierFreshnessOverrides[2].Positive)
 	assert.Equal(t, 60*time.Minute, cfg.TierFreshnessOverrides[2].Negative)
-}
-
-func TestNew_WithWorkerStrategyAllUsesAllStrategy(t *testing.T) {
-	cache, err := New(nil,
-		WithTiers(&optionsTestMockStore{id: 1}),
-		WithWorkerStrategy("all"),
-	)
-	require.NoError(t, err)
-	typedCache := cache.(*DaramjweeCache)
-	t.Cleanup(typedCache.Close)
-
-	strategyField := reflect.ValueOf(typedCache.worker).Elem().FieldByName("strategy")
-	require.True(t, strategyField.IsValid())
-	require.False(t, strategyField.IsNil())
-
-	strategyType := strategyField.Elem().Type()
-	assert.Equal(t, reflect.TypeOf((*worker.AllStrategy)(nil)), strategyType)
 }
 
 func TestNew_WithUnknownWorkerStrategyFails(t *testing.T) {

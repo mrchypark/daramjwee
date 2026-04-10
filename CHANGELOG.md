@@ -5,12 +5,16 @@
 ### ⚠️ Breaking Changes & API Updates
 
 *   **`DaramjweeCache` runtime fields are no longer part of the public surface**: the concrete cache type remains exported, but `Tiers`, `Worker`, logger state, timeout fields, and freshness fields are now internal implementation details instead of exported struct fields.
+*   **Cache construction now has a standalone/group split**: `New(...)` creates a self-contained cache with its own background runtime, while `NewGroup(...)` creates a `CacheGroup` whose caches share one bounded background runtime.
+*   **Group and cache runtime options are separated**: group construction uses the `WithGroup...` option surface, while group-attached caches use `WithWeight(...)` and `WithQueueLimit(...)` for per-cache runtime tuning. Standalone caches continue to use `WithWorkers(...)`, `WithWorkerQueue(...)`, `WithWorkerTimeout(...)`, and `WithWorkerStrategy(...)`.
 *   **Unknown worker strategies now fail fast**: `WithWorkerStrategy(...)` accepts only `"pool"` and `"all"`, and invalid values now return a configuration error instead of silently falling back to `"pool"`.
 *   **Objectstore tier initialization is now validated during `daramjwee.New(...)`**: misconfigured `objectstore` tiers fail cache construction immediately instead of deferring the failure until first store operation.
 
 ### 🧰 Migration Notes
 
 *   Stop reading or mutating runtime fields on `*DaramjweeCache` directly. Treat `daramjwee.New(...)` as the construction boundary and keep concrete cache state internal to the package.
+*   Use `daramjwee.New(...)` for a self-contained cache, or `daramjwee.NewGroup(...)` when several caches should share one bounded background runtime.
+*   Keep the option surfaces separate: `WithGroupWorkers(...)`, `WithGroupWorkerTimeout(...)`, `WithGroupWorkerQueueDefault(...)`, and `WithGroupCloseTimeout(...)` configure the group itself, while `WithWeight(...)` and `WithQueueLimit(...)` configure caches created from that group.
 *   Audit any custom configuration that relied on unknown worker strategy strings being accepted. Use `WithWorkerStrategy("pool")` or `WithWorkerStrategy("all")` explicitly.
 *   If you build `objectstore` tiers dynamically, expect `daramjwee.New(...)` to return initialization errors earlier when the local directory or other objectstore prerequisites are invalid.
 

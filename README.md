@@ -239,6 +239,31 @@ need the old fire-one-goroutine-per-job behavior, set
 `"all"`; unknown strategy values now fail cache construction instead of silently
 falling back to `"pool"`.
 
+## Cache Groups
+
+`New(...)` constructs a self-contained cache instance with its own background
+runtime. That is the right choice when you want one cache to manage its own
+worker lifecycle, shutdown behavior, and queue limits independently.
+
+`NewGroup(...)` constructs a `CacheGroup` that owns one bounded shared
+background runtime for multiple caches. Call `group.NewCache(...)` to create
+cache instances that share that runtime while keeping their tier chains and
+cache-local policy separate. Each grouped cache still closes independently, and
+`group.Close()` shuts down the shared runtime after closing the created caches.
+
+Group construction uses the `WithGroup...` option surface:
+
+* `WithGroupWorkers(...)`
+* `WithGroupWorkerTimeout(...)`
+* `WithGroupWorkerQueueDefault(...)`
+* `WithGroupCloseTimeout(...)`
+
+Per-cache runtime tuning inside a group uses the regular cache options
+`WithWeight(...)` and `WithQueueLimit(...)`. Those options only apply to caches
+created from a `CacheGroup`; standalone `New(...)` construction keeps using the
+original cache-level worker options such as `WithWorkers(...)`,
+`WithWorkerQueue(...)`, `WithWorkerTimeout(...)`, and `WithWorkerStrategy(...)`.
+
 ## objectstore Configuration
 
 `objectstore` exposes its behavior entirely through constructor options. There are two separate configuration layers:

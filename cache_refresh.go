@@ -25,7 +25,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 	default:
 	}
 
-	if c.worker == nil {
+	if c.runtime == nil {
 		return errors.New("worker is not configured, cannot schedule refresh")
 	}
 
@@ -98,7 +98,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		}
 	}
 
-	if !c.worker.Submit(job) {
+	if !c.runtime.Submit(c.cacheID, JobKindRefresh, job) {
 		return ErrBackgroundJobRejected
 	}
 	return nil
