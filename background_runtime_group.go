@@ -145,7 +145,13 @@ func (r *groupRuntime) Submit(cacheID string, kind JobKind, job worker.Job) bool
 		r.mu.Unlock()
 		return false
 	}
-	state.queue <- queuedBackgroundJob{cacheID: cacheID, kind: kind, job: job}
+	select {
+	case state.queue <- queuedBackgroundJob{cacheID: cacheID, kind: kind, job: job}:
+	default:
+		r.noteRejectLocked(cacheID, kind, rejectReasonQueueFull, len(state.queue), state.queueLimit)
+		r.mu.Unlock()
+		return false
+	}
 	r.acceptedByKind[kind]++
 	level.Debug(r.logger).Log(
 		"msg", "queued background job",
@@ -171,7 +177,9 @@ func (r *groupRuntime) RemoveCache(cacheID string) {
 		for i, id := range r.order {
 			if id == cacheID {
 				r.order = append(r.order[:i], r.order[i+1:]...)
-				if r.nextIdx >= len(r.order) {
+				if i < r.nextIdx {
+					r.nextIdx--
+				} else if r.nextIdx >= len(r.order) {
 					r.nextIdx = 0
 				}
 				break

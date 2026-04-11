@@ -208,3 +208,22 @@ func TestGroupRuntime_RecoversPanickingJobAndContinues(t *testing.T) {
 	require.NoError(t, rt.CloseCache(cacheID, time.Second))
 	require.NoError(t, rt.Shutdown(time.Second))
 }
+
+func TestGroupRuntime_RemoveCache_AdjustsNextIndex(t *testing.T) {
+	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+
+	require.NoError(t, rt.Register("cache-a", CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
+	require.NoError(t, rt.Register("cache-b", CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
+	require.NoError(t, rt.Register("cache-c", CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
+
+	rt.mu.Lock()
+	rt.nextIdx = 2
+	rt.mu.Unlock()
+
+	rt.RemoveCache("cache-a")
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	require.Equal(t, []string{"cache-b", "cache-c"}, rt.order)
+	require.Equal(t, 1, rt.nextIdx)
+}
