@@ -173,24 +173,18 @@ func (c *DaramjweeCache) Close() {
 		return
 	}
 
-	closedCleanly := false
 	if c.runtime != nil {
 		c.infoLog("msg", "shutting down daramjwee cache")
 		if err := c.runtime.CloseCache(c.cacheID, c.closeTimeout); err != nil {
 			c.errorLog("msg", "graceful shutdown failed", "err", err)
 		} else {
 			c.infoLog("msg", "daramjwee cache shutdown complete")
-			closedCleanly = true
 		}
-		if closedCleanly {
-			c.runtime.RemoveCache(c.cacheID)
-		}
+		c.runtime.RemoveCache(c.cacheID)
 	}
 
-	if closedCleanly {
-		if hook := c.closeHook; hook != nil {
-			hook()
-		}
+	if hook := c.closeHook; hook != nil {
+		hook()
 	}
 }
 

@@ -383,7 +383,7 @@ func TestNewGroup_ReusesClosedCacheName(t *testing.T) {
 	defer second.Close()
 }
 
-func TestNewGroup_CloseTimeoutKeepsCacheNameTombstoned(t *testing.T) {
+func TestNewGroup_CloseTimeoutAllowsCacheNameReuse(t *testing.T) {
 	group, err := NewGroup(nil, WithGroupWorkers(1), WithGroupCloseTimeout(10*time.Millisecond))
 	require.NoError(t, err)
 
@@ -415,9 +415,9 @@ func TestNewGroup_CloseTimeoutKeepsCacheNameTombstoned(t *testing.T) {
 		t.Fatal("timed out waiting for cache close to return")
 	}
 
-	_, err = group.NewCache("tombstone", WithTiers(&optionsTestMockStore{id: 1}))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "duplicate cache name")
+	reused, err := group.NewCache("tombstone", WithTiers(&optionsTestMockStore{id: 1}))
+	require.NoError(t, err)
+	defer reused.Close()
 }
 
 func TestOptionOverrides(t *testing.T) {

@@ -36,7 +36,7 @@ func TestStandaloneRuntime_CloseCacheWaitsForJobCompletion(t *testing.T) {
 }
 
 func TestGroupRuntime_QueueIsolationAndLimitEnforcement(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, 4, time.Second)
+	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 	require.NoError(t, err)
 
 	require.NoError(t, rt.Register("cache-a", CacheRuntimeConfig{Weight: 1, QueueLimit: 1}))
@@ -61,7 +61,7 @@ func TestGroupRuntime_QueueIsolationAndLimitEnforcement(t *testing.T) {
 }
 
 func TestGroupRuntime_WeightedDequeueProgress(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, 8, time.Second)
+	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 	require.NoError(t, err)
 
 	require.NoError(t, rt.Register("cache-a", CacheRuntimeConfig{Weight: 2, QueueLimit: 8}))
@@ -98,7 +98,7 @@ func TestGroupRuntime_WeightedDequeueProgress(t *testing.T) {
 }
 
 func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, 4, time.Second)
+	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 	require.NoError(t, err)
 
 	const cacheID = "cache-race"
@@ -138,7 +138,7 @@ func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
 }
 
 func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, 4, time.Second)
+	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 	require.NoError(t, err)
 
 	const cacheID = "cache-repeat-close"
@@ -182,5 +182,34 @@ func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
 	require.NoError(t, <-firstDone)
 	require.NoError(t, <-secondDone)
 
+	require.NoError(t, rt.Shutdown(time.Second))
+}
+
+func TestGroupRuntime_RecoversPanickingJobAndContinues(t *testing.T) {
+	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+	require.NoError(t, err)
+
+	const cacheID = "cache-panic"
+	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
+
+	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {
+		panic("boom")
+	}))
+
+	secondDone := make(chan struct{})
+	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {
+		close(secondDone)
+	}))
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-secondDone:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, rt.CloseCache(cacheID, time.Second))
 	require.NoError(t, rt.Shutdown(time.Second))
 }

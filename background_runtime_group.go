@@ -60,12 +60,9 @@ type queuedBackgroundJob struct {
 	job     worker.Job
 }
 
-func newGroupRuntime(logger log.Logger, workers, queueLimit int, timeout time.Duration) (*groupRuntime, error) {
+func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) (*groupRuntime, error) {
 	if workers <= 0 {
 		workers = 1
-	}
-	if queueLimit <= 0 {
-		queueLimit = 1
 	}
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -300,13 +297,21 @@ func (r *groupRuntime) workerLoop(workerID int) {
 		}
 		ctx, cancel := context.WithTimeout(state.ctx, r.timeout)
 		level.Debug(r.logger).Log("msg", "starting background job", "cache_id", cacheID, "job_kind", job.kind.String())
-		job.job(ctx)
-		cancel()
-		r.mu.Lock()
-		state.active--
-		r.notifyCacheActivityLocked(state)
-		r.mu.Unlock()
-		level.Debug(r.logger).Log("msg", "finished background job", "cache_id", cacheID, "job_kind", job.kind.String())
+		func() {
+			defer func() {
+				cancel()
+				if rec := recover(); rec != nil {
+					level.Error(r.logger).Log("msg", "background job panicked", "cache_id", cacheID, "job_kind", job.kind.String(), "panic", rec)
+				} else {
+					level.Debug(r.logger).Log("msg", "finished background job", "cache_id", cacheID, "job_kind", job.kind.String())
+				}
+				r.mu.Lock()
+				state.active--
+				r.notifyCacheActivityLocked(state)
+				r.mu.Unlock()
+			}()
+			job.job(ctx)
+		}()
 	}
 }
 

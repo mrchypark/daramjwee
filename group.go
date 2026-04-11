@@ -47,7 +47,7 @@ func NewGroup(logger log.Logger, opts ...GroupOption) (CacheGroup, error) {
 		}
 	}
 
-	rt, err := newGroupRuntime(logger, cfg.Workers, cfg.WorkerQueueDefault, cfg.WorkerTimeout)
+	rt, err := newGroupRuntime(logger, cfg.Workers, cfg.WorkerTimeout)
 	if err != nil {
 		return nil, err
 	}
