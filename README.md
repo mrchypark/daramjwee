@@ -249,7 +249,8 @@ worker lifecycle, shutdown behavior, and queue limits independently.
 background runtime for multiple caches. Call `group.NewCache(...)` to create
 cache instances that share that runtime while keeping their tier chains and
 cache-local policy separate. Each grouped cache still closes independently, and
-`group.Close()` shuts down the shared runtime after closing the created caches.
+`group.Close()` first shuts down the shared runtime under the group close
+timeout and then closes the created caches.
 
 Group construction uses the `WithGroup...` option surface:
 
@@ -263,6 +264,33 @@ Per-cache runtime tuning inside a group uses the regular cache options
 created from a `CacheGroup`; standalone `New(...)` construction keeps using the
 original cache-level worker options such as `WithWorkers(...)`,
 `WithWorkerQueue(...)`, `WithWorkerTimeout(...)`, and `WithWorkerStrategy(...)`.
+
+Minimal example:
+
+```go
+group, err := daramjwee.NewGroup(
+    logger,
+    daramjwee.WithGroupWorkers(2),
+    daramjwee.WithGroupWorkerQueueDefault(8),
+)
+if err != nil {
+    panic(err)
+}
+defer group.Close()
+
+users, err := group.NewCache(
+    "users",
+    daramjwee.WithTiers(memTier, fileTier),
+    daramjwee.WithWeight(4),
+    daramjwee.WithQueueLimit(16),
+)
+if err != nil {
+    panic(err)
+}
+defer users.Close()
+```
+
+See [`examples/cache_group`](./examples/cache_group) for a runnable local demo.
 
 ## objectstore Configuration
 

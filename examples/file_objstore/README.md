@@ -37,6 +37,12 @@ go run .
 
 The example expects a `config.yaml` in this directory.
 
+Use real GCS credentials if you want to verify lower-tier recovery in step 5.
+With placeholder values, the example may fail during GCS client initialization
+or continue only until tier-1 access is attempted. In that case, the logs will
+show GCS access failures and origin fallback instead of a true `objectstore`
+hit.
+
 ## Configuration
 
 This example uses the generic `thanos-io/objstore/client` format:

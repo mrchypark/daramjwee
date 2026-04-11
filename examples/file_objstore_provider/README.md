@@ -33,6 +33,12 @@ The example uses a `config.yaml` file to configure the connection to Google Clou
 
 Run the example from this directory and replace the placeholder values with your own GCS bucket and service account JSON.
 
+Use real GCS credentials if you want to verify the lower-tier recovery path.
+With placeholder values, the example may fail during GCS client initialization
+or continue only until tier-1 access is attempted. In that case, the logs will
+show GCS access failures and origin fallback instead of a true remote-cache
+hit.
+
 ```yaml
 bucket: "<YOUR_GCS_BUCKET>"
 service_account: |-

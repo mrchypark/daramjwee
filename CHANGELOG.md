@@ -24,6 +24,7 @@
 *   **Background jobs now preserve request-scoped values without inheriting request cancellation**: refresh and persist work keep caller context values available to context-sensitive stores and fetchers, while still running under worker-managed deadlines.
 *   **Invalidated fanout cleanup regained best-effort semantics**: destination-tier cleanup after generation invalidation now runs under a fresh timeout context again, so worker shutdown or timeout races do not leave stale persisted objects behind.
 *   **Constructor and helper regressions are pinned by direct tests**: response/cancel wrappers, lower-tier promotion cleanup, objectstore init failures, and internal block/page/segment caches now have explicit regression coverage.
+*   **New runnable `CacheGroup` example**: added a local example under `examples/cache_group` showing shared-runtime construction, per-cache weights, and mixed tier layouts without requiring external services.
 
 ### ✅ Verification
 
