@@ -36,8 +36,7 @@ func TestStandaloneRuntime_CloseCacheWaitsForJobCompletion(t *testing.T) {
 }
 
 func TestGroupRuntime_QueueIsolationAndLimitEnforcement(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
-	require.NoError(t, err)
+	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 
 	require.NoError(t, rt.Register("cache-a", CacheRuntimeConfig{Weight: 1, QueueLimit: 1}))
 	require.NoError(t, rt.Register("cache-b", CacheRuntimeConfig{Weight: 1, QueueLimit: 1}))
@@ -61,8 +60,7 @@ func TestGroupRuntime_QueueIsolationAndLimitEnforcement(t *testing.T) {
 }
 
 func TestGroupRuntime_WeightedDequeueProgress(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
-	require.NoError(t, err)
+	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 
 	require.NoError(t, rt.Register("cache-a", CacheRuntimeConfig{Weight: 2, QueueLimit: 8}))
 	require.NoError(t, rt.Register("cache-b", CacheRuntimeConfig{Weight: 1, QueueLimit: 8}))
@@ -98,8 +96,7 @@ func TestGroupRuntime_WeightedDequeueProgress(t *testing.T) {
 }
 
 func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
-	require.NoError(t, err)
+	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 
 	const cacheID = "cache-race"
 	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
@@ -138,8 +135,7 @@ func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
 }
 
 func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
-	require.NoError(t, err)
+	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 
 	const cacheID = "cache-repeat-close"
 	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
@@ -186,8 +182,7 @@ func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
 }
 
 func TestGroupRuntime_RecoversPanickingJobAndContinues(t *testing.T) {
-	rt, err := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
-	require.NoError(t, err)
+	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 
 	const cacheID = "cache-panic"
 	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))

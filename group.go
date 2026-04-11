@@ -47,15 +47,10 @@ func NewGroup(logger log.Logger, opts ...GroupOption) (CacheGroup, error) {
 		}
 	}
 
-	rt, err := newGroupRuntime(logger, cfg.Workers, cfg.WorkerTimeout)
-	if err != nil {
-		return nil, err
-	}
-
 	return &cacheGroup{
 		logger: logger,
 		cfg:    cfg,
-		rt:     rt,
+		rt:     newGroupRuntime(logger, cfg.Workers, cfg.WorkerTimeout),
 		caches: make(map[string]*DaramjweeCache),
 	}, nil
 }

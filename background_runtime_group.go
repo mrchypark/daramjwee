@@ -60,7 +60,7 @@ type queuedBackgroundJob struct {
 	job     worker.Job
 }
 
-func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) (*groupRuntime, error) {
+func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) *groupRuntime {
 	if workers <= 0 {
 		workers = 1
 	}
@@ -82,7 +82,7 @@ func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) (*gr
 	for i := 0; i < workers; i++ {
 		go rt.workerLoop(i)
 	}
-	return rt, nil
+	return rt
 }
 
 func (r *groupRuntime) Register(cacheID string, cfg CacheRuntimeConfig) error {
