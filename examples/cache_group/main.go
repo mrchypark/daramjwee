@@ -68,7 +68,6 @@ func main() {
 		fmt.Printf("failed to create cache group: %v\n", err)
 		os.Exit(1)
 	}
-	defer group.Close()
 
 	userCache, err := group.NewCache(
 		"users",
@@ -94,6 +93,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer reportCache.Close()
+	defer group.Close()
 
 	userFetcher := simpleFetcher{
 		label: "users",

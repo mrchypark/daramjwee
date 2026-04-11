@@ -276,8 +276,6 @@ group, err := daramjwee.NewGroup(
 if err != nil {
     panic(err)
 }
-defer group.Close()
-
 users, err := group.NewCache(
     "users",
     daramjwee.WithTiers(memTier, fileTier),
@@ -288,6 +286,7 @@ if err != nil {
     panic(err)
 }
 defer users.Close()
+defer group.Close()
 ```
 
 See [`examples/cache_group`](./examples/cache_group) for a runnable local demo.
