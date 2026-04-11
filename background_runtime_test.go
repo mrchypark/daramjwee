@@ -3,6 +3,7 @@ package daramjwee
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -132,6 +133,54 @@ func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
 
 	close(releaseJob)
 	require.NoError(t, <-closeDone)
+
+	require.NoError(t, rt.Shutdown(time.Second))
+}
+
+func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
+	rt, err := newGroupRuntime(log.NewNopLogger(), 1, 4, time.Second)
+	require.NoError(t, err)
+
+	const cacheID = "cache-repeat-close"
+	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
+
+	jobReady := make(chan struct{})
+	releaseJob := make(chan struct{})
+	rt.beforeJobStart = func(id string, kind JobKind) {
+		if id == cacheID && kind == JobKindRefresh {
+			select {
+			case <-jobReady:
+			default:
+				close(jobReady)
+			}
+			<-releaseJob
+		}
+	}
+
+	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {}))
+	<-jobReady
+
+	var firstReturned atomic.Bool
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- rt.CloseCache(cacheID, time.Second)
+		firstReturned.Store(true)
+	}()
+
+	require.Never(t, firstReturned.Load, 100*time.Millisecond, 10*time.Millisecond)
+
+	var secondReturned atomic.Bool
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- rt.CloseCache(cacheID, time.Second)
+		secondReturned.Store(true)
+	}()
+
+	require.Never(t, secondReturned.Load, 100*time.Millisecond, 10*time.Millisecond)
+
+	close(releaseJob)
+	require.NoError(t, <-firstDone)
+	require.NoError(t, <-secondDone)
 
 	require.NoError(t, rt.Shutdown(time.Second))
 }

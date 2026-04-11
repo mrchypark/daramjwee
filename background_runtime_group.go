@@ -50,6 +50,8 @@ type groupRuntimeCacheState struct {
 	cancel     context.CancelFunc
 	active     int
 	closed     bool
+	closeDone  chan struct{}
+	closeSent  bool
 }
 
 type queuedBackgroundJob struct {
@@ -210,23 +212,9 @@ func (r *groupRuntime) CloseCache(cacheID string, timeout time.Duration) error {
 		return nil
 	}
 	if state.closed {
-		done := make(chan struct{})
-		go func() {
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			for state.active > 0 {
-				r.cond.Wait()
-			}
-			close(done)
-		}()
+		done := r.cacheCloseDoneLocked(state)
 		r.mu.Unlock()
-		select {
-		case <-done:
-			return nil
-		case <-time.After(timeout):
-			level.Warn(r.logger).Log("msg", "cache close timed out", "cache_id", cacheID, "timeout", timeout)
-			return worker.ErrShutdownTimeout
-		}
+		return r.waitForCacheClose(cacheID, done, timeout)
 	}
 
 	state.closed = true
@@ -236,25 +224,11 @@ func (r *groupRuntime) CloseCache(cacheID string, timeout time.Duration) error {
 		<-state.queue
 	}
 	r.cond.Broadcast()
-	done := make(chan struct{})
-	go func() {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		for state.active > 0 {
-			r.cond.Wait()
-		}
-		close(done)
-	}()
+	done := r.cacheCloseDoneLocked(state)
 	r.mu.Unlock()
 
 	level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
-	select {
-	case <-done:
-		return nil
-	case <-time.After(timeout):
-		level.Warn(r.logger).Log("msg", "cache close timed out", "cache_id", cacheID, "timeout", timeout)
-		return worker.ErrShutdownTimeout
-	}
+	return r.waitForCacheClose(cacheID, done, timeout)
 }
 
 func (r *groupRuntime) Shutdown(timeout time.Duration) error {
@@ -280,6 +254,7 @@ func (r *groupRuntime) Shutdown(timeout time.Duration) error {
 		for len(state.queue) > 0 {
 			<-state.queue
 		}
+		r.cacheCloseDoneLocked(state)
 		level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
 	}
 	r.cond.Broadcast()
@@ -314,9 +289,7 @@ func (r *groupRuntime) workerLoop(workerID int) {
 		if closed {
 			r.mu.Lock()
 			state.active--
-			if state.active == 0 {
-				r.cond.Broadcast()
-			}
+			r.notifyCacheActivityLocked(state)
 			r.mu.Unlock()
 			level.Debug(r.logger).Log("msg", "dropping dequeued job for closed cache", "cache_id", cacheID, "job_kind", job.kind.String())
 			continue
@@ -331,9 +304,7 @@ func (r *groupRuntime) workerLoop(workerID int) {
 		cancel()
 		r.mu.Lock()
 		state.active--
-		if state.active == 0 {
-			r.cond.Broadcast()
-		}
+		r.notifyCacheActivityLocked(state)
 		r.mu.Unlock()
 		level.Debug(r.logger).Log("msg", "finished background job", "cache_id", cacheID, "job_kind", job.kind.String())
 	}
@@ -383,7 +354,12 @@ func (r *groupRuntime) pickNextLocked() (string, queuedBackgroundJob, *groupRunt
 		if state.credit <= 0 {
 			state.credit = state.weight
 		}
-		job := <-state.queue
+		var job queuedBackgroundJob
+		select {
+		case job = <-state.queue:
+		default:
+			continue
+		}
 		state.credit--
 		if state.credit <= 0 {
 			r.nextIdx = (idx + 1) % total
@@ -394,4 +370,34 @@ func (r *groupRuntime) pickNextLocked() (string, queuedBackgroundJob, *groupRunt
 		return cacheID, job, state, true
 	}
 	return "", queuedBackgroundJob{}, nil, false
+}
+
+func (r *groupRuntime) cacheCloseDoneLocked(state *groupRuntimeCacheState) chan struct{} {
+	if state.closeDone == nil {
+		state.closeDone = make(chan struct{})
+	}
+	if state.closed && state.active == 0 && !state.closeSent {
+		close(state.closeDone)
+		state.closeSent = true
+	}
+	return state.closeDone
+}
+
+func (r *groupRuntime) notifyCacheActivityLocked(state *groupRuntimeCacheState) {
+	if state.closed && state.active == 0 {
+		r.cacheCloseDoneLocked(state)
+	}
+	if state.active == 0 {
+		r.cond.Broadcast()
+	}
+}
+
+func (r *groupRuntime) waitForCacheClose(cacheID string, done <-chan struct{}, timeout time.Duration) error {
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		level.Warn(r.logger).Log("msg", "cache close timed out", "cache_id", cacheID, "timeout", timeout)
+		return worker.ErrShutdownTimeout
+	}
 }
