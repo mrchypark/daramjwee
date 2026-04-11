@@ -26,6 +26,7 @@ A pragmatic and lightweight hybrid caching middleware for Go.
       * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyWrite`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**, and it is not supported as a top-tier (tier 0) store due to limitations with the stream-through publish contract.
       * **`MemStore`**: A thread-safe, high-throughput in-memory store with fully integrated capacity-based eviction logic. Its performance is optimized using `sync.Pool` to reduce memory allocations under high concurrency.
       * **`objectstore`**: A first-party `Store` for `thanos-io/objstore` providers (S3, GCS, Azure Blob Storage). It is designed for cost-efficient durable caching, especially when object count and large-object read cost matter, while still fitting into the same ordered-tier cache model as the other backends. Its local `dataDir` is an ingest/catalog workspace, not a persistent local read-cache tier. If you want durable remote backing plus local file-cache hits, place `FileStore` ahead of `objectstore` in `WithTiers(...)`. In distributed deployments, concurrent writes to the same key are still last-writer-wins unless you coordinate writers externally.
+        Local emulator demos for the objectstore path now live under [`examples/file_objstore_gcs_vind`](./examples/file_objstore_gcs_vind) and [`examples/file_objstore_s3_vind`](./examples/file_objstore_s3_vind), while the older GCS examples remain real-cloud configuration examples.
 
   * **Advanced Eviction Policies (`EvictionPolicy`):**
 
@@ -238,6 +239,59 @@ need the old fire-one-goroutine-per-job behavior, set
 `WithWorkerStrategy("all")` explicitly. Supported strategies are `"pool"` and
 `"all"`; unknown strategy values now fail cache construction instead of silently
 falling back to `"pool"`.
+
+## Cache Groups
+
+`New(...)` constructs a self-contained cache instance with its own background
+runtime. That is the right choice when you want one cache to manage its own
+worker lifecycle, shutdown behavior, and queue limits independently.
+
+`NewGroup(...)` constructs a `CacheGroup` that owns one bounded shared
+background runtime for multiple caches. Call `group.NewCache(...)` to create
+cache instances that share that runtime while keeping their tier chains and
+cache-local policy separate. Each grouped cache still closes independently, and
+`group.Close()` first shuts down the shared runtime under the group close
+timeout and then closes the created caches.
+
+Group construction uses the `WithGroup...` option surface:
+
+* `WithGroupWorkers(...)`
+* `WithGroupWorkerTimeout(...)`
+* `WithGroupWorkerQueueDefault(...)`
+* `WithGroupCloseTimeout(...)`
+
+Per-cache runtime tuning inside a group uses the regular cache options
+`WithWeight(...)` and `WithQueueLimit(...)`. Those options only apply to caches
+created from a `CacheGroup`; standalone `New(...)` construction keeps using the
+original cache-level worker options such as `WithWorkers(...)`,
+`WithWorkerQueue(...)`, `WithWorkerTimeout(...)`, and `WithWorkerStrategy(...)`.
+
+Minimal example:
+
+```go
+group, err := daramjwee.NewGroup(
+    logger,
+    daramjwee.WithGroupWorkers(2),
+    daramjwee.WithGroupWorkerQueueDefault(8),
+)
+if err != nil {
+    panic(err)
+}
+users, err := group.NewCache(
+    "users",
+    daramjwee.WithTiers(memTier, fileTier),
+    daramjwee.WithWeight(4),
+    daramjwee.WithQueueLimit(16),
+)
+if err != nil {
+    panic(err)
+}
+defer users.Close()
+defer group.Close()
+```
+
+See [`examples/cache_group`](./examples/cache_group) for a runnable local demo.
+See [`examples/file_objstore_gcs_vind`](./examples/file_objstore_gcs_vind) and [`examples/file_objstore_s3_vind`](./examples/file_objstore_s3_vind) for runnable local objectstore demos on emulator-backed buckets.
 
 ## objectstore Configuration
 

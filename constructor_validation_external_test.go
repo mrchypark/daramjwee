@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/stretchr/testify/require"
@@ -79,6 +81,84 @@ func TestNew_ExposesDaramjweeCacheWithoutExportingRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestNewGroup_ConstructorSurface(t *testing.T) {
+	group, err := daramjwee.NewGroup(nil,
+		daramjwee.WithGroupWorkers(2),
+		daramjwee.WithGroupWorkerTimeout(5*time.Second),
+		daramjwee.WithGroupWorkerQueueDefault(8),
+		daramjwee.WithGroupCloseTimeout(10*time.Second),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, group)
+	t.Cleanup(group.Close)
+
+	cache, err := group.NewCache("shared", daramjwee.WithTiers(&optionsCompatibleStore{}), daramjwee.WithWeight(3), daramjwee.WithQueueLimit(11))
+	require.NoError(t, err)
+	require.NotNil(t, cache)
+	t.Cleanup(cache.Close)
+
+	defaultQueueCache, err := group.NewCache("shared-default", daramjwee.WithTiers(&optionsCompatibleStore{}), daramjwee.WithWeight(2))
+	require.NoError(t, err)
+	require.NotNil(t, defaultQueueCache)
+	require.Equal(t, 8, int(reflect.ValueOf(defaultQueueCache).Elem().FieldByName("runtimeQueueLimit").Int()))
+	t.Cleanup(defaultQueueCache.Close)
+}
+
+func TestNewGroup_RejectsEmptyAndDuplicateNames(t *testing.T) {
+	group, err := daramjwee.NewGroup(nil, daramjwee.WithGroupWorkers(1))
+	require.NoError(t, err)
+	t.Cleanup(group.Close)
+
+	_, err = group.NewCache("", daramjwee.WithTiers(&optionsCompatibleStore{}))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cache name cannot be empty")
+
+	_, err = group.NewCache("dup", daramjwee.WithTiers(&optionsCompatibleStore{}))
+	require.NoError(t, err)
+
+	_, err = group.NewCache("dup", daramjwee.WithTiers(&optionsCompatibleStore{}))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "duplicate cache name")
+}
+
+func TestNewGroup_NewCacheRejectsStandaloneWorkerOptions(t *testing.T) {
+	group, err := daramjwee.NewGroup(nil, daramjwee.WithGroupWorkers(1))
+	require.NoError(t, err)
+	t.Cleanup(group.Close)
+
+	testCases := []struct {
+		name string
+		opt  daramjwee.Option
+		msg  string
+	}{
+		{name: "WithWorkers", opt: daramjwee.WithWorkers(2), msg: "standalone worker option"},
+		{name: "WithWorkerQueue", opt: daramjwee.WithWorkerQueue(8), msg: "standalone worker option"},
+		{name: "WithWorkerTimeout", opt: daramjwee.WithWorkerTimeout(5 * time.Second), msg: "standalone worker option"},
+		{name: "WithWorkerStrategy", opt: daramjwee.WithWorkerStrategy("pool"), msg: "standalone worker option"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := group.NewCache("bad", daramjwee.WithTiers(&optionsCompatibleStore{}), tc.opt)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.msg)
+		})
+	}
+}
+
+func TestNewGroup_CloseClosesCreatedCaches(t *testing.T) {
+	group, err := daramjwee.NewGroup(nil, daramjwee.WithGroupWorkers(1), daramjwee.WithGroupCloseTimeout(2*time.Second))
+	require.NoError(t, err)
+
+	cache, err := group.NewCache("closable", daramjwee.WithTiers(&optionsCompatibleStore{}))
+	require.NoError(t, err)
+
+	group.Close()
+
+	_, err = cache.Get(context.Background(), "k", daramjwee.GetRequest{}, optionsCompatibleNoopFetcher{})
+	require.ErrorIs(t, err, daramjwee.ErrCacheClosed)
+}
+
 type optionsCompatibleStore struct{}
 
 func (optionsCompatibleStore) GetStream(_ context.Context, _ string) (io.ReadCloser, *daramjwee.Metadata, error) {
@@ -102,3 +182,12 @@ type noopWriteSink struct{}
 func (noopWriteSink) Write(p []byte) (int, error) { return len(p), nil }
 func (noopWriteSink) Close() error                { return nil }
 func (noopWriteSink) Abort() error                { return nil }
+
+type optionsCompatibleNoopFetcher struct{}
+
+func (optionsCompatibleNoopFetcher) Fetch(context.Context, *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	return &daramjwee.FetchResult{
+		Body:     io.NopCloser(strings.NewReader("noop")),
+		Metadata: &daramjwee.Metadata{CacheTag: "noop"},
+	}, nil
+}

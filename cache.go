@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
 var ErrCacheClosed = errors.New("daramjwee: cache is closed")
@@ -33,7 +32,10 @@ func (e lowerTierPromotionInvalidatedError) Is(target error) bool {
 type DaramjweeCache struct {
 	tiers                  []Store
 	logger                 log.Logger
-	worker                 *worker.Manager
+	runtime                backgroundRuntime
+	cacheID                string
+	runtimeWeight          int
+	runtimeQueueLimit      int
 	opTimeout              time.Duration
 	closeTimeout           time.Duration
 	positiveFreshness      time.Duration
@@ -43,6 +45,7 @@ type DaramjweeCache struct {
 	isClosed               atomic.Bool
 	topWrites              topWriteManager
 	fanoutWrites           fanoutWriteManager
+	closeHook              func()
 }
 
 var _ Cache = (*DaramjweeCache)(nil)
@@ -170,13 +173,18 @@ func (c *DaramjweeCache) Close() {
 		return
 	}
 
-	if c.worker != nil {
+	if c.runtime != nil {
 		c.infoLog("msg", "shutting down daramjwee cache")
-		if err := c.worker.Shutdown(c.closeTimeout); err != nil {
+		if err := c.runtime.CloseCache(c.cacheID, c.closeTimeout); err != nil {
 			c.errorLog("msg", "graceful shutdown failed", "err", err)
 		} else {
 			c.infoLog("msg", "daramjwee cache shutdown complete")
 		}
+		c.runtime.RemoveCache(c.cacheID)
+	}
+
+	if hook := c.closeHook; hook != nil {
+		hook()
 	}
 }
 

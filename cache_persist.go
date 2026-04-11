@@ -42,7 +42,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 	if !hasRealStore(srcStore) || len(destinations) == 0 {
 		return
 	}
-	if c.worker == nil {
+	if c.runtime == nil {
 		c.warnLog("msg", "worker is not configured, cannot schedule persistence", "key", key)
 		return
 	}
@@ -95,7 +95,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
 		}
 
-		if !c.worker.Submit(job) {
+		if !c.runtime.Submit(c.cacheID, JobKindPersist, job) {
 			c.warnLog("msg", "background set rejected", "key", key, "dest_tier", destTierIndex)
 		}
 	}

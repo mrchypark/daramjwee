@@ -1,6 +1,7 @@
 # Ordered `FileStore -> objectstore` Example
 
-This example shows a practical ordered-tier deployment:
+This example shows a practical ordered-tier deployment against a real Google
+Cloud Storage bucket:
 
 - **tier 0**: `FileStore`
 - **tier 1**: `objectstore` backed by Google Cloud Storage
@@ -10,6 +11,9 @@ It demonstrates the main intended split of responsibilities:
 - `FileStore` is the user-visible local filesystem cache tier.
 - `objectstore` is the larger remote backing tier.
 - `objectstore.WithDir(...)` is a local workspace for ingest/catalog state, not a replacement for `FileStore`.
+
+If you want a fully local emulator-backed smoke test instead of real GCS,
+use [`examples/file_objstore_gcs_vind`](../file_objstore_gcs_vind).
 
 ## Why this layout is useful
 
@@ -36,6 +40,12 @@ go run .
 ```
 
 The example expects a `config.yaml` in this directory.
+
+Use real GCS credentials if you want to verify lower-tier recovery in step 5.
+Placeholder values are only documentation scaffolding. Depending on which
+fields are invalid, the example can fail immediately during GCS client
+construction or later when tier-1 access is attempted. They are not expected to
+exercise the full scenario successfully.
 
 ## Configuration
 
