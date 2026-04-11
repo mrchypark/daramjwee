@@ -25,6 +25,7 @@
 *   **Invalidated fanout cleanup regained best-effort semantics**: destination-tier cleanup after generation invalidation now runs under a fresh timeout context again, so worker shutdown or timeout races do not leave stale persisted objects behind.
 *   **Constructor and helper regressions are pinned by direct tests**: response/cancel wrappers, lower-tier promotion cleanup, objectstore init failures, and internal block/page/segment caches now have explicit regression coverage.
 *   **New runnable `CacheGroup` example**: added a local example under `examples/cache_group` showing shared-runtime construction, per-cache weights, and mixed tier layouts without requiring external services.
+*   **New runnable local objectstore examples**: added `examples/file_objstore_gcs_vind` and `examples/file_objstore_s3_vind` to smoke-test the ordered `FileStore -> objectstore` flow against local GCS and S3-compatible emulators on the `vcluster` Docker driver, and clarified that the older GCS examples target real cloud buckets.
 
 ### ✅ Verification
 

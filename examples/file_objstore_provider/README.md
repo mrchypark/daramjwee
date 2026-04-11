@@ -1,6 +1,7 @@
 # Daramjwee Google Cloud Storage Objectstore Example
 
-This example demonstrates how to configure `daramjwee` with ordered tiers:
+This example demonstrates how to configure `daramjwee` with ordered tiers
+against a real Google Cloud Storage bucket:
 
 - **Tier 0**: `fileStore`, using the local filesystem for fast access.
 - **Tier 1**: `objectstore`, using Google Cloud Storage as a larger backing tier.
@@ -12,6 +13,9 @@ It also illustrates an important `objectstore` rule:
 - `FileStore` is the actual local filesystem cache tier.
 - `objectstore.WithDir(...)` is only the backend's local workspace for ingest/catalog state.
 - If tier 0 is wiped, tier 1 can still serve remote-flushed entries and repopulate tier 0 on demand.
+
+If you want a fully local emulator-backed smoke test instead of real GCS,
+use [`examples/file_objstore_gcs_vind`](../file_objstore_gcs_vind).
 
 ## Run
 
@@ -34,10 +38,10 @@ The example uses a `config.yaml` file to configure the connection to Google Clou
 Run the example from this directory and replace the placeholder values with your own GCS bucket and service account JSON.
 
 Use real GCS credentials if you want to verify the lower-tier recovery path.
-With placeholder values, the example may fail during GCS client initialization
-or continue only until tier-1 access is attempted. In that case, the logs will
-show GCS access failures and origin fallback instead of a true remote-cache
-hit.
+Placeholder values are only documentation scaffolding. Depending on which
+fields are invalid, the example can fail immediately during GCS client
+construction or later when tier-1 access is attempted. They are not expected to
+exercise the full scenario successfully.
 
 ```yaml
 bucket: "<YOUR_GCS_BUCKET>"
