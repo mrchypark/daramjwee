@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.0
+## v0.8.0
 
 ### ⚠️ Breaking Changes & API Updates
 
@@ -30,6 +30,8 @@
 ### ✅ Verification
 
 *   `go test ./...`
+*   `(cd examples/file_objstore_gcs_vind && ./verify.sh)`
+*   `(cd examples/file_objstore_s3_vind && ./verify.sh)`
 
 ## v0.6.2
 
