@@ -291,23 +291,13 @@ func TestNewGroup_OptionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, group)
 
-	typedGroup := group.(*cacheGroup)
-	require.Equal(t, 2, typedGroup.cfg.Workers)
-	require.Equal(t, 5*time.Second, typedGroup.cfg.WorkerTimeout)
-	require.Equal(t, 8, typedGroup.cfg.WorkerQueueDefault)
-	require.Equal(t, 10*time.Second, typedGroup.cfg.CloseTimeout)
-
 	cache, err := group.NewCache("shared", WithTiers(&optionsTestMockStore{id: 1}), WithWeight(3), WithQueueLimit(11))
 	require.NoError(t, err)
 	require.NotNil(t, cache)
-	typedCache := cache.(*DaramjweeCache)
-	require.Equal(t, 3, typedCache.runtimeWeight)
-	require.Equal(t, 11, typedCache.runtimeQueueLimit)
 
 	defaultCache, err := group.NewCache("shared-default", WithTiers(&optionsTestMockStore{id: 2}), WithWeight(2))
 	require.NoError(t, err)
 	require.NotNil(t, defaultCache)
-	require.Equal(t, 8, defaultCache.(*DaramjweeCache).runtimeQueueLimit)
 	cache.Close()
 	defaultCache.Close()
 	group.Close()

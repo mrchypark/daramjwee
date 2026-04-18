@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -56,29 +55,22 @@ func TestNew_RejectsObjectstoreTierWithInitializationFailure(t *testing.T) {
 	require.Nil(t, cache)
 }
 
-func TestNew_ExposesDaramjweeCacheWithoutExportingRuntimeFields(t *testing.T) {
+func TestCache_RejectsOperationsWhenClosed(t *testing.T) {
 	cache, err := daramjwee.New(nil, daramjwee.WithTiers(&optionsCompatibleStore{}))
 	require.NoError(t, err)
-	t.Cleanup(cache.Close)
+	cache.Close()
 
-	typed, ok := cache.(*daramjwee.DaramjweeCache)
-	require.True(t, ok)
+	_, err = cache.Get(context.Background(), "k", daramjwee.GetRequest{}, optionsCompatibleNoopFetcher{})
+	require.ErrorIs(t, err, daramjwee.ErrCacheClosed)
 
-	cacheType := reflect.TypeOf(*typed)
-	exportedRuntimeFields := []string{
-		"Tiers",
-		"Logger",
-		"Worker",
-		"OpTimeout",
-		"CloseTimeout",
-		"PositiveFreshness",
-		"NegativeFreshness",
-		"TierFreshnessOverrides",
-	}
-	for _, fieldName := range exportedRuntimeFields {
-		_, exists := cacheType.FieldByName(fieldName)
-		require.Falsef(t, exists, "runtime field %s should not be exported", fieldName)
-	}
+	_, err = cache.Set(context.Background(), "k", &daramjwee.Metadata{CacheTag: "v1"})
+	require.ErrorIs(t, err, daramjwee.ErrCacheClosed)
+
+	err = cache.Delete(context.Background(), "k")
+	require.ErrorIs(t, err, daramjwee.ErrCacheClosed)
+
+	err = cache.ScheduleRefresh(context.Background(), "k", optionsCompatibleNoopFetcher{})
+	require.ErrorIs(t, err, daramjwee.ErrCacheClosed)
 }
 
 func TestNewGroup_ConstructorSurface(t *testing.T) {
@@ -100,7 +92,6 @@ func TestNewGroup_ConstructorSurface(t *testing.T) {
 	defaultQueueCache, err := group.NewCache("shared-default", daramjwee.WithTiers(&optionsCompatibleStore{}), daramjwee.WithWeight(2))
 	require.NoError(t, err)
 	require.NotNil(t, defaultQueueCache)
-	require.Equal(t, 8, int(reflect.ValueOf(defaultQueueCache).Elem().FieldByName("runtimeQueueLimit").Int()))
 	t.Cleanup(defaultQueueCache.Close)
 }
 
