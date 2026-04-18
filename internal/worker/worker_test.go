@@ -31,35 +31,62 @@ func (b *lockedBuffer) String() string {
 	return b.b.String()
 }
 
-// TestWorkerManager_NewManager verifies that the worker manager is created with the correct strategy.
-func TestWorkerManager_NewManager(t *testing.T) {
-	testCases := []struct {
-		name         string
-		strategy     string
-		pSize        int
-		qSize        int
-		expectedType interface{}
-		expectErr    bool
-	}{
-		{"Pool Strategy", "pool", 1, 1, &PoolStrategy{}, false},
-		{"All Strategy", "all", 1, 1, &AllStrategy{}, false},
-		{"Invalid Strategy Returns Error", "invalid-strategy", 1, 1, nil, true},
+func TestNewManager_limits_concurrency_when_pool_strategy_is_used(t *testing.T) {
+	manager, err := NewManager("pool", log.NewNopLogger(), 1, 2, time.Second)
+	require.NoError(t, err)
+	defer manager.Shutdown(time.Second)
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+
+	require.True(t, manager.Submit(func(ctx context.Context) {
+		close(firstStarted)
+		<-releaseFirst
+	}))
+	<-firstStarted
+
+	require.True(t, manager.Submit(func(ctx context.Context) {
+		secondStarted <- struct{}{}
+	}))
+
+	require.Never(t, func() bool {
+		return len(secondStarted) > 0
+	}, 100*time.Millisecond, 10*time.Millisecond)
+
+	close(releaseFirst)
+	require.Eventually(t, func() bool {
+		return len(secondStarted) > 0
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestNewManager_starts_independent_jobs_immediately_when_all_strategy_is_used(t *testing.T) {
+	manager, err := NewManager("all", log.NewNopLogger(), 1, 1, time.Second)
+	require.NoError(t, err)
+	defer manager.Shutdown(time.Second)
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+
+	job := func(ctx context.Context) {
+		started <- struct{}{}
+		<-release
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			manager, err := NewManager(tc.strategy, log.NewNopLogger(), tc.pSize, tc.qSize, 1*time.Second)
-			if tc.expectErr {
-				require.Error(t, err)
-				require.Nil(t, manager)
-				return
-			}
-			require.NoError(t, err)
-			defer manager.Shutdown(1 * time.Second)
+	require.True(t, manager.Submit(job))
+	require.True(t, manager.Submit(job))
 
-			assert.IsType(t, tc.expectedType, manager.strategy)
-		})
-	}
+	require.Eventually(t, func() bool {
+		return len(started) == 2
+	}, time.Second, 10*time.Millisecond)
+
+	close(release)
+}
+
+func TestNewManager_returns_error_when_strategy_is_unknown(t *testing.T) {
+	manager, err := NewManager("invalid-strategy", log.NewNopLogger(), 1, 1, time.Second)
+	require.Error(t, err)
+	require.Nil(t, manager)
 }
 
 // TestWorkerManager_SubmitAndRun verifies that a job is successfully submitted and executed.

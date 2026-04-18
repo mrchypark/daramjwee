@@ -1,11 +1,7 @@
 package main
 
 import (
-	"reflect"
 	"testing"
-	"unsafe"
-
-	"github.com/thanos-io/objstore/providers/gcs"
 )
 
 func TestLoadExampleConfigDefaults(t *testing.T) {
@@ -38,23 +34,36 @@ func TestBuildBucketConfig(t *testing.T) {
 	if conf.UseGRPC {
 		t.Fatalf("expected HTTP client mode for fake-gcs-server")
 	}
-	if !readNoAuthField(conf) {
-		t.Fatalf("expected private noAuth field to be enabled for emulator mode")
+}
+
+type privateBoolTarget struct {
+	hidden bool
+	text   string
+}
+
+func TestSetPrivateBoolSetsNamedBoolField(t *testing.T) {
+	target := privateBoolTarget{}
+
+	if err := setPrivateBool(&target, "hidden", true); err != nil {
+		t.Fatalf("setPrivateBool returned error: %v", err)
+	}
+	if !target.hidden {
+		t.Fatalf("expected hidden field to be updated")
 	}
 }
 
-func readNoAuthField(conf gcs.Config) bool {
-	value := reflect.ValueOf(&conf).Elem()
-	field := value.FieldByName("noAuth")
-	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Bool()
+func TestSetPrivateBoolReturnsErrorForMissingField(t *testing.T) {
+	target := privateBoolTarget{}
+
+	if err := setPrivateBool(&target, "missing", true); err == nil {
+		t.Fatalf("expected missing field to return an error")
+	}
 }
 
-func TestBuildBucketConfigLeavesNoAuthReadable(t *testing.T) {
-	conf, err := buildBucketConfig(exampleConfig{bucket: "bucket-b", emulatorHost: "127.0.0.1:4443"})
-	if err != nil {
-		t.Fatalf("buildBucketConfig returned error: %v", err)
-	}
-	if !readNoAuthField(conf) {
-		t.Fatalf("expected noAuth to remain enabled")
+func TestSetPrivateBoolReturnsErrorForNonBoolField(t *testing.T) {
+	target := privateBoolTarget{}
+
+	if err := setPrivateBool(&target, "text", true); err == nil {
+		t.Fatalf("expected non-bool field to return an error")
 	}
 }

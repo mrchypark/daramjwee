@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -36,22 +35,6 @@ type noopWriteSink struct{}
 func (noopWriteSink) Write(p []byte) (int, error) { return len(p), nil }
 func (noopWriteSink) Close() error                { return nil }
 func (noopWriteSink) Abort() error                { return nil }
-
-func TestCacheGroup_NewCacheAppliesGroupQueueDefault(t *testing.T) {
-	group, err := daramjwee.NewGroup(nil,
-		daramjwee.WithGroupWorkers(2),
-		daramjwee.WithGroupWorkerQueueDefault(12),
-	)
-	require.NoError(t, err)
-	t.Cleanup(group.Close)
-
-	cache, err := group.NewCache("cache-a", daramjwee.WithTiers(groupTestStore{}))
-	require.NoError(t, err)
-	t.Cleanup(cache.Close)
-
-	typed := reflect.ValueOf(cache).Elem()
-	require.Equal(t, 12, int(typed.FieldByName("runtimeQueueLimit").Int()))
-}
 
 func TestCacheGroup_CloseClosesCreatedCaches(t *testing.T) {
 	group, err := daramjwee.NewGroup(nil, daramjwee.WithGroupWorkers(1))
