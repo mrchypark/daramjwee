@@ -478,10 +478,9 @@ func (w *sqliteSink) flushLocked() error {
 	if len(w.buf) == 0 {
 		return nil
 	}
-	chunk := append([]byte(nil), w.buf...)
 	if _, err := w.store.db.ExecContext(w.ctx, `
 		INSERT INTO temp_chunks(owner_id, write_id, seq, data, created_at) VALUES(?, ?, ?, ?, ?)
-	`, w.store.ownerID, w.writeID, w.seq, chunk, time.Now().UnixNano()); err != nil {
+	`, w.store.ownerID, w.writeID, w.seq, w.buf, time.Now().UnixNano()); err != nil {
 		return err
 	}
 	w.seq++
@@ -490,7 +489,7 @@ func (w *sqliteSink) flushLocked() error {
 }
 
 func (w *sqliteSink) commitLocked() error {
-	meta := cloneMetadata(w.metadata)
+	meta := w.metadata
 	return w.store.withTx(w.ctx, func(tx *sql.Tx) error {
 		var floor uint64
 		err := tx.QueryRowContext(w.ctx, `SELECT generation FROM generation_floor WHERE key = ?`, w.key).Scan(&floor)
