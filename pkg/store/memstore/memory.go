@@ -68,15 +68,25 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 // BeginSet returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
 func (ms *MemStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return ms.beginSet(key, metadata), nil
+}
+
+func (ms *MemStore) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return ms.beginSet(key, metadata), nil
+}
+
+func (ms *MemStore) beginSet(key string, metadata *daramjwee.Metadata) *memStoreSink {
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
-	w := &memStoreSink{
+	return &memStoreSink{
 		ms:       ms,
 		key:      key,
 		metadata: metadata,
 		buf:      buf,
 	}
-	return w, nil
 }
 
 // Delete removes an object from the in-memory map.
@@ -132,12 +142,28 @@ func (w *memStoreSink) Write(p []byte) (n int, err error) {
 // Close is called when the write operation is complete.
 // It commits the buffered data to the MemStore and handles eviction if capacity is exceeded.
 func (w *memStoreSink) Close() error {
+	return w.Commit(context.Background())
+}
+
+func (w *memStoreSink) Commit(ctx context.Context) error {
 	if w.done {
 		return nil
 	}
-	w.done = true
+	if err := ctx.Err(); err != nil {
+		w.done = true
+		w.buf.Reset()
+		w.release()
+		return err
+	}
 	w.ms.mu.Lock()
 	defer w.ms.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		w.done = true
+		w.buf.Reset()
+		w.release()
+		return err
+	}
+	w.done = true
 
 	finalData := make([]byte, w.buf.Len())
 	copy(finalData, w.buf.Bytes())

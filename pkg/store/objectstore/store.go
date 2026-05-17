@@ -262,6 +262,14 @@ func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Met
 
 // BeginSet starts a staged write for a new immutable generation.
 func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return s.beginSet(ctx, key, metadata)
+}
+
+func (s *Store) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	return s.beginSet(ctx, key, metadata)
+}
+
+func (s *Store) beginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (*writer, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}

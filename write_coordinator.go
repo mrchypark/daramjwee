@@ -17,10 +17,18 @@ type fanoutWriteManager struct {
 }
 
 type writeCoordinator struct {
-	writeMu             sync.Mutex
-	stateMu             sync.Mutex
-	stateChanged        *sync.Cond
+	initOnce     sync.Once
+	leaseOnce    sync.Once
+	writeLease   chan struct{}
+	commitMu     sync.Mutex
+	stateMu      sync.Mutex
+	stateChanged *sync.Cond
+	// committedGeneration is the latest generation visible in the top store.
+	// activeReservations tracks in-flight writers so conditional fills can be
+	// invalidated without holding a same-key lock for the writer lifetime.
 	committedGeneration uint64
+	nextGeneration      uint64
+	activeReservations  map[uint64]struct{}
 	activeDeletes       int
 }
 
@@ -28,6 +36,16 @@ type coordinatedTopWriteSink struct {
 	WriteSink
 	coord         *writeCoordinator
 	generation    uint64
+	onInvalidated func() error
+	once          sync.Once
+	err           error
+}
+
+type coordinatedStagedTopWriteSink struct {
+	sink          StagedWriteSink
+	coord         *writeCoordinator
+	generation    uint64
+	conditional   bool
 	onInvalidated func() error
 	once          sync.Once
 	err           error
@@ -55,12 +73,16 @@ type fanoutLockKey struct {
 
 func (m *topWriteManager) coordinator(key string) *writeCoordinator {
 	if coord, ok := m.coords.Load(key); ok {
-		return coord.(*writeCoordinator)
+		resolved := coord.(*writeCoordinator)
+		resolved.init()
+		return resolved
 	}
 	coord := &writeCoordinator{}
-	coord.stateChanged = sync.NewCond(&coord.stateMu)
+	coord.init()
 	actual, _ := m.coords.LoadOrStore(key, coord)
-	return actual.(*writeCoordinator)
+	resolved := actual.(*writeCoordinator)
+	resolved.init()
+	return resolved
 }
 
 func (m *topWriteManager) coordinatorIfPresent(key string) *writeCoordinator {
@@ -132,16 +154,148 @@ func (m *topWriteManager) currentGeneration(key string) uint64 {
 }
 
 func (c *writeCoordinator) current() uint64 {
+	c.init()
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.committedGeneration
 }
 
-// begin serializes same-key top writes and snapshots the committed generation
-// visible to readers. Successful publish advances the committed generation only
-// after the underlying sink has been closed.
+func (c *writeCoordinator) ensureReservationsLocked() {
+	if c.activeReservations == nil {
+		c.activeReservations = make(map[uint64]struct{})
+	}
+}
+
+func (c *writeCoordinator) latestGenerationLocked() uint64 {
+	latest := c.committedGeneration
+	for generation := range c.activeReservations {
+		if generation > latest {
+			latest = generation
+		}
+	}
+	return latest
+}
+
+func (c *writeCoordinator) reserveGenerationLocked() uint64 {
+	c.ensureReservationsLocked()
+	latest := c.latestGenerationLocked()
+	if c.nextGeneration < latest {
+		c.nextGeneration = latest
+	}
+	c.nextGeneration++
+	generation := c.nextGeneration
+	c.activeReservations[generation] = struct{}{}
+	return generation
+}
+
+func (c *writeCoordinator) advanceCommittedLocked() {
+	generation := c.reserveGenerationLocked()
+	delete(c.activeReservations, generation)
+	c.committedGeneration = generation
+}
+
+func (c *writeCoordinator) reserve(ctx context.Context, expected *uint64) (uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	c.init()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if expected == nil {
+		if c.activeDeletes > 0 {
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					c.stateMu.Lock()
+					c.stateChanged.Broadcast()
+					c.stateMu.Unlock()
+				case <-done:
+				}
+			}()
+			defer close(done)
+		}
+		for c.activeDeletes > 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			c.stateChanged.Wait()
+		}
+	} else if c.activeDeletes > 0 {
+		return 0, ErrTopWriteInvalidated
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if expected != nil && c.latestGenerationLocked() != *expected {
+		return 0, ErrTopWriteInvalidated
+	}
+	generation := c.reserveGenerationLocked()
+	c.stateChanged.Broadcast()
+	return generation, nil
+}
+
+func (c *writeCoordinator) unregisterReservation(generation uint64) {
+	c.init()
+	c.stateMu.Lock()
+	if _, ok := c.activeReservations[generation]; ok {
+		delete(c.activeReservations, generation)
+		c.stateChanged.Broadcast()
+	}
+	c.stateMu.Unlock()
+}
+
+func (c *writeCoordinator) init() {
+	c.initOnce.Do(func() {
+		if c.stateChanged == nil {
+			c.stateChanged = sync.NewCond(&c.stateMu)
+		}
+		if c.activeReservations == nil {
+			c.activeReservations = make(map[uint64]struct{})
+		}
+	})
+}
+
+func (c *writeCoordinator) initLease() {
+	c.init()
+	c.leaseOnce.Do(func() {
+		c.writeLease = make(chan struct{}, 1)
+		c.writeLease <- struct{}{}
+	})
+}
+
+func (c *writeCoordinator) acquireWrite(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.initLease()
+	select {
+	case <-c.writeLease:
+		if err := ctx.Err(); err != nil {
+			c.releaseWrite()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *writeCoordinator) releaseWrite() {
+	c.writeLease <- struct{}{}
+}
+
+// begin serializes same-key top writes for stores that cannot stage separately.
+// It reserves a generation while holding the write lease for the writer
+// lifetime, preserving the legacy compatibility path for external stores.
 func (c *writeCoordinator) begin(ctx context.Context, expected *uint64) (uint64, error) {
-	c.writeMu.Lock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := c.acquireWrite(ctx); err != nil {
+		return 0, err
+	}
 	c.stateMu.Lock()
 	if expected == nil {
 		if c.activeDeletes > 0 {
@@ -160,40 +314,49 @@ func (c *writeCoordinator) begin(ctx context.Context, expected *uint64) (uint64,
 		for c.activeDeletes > 0 {
 			if err := ctx.Err(); err != nil {
 				c.stateMu.Unlock()
-				c.writeMu.Unlock()
+				c.releaseWrite()
 				return 0, err
 			}
 			c.stateChanged.Wait()
 		}
 	} else if c.activeDeletes > 0 {
 		c.stateMu.Unlock()
-		c.writeMu.Unlock()
+		c.releaseWrite()
 		return 0, ErrTopWriteInvalidated
 	}
-	if expected != nil && c.committedGeneration != *expected {
+	if err := ctx.Err(); err != nil {
 		c.stateMu.Unlock()
-		c.writeMu.Unlock()
+		c.releaseWrite()
+		return 0, err
+	}
+	if expected != nil && c.latestGenerationLocked() != *expected {
+		c.stateMu.Unlock()
+		c.releaseWrite()
 		return 0, ErrTopWriteInvalidated
 	}
-	generation := c.committedGeneration
+	generation := c.reserveGenerationLocked()
+	c.stateChanged.Broadcast()
 	c.stateMu.Unlock()
 	return generation, nil
 }
 
-func (c *writeCoordinator) rollbackAndUnlock(_ uint64) {
-	c.writeMu.Unlock()
+func (c *writeCoordinator) rollbackAndUnlock(generation uint64) {
+	c.unregisterReservation(generation)
+	c.releaseWrite()
 }
 
 func (c *writeCoordinator) beginDelete() {
+	c.init()
 	c.stateMu.Lock()
 	c.activeDeletes++
 	c.stateMu.Unlock()
 }
 
 func (c *writeCoordinator) finishDelete(success bool) {
+	c.init()
 	c.stateMu.Lock()
 	if success {
-		c.committedGeneration++
+		c.advanceCommittedLocked()
 	}
 	if c.activeDeletes > 0 {
 		c.activeDeletes--
@@ -209,7 +372,7 @@ func (c *DaramjweeCache) currentTopWriteGeneration(key string) uint64 {
 func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 	coord := c.topWrites.coordinator(key)
 	coord.stateMu.Lock()
-	coord.committedGeneration++
+	coord.advanceCommittedLocked()
 	coord.stateChanged.Broadcast()
 	coord.stateMu.Unlock()
 }
@@ -217,6 +380,28 @@ func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
 	store := c.topWriteStore()
 	coord := c.topWrites.coordinator(key)
+	if staging, ok := store.(StagingStore); ok {
+		coord.commitMu.Lock()
+		generation, err := coord.reserve(ctx, expectedGeneration)
+		if err != nil {
+			coord.commitMu.Unlock()
+			return nil, err
+		}
+		sink, err := staging.BeginStagedSet(ctx, key, metadata)
+		if err != nil {
+			coord.unregisterReservation(generation)
+			coord.commitMu.Unlock()
+			return nil, err
+		}
+		coord.commitMu.Unlock()
+		return &coordinatedStagedTopWriteSink{
+			sink:          sink,
+			coord:         coord,
+			generation:    generation,
+			conditional:   expectedGeneration != nil,
+			onInvalidated: func() error { return c.deleteTopStoreKey(key) },
+		}, nil
+	}
 	generation, err := coord.begin(ctx, expectedGeneration)
 	if err != nil {
 		return nil, err
@@ -236,15 +421,99 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 	}, nil
 }
 
-func (s *coordinatedTopWriteSink) Close() error {
+func (s *coordinatedStagedTopWriteSink) Close() error {
 	s.once.Do(func() {
-		defer s.coord.writeMu.Unlock()
+		ctx := context.Background()
+		s.coord.commitMu.Lock()
+		commitMuLocked := true
+		defer func() {
+			if commitMuLocked {
+				s.coord.commitMu.Unlock()
+			}
+		}()
+
 		s.coord.stateMu.Lock()
 		for s.coord.activeDeletes > 0 {
 			s.coord.stateChanged.Wait()
 		}
 
-		if s.coord.committedGeneration != s.generation {
+		if s.coord.latestGenerationLocked() != s.generation {
+			s.coord.ensureReservationsLocked()
+			delete(s.coord.activeReservations, s.generation)
+			s.coord.stateChanged.Broadcast()
+			s.coord.stateMu.Unlock()
+			s.coord.commitMu.Unlock()
+			commitMuLocked = false
+			abortErr := s.sink.Abort()
+			s.err = ErrTopWriteInvalidated
+			if abortErr != nil {
+				s.err = errors.Join(s.err, abortErr)
+			}
+			return
+		}
+		s.coord.stateMu.Unlock()
+
+		closeErr := s.sink.Commit(ctx)
+
+		s.coord.stateMu.Lock()
+		for s.coord.activeDeletes > 0 {
+			s.coord.stateChanged.Wait()
+		}
+
+		if closeErr != nil {
+			s.coord.ensureReservationsLocked()
+			delete(s.coord.activeReservations, s.generation)
+			s.coord.stateChanged.Broadcast()
+			s.coord.stateMu.Unlock()
+			s.err = closeErr
+			return
+		}
+		if s.coord.latestGenerationLocked() != s.generation {
+			s.coord.ensureReservationsLocked()
+			delete(s.coord.activeReservations, s.generation)
+			s.coord.stateChanged.Broadcast()
+			s.coord.stateMu.Unlock()
+			s.err = ErrTopWriteInvalidated
+			if s.onInvalidated != nil {
+				if cleanupErr := s.onInvalidated(); cleanupErr != nil {
+					s.err = errors.Join(s.err, cleanupErr)
+				}
+			}
+			return
+		}
+		s.coord.ensureReservationsLocked()
+		delete(s.coord.activeReservations, s.generation)
+		s.coord.committedGeneration = s.generation
+		s.coord.stateChanged.Broadcast()
+		s.coord.stateMu.Unlock()
+	})
+	return s.err
+}
+
+func (s *coordinatedStagedTopWriteSink) Write(p []byte) (int, error) {
+	return s.sink.Write(p)
+}
+
+func (s *coordinatedStagedTopWriteSink) Abort() error {
+	s.once.Do(func() {
+		s.coord.unregisterReservation(s.generation)
+		s.err = s.sink.Abort()
+	})
+	return s.err
+}
+
+func (s *coordinatedTopWriteSink) Close() error {
+	s.once.Do(func() {
+		defer s.coord.releaseWrite()
+		s.coord.stateMu.Lock()
+		for s.coord.activeDeletes > 0 {
+			s.coord.stateChanged.Wait()
+		}
+
+		if s.coord.latestGenerationLocked() != s.generation {
+			s.coord.ensureReservationsLocked()
+			delete(s.coord.activeReservations, s.generation)
+			s.coord.stateChanged.Broadcast()
 			s.coord.stateMu.Unlock()
 			abortErr := s.WriteSink.Abort()
 			s.err = ErrTopWriteInvalidated
@@ -258,16 +527,23 @@ func (s *coordinatedTopWriteSink) Close() error {
 		closeErr := s.WriteSink.Close()
 
 		s.coord.stateMu.Lock()
-		defer s.coord.stateMu.Unlock()
 		for s.coord.activeDeletes > 0 {
 			s.coord.stateChanged.Wait()
 		}
 
 		if closeErr != nil {
+			s.coord.ensureReservationsLocked()
+			delete(s.coord.activeReservations, s.generation)
+			s.coord.stateChanged.Broadcast()
+			s.coord.stateMu.Unlock()
 			s.err = closeErr
 			return
 		}
-		if s.coord.committedGeneration != s.generation {
+		if s.coord.latestGenerationLocked() != s.generation {
+			s.coord.ensureReservationsLocked()
+			delete(s.coord.activeReservations, s.generation)
+			s.coord.stateChanged.Broadcast()
+			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {
 				if cleanupErr := s.onInvalidated(); cleanupErr != nil {
@@ -276,8 +552,11 @@ func (s *coordinatedTopWriteSink) Close() error {
 			}
 			return
 		}
-		s.coord.committedGeneration++
+		s.coord.ensureReservationsLocked()
+		delete(s.coord.activeReservations, s.generation)
+		s.coord.committedGeneration = s.generation
 		s.coord.stateChanged.Broadcast()
+		s.coord.stateMu.Unlock()
 	})
 	return s.err
 }
@@ -298,8 +577,9 @@ func (c *DaramjweeCache) deleteTopStoreKey(key string) error {
 
 func (s *coordinatedTopWriteSink) Abort() error {
 	s.once.Do(func() {
-		defer s.coord.writeMu.Unlock()
+		defer s.coord.releaseWrite()
 		s.err = s.WriteSink.Abort()
+		s.coord.unregisterReservation(s.generation)
 	})
 	return s.err
 }
@@ -315,12 +595,13 @@ func newConditionalGenerationWriteSink(sink WriteSink, coord *writeCoordinator, 
 
 func (s *conditionalGenerationWriteSink) Close() error {
 	s.once.Do(func() {
+		s.coord.init()
 		s.coord.stateMu.Lock()
 		for s.coord.activeDeletes > 0 {
 			s.coord.stateChanged.Wait()
 		}
 
-		if s.coord.committedGeneration != s.generation {
+		if s.coord.latestGenerationLocked() != s.generation {
 			s.coord.stateMu.Unlock()
 			abortErr := s.WriteSink.Abort()
 			s.err = ErrTopWriteInvalidated
@@ -334,16 +615,17 @@ func (s *conditionalGenerationWriteSink) Close() error {
 		closeErr := s.WriteSink.Close()
 
 		s.coord.stateMu.Lock()
-		defer s.coord.stateMu.Unlock()
 		for s.coord.activeDeletes > 0 {
 			s.coord.stateChanged.Wait()
 		}
 
 		if closeErr != nil {
+			s.coord.stateMu.Unlock()
 			s.err = closeErr
 			return
 		}
-		if s.coord.committedGeneration != s.generation {
+		if s.coord.latestGenerationLocked() != s.generation {
+			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {
 				if cleanupErr := s.onInvalidated(); cleanupErr != nil {
@@ -353,6 +635,7 @@ func (s *conditionalGenerationWriteSink) Close() error {
 			return
 		}
 		s.err = nil
+		s.coord.stateMu.Unlock()
 	})
 	return s.err
 }

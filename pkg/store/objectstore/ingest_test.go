@@ -46,6 +46,79 @@ func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
 	assert.Equal(t, "v1", meta.CacheTag)
 }
 
+func TestStore_StagedWriteCommitsOnlyOnCommit(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(ctx, "staged-local-key", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "hello staged local")
+	require.NoError(t, err)
+
+	_, err = store.Stat(ctx, "staged-local-key")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	require.NoError(t, writer.Commit(ctx))
+
+	stream, meta, err := store.GetStream(ctx, "staged-local-key")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "hello staged local", string(body))
+	assert.Equal(t, "v1", meta.CacheTag)
+}
+
+func TestStore_StagedAbortLeavesNoVisibleLocalEntry(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(ctx, "staged-abort-local", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "partial")
+	require.NoError(t, err)
+	require.NoError(t, writer.Abort())
+
+	_, err = store.Stat(ctx, "staged-abort-local")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func TestStore_CanceledStagedCommitLeavesNoVisibleLocalEntry(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(ctx, "staged-cancel-local", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "partial")
+	require.NoError(t, err)
+
+	commitCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	require.ErrorIs(t, writer.Commit(commitCtx), context.Canceled)
+
+	_, err = store.Stat(ctx, "staged-cancel-local")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
 func TestStore_BeginSetDoesNotHoldKeyLockForWriterLifetime(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

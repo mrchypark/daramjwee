@@ -274,6 +274,78 @@ func TestRedisStore_AbortDeletesTempKey(t *testing.T) {
 	require.False(t, mr.Exists(store.MetaKey("abort-key")))
 }
 
+func TestRedisStore_StagedWriteCommitsOnlyOnCommit(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := New(client, log.NewNopLogger()).(*RedisStore)
+	ctx := context.Background()
+
+	sink, err := store.BeginStagedSet(ctx, "staged-key", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = sink.Write([]byte("staged value"))
+	require.NoError(t, err)
+
+	_, err = store.Stat(ctx, "staged-key")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	require.NoError(t, sink.Commit(ctx))
+
+	reader, meta, err := store.GetStream(ctx, "staged-key")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, "staged value", string(body))
+	require.Equal(t, "v1", meta.CacheTag)
+}
+
+func TestRedisStore_StagedAbortDeletesTempKey(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := New(client, log.NewNopLogger()).(*RedisStore)
+	ctx := context.Background()
+
+	sink, err := store.BeginStagedSet(ctx, "staged-abort", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	writer := sink.(*redisStoreWriter)
+	_, err = sink.Write([]byte("partial"))
+	require.NoError(t, err)
+	require.True(t, mr.Exists(writer.tempKey))
+
+	require.NoError(t, sink.Abort())
+	require.False(t, mr.Exists(writer.tempKey))
+	require.False(t, mr.Exists(store.DataKey("staged-abort")))
+	require.False(t, mr.Exists(store.MetaKey("staged-abort")))
+}
+
+func TestRedisStore_CanceledStagedCommitDeletesTempKey(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := New(client, log.NewNopLogger()).(*RedisStore)
+	ctx := context.Background()
+
+	sink, err := store.BeginStagedSet(ctx, "staged-cancel", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	writer := sink.(*redisStoreWriter)
+	_, err = sink.Write([]byte("partial"))
+	require.NoError(t, err)
+	require.True(t, mr.Exists(writer.tempKey))
+
+	commitCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	require.ErrorIs(t, sink.Commit(commitCtx), context.Canceled)
+	require.False(t, mr.Exists(writer.tempKey))
+	require.False(t, mr.Exists(store.DataKey("staged-cancel")))
+	require.False(t, mr.Exists(store.MetaKey("staged-cancel")))
+}
+
 func TestRedisStore_ActiveStreamKeepsTempKeyVisible(t *testing.T) {
 	mr := setupMiniRedis(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})

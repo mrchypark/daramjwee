@@ -42,6 +42,7 @@ type FileStore struct {
 }
 
 var _ daramjwee.TierValidator = (*FileStore)(nil)
+var _ daramjwee.StagingStore = (*FileStore)(nil)
 
 const encodedKeyPrefix = "b64_"
 const encodedKeyDir = "__encoded__"
@@ -219,6 +220,20 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 // The data is written to a temporary file and then atomically moved to the final location
 // upon closing the writer, or copied if WithCopyWrite option is used.
 func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return fs.beginStagedSet(key, metadata)
+}
+
+func (fs *FileStore) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return fs.beginStagedSet(key, metadata)
+}
+
+func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*stagedFileWriteSink, error) {
 	path := fs.toDataPath(key)
 	fs.beginGenerationTracking(key)
 	trackingActive := true
@@ -259,7 +274,10 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		return cleanupTemp()
 	}
 
-	onClose := func() (err error) {
+	onCommit := func(ctx context.Context) (err error) {
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		defer fs.finishGenerationTracking(key)
 		defer func() {
 			if cleanupErr := cleanupTemp(); cleanupErr != nil && err == nil {
@@ -267,10 +285,18 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 			}
 		}()
 
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		locked := fs.lockPaths([]string{path}, nil)
 		defer func() {
 			fs.unlockPaths(locked)
 		}()
+
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
 		if current := fs.generationFloor(key); current > generation {
 			return nil
@@ -306,7 +332,7 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 
 	// Hand off tracking responsibility to the writer's terminal callbacks.
 	trackingActive = false
-	return newLockedWriteCloser(tmpFile, onClose, abortCleanup), nil
+	return newStagedFileWriteSink(tmpFile, onCommit, abortCleanup), nil
 }
 
 // Delete removes an object from the store.
@@ -665,67 +691,78 @@ func (lrc *lockedReadCloser) Close() error {
 	return lrc.File.Close()
 }
 
-// lockedWriteCloser wraps an os.File and executes an onClose function on Close.
-type lockedWriteCloser struct {
-	*os.File
-	onClose func() error
-	onAbort func() error
-	mu      sync.Mutex
-	done    bool
+type stagedFileWriteSink struct {
+	file     *os.File
+	onCommit func(context.Context) error
+	onAbort  func() error
+	mu       sync.Mutex
+	done     bool
 }
 
-// newLockedWriteCloser creates a new lockedWriteCloser.
-func newLockedWriteCloser(f *os.File, onClose func() error, onAbort func() error) daramjwee.WriteSink {
-	return &lockedWriteCloser{File: f, onClose: onClose, onAbort: onAbort}
+func newStagedFileWriteSink(f *os.File, onCommit func(context.Context) error, onAbort func() error) *stagedFileWriteSink {
+	return &stagedFileWriteSink{file: f, onCommit: onCommit, onAbort: onAbort}
 }
 
-// Close closes the underlying file and then executes the onClose callback.
-// It prioritizes the error from the onClose callback.
-func (lwc *lockedWriteCloser) Close() error {
-	if !lwc.markDone() {
+func (s *stagedFileWriteSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.file == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return s.file.Write(p)
+}
+
+func (s *stagedFileWriteSink) Close() error {
+	return s.Commit(context.Background())
+}
+
+func (s *stagedFileWriteSink) Commit(ctx context.Context) error {
+	file, ok := s.markDone()
+	if !ok {
 		return nil
 	}
 
-	closeErr := lwc.File.Close()
+	closeErr := file.Close()
 	if closeErr != nil {
-		if lwc.onAbort != nil {
-			abortErr := lwc.onAbort()
-			if abortErr != nil {
-				return errors.Join(closeErr, abortErr)
-			}
-		}
-		return closeErr
+		abortErr := s.abort()
+		return errors.Join(closeErr, abortErr)
 	}
 
-	onCloseErr := lwc.onClose()
-
-	if onCloseErr != nil {
-		return onCloseErr
+	commitErr := s.onCommit(ctx)
+	if commitErr != nil {
+		return commitErr
 	}
 	return closeErr
 }
 
-func (lwc *lockedWriteCloser) Abort() error {
-	if !lwc.markDone() {
+func (s *stagedFileWriteSink) Abort() error {
+	file, ok := s.markDone()
+	if !ok {
 		return nil
 	}
 
-	closeErr := lwc.File.Close()
-	var abortErr error
-	if lwc.onAbort != nil {
-		abortErr = lwc.onAbort()
-	}
+	closeErr := file.Close()
+	abortErr := s.abort()
 	return errors.Join(closeErr, abortErr)
 }
 
-func (lwc *lockedWriteCloser) markDone() bool {
-	lwc.mu.Lock()
-	defer lwc.mu.Unlock()
-	if lwc.done {
-		return false
+func (s *stagedFileWriteSink) markDone() (*os.File, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.file == nil {
+		return nil, false
 	}
-	lwc.done = true
-	return true
+	s.done = true
+	file := s.file
+	s.file = nil
+	return file, true
+}
+
+func (s *stagedFileWriteSink) abort() error {
+	if s.onAbort == nil {
+		return nil
+	}
+	return s.onAbort()
 }
 
 // initializeCurrentSize scans the base directory to calculate the current total size

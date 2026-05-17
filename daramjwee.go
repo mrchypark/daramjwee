@@ -206,18 +206,33 @@ type WriteSink interface {
 	Abort() error
 }
 
+// StagedWriteSink is an optional store capability used by the cache core to
+// separate invisible staging from visible publish.
+type StagedWriteSink interface {
+	io.Writer
+	Commit(ctx context.Context) error
+	Abort() error
+}
+
+// StagingStore is an optional Store extension. Stores that implement it let the
+// cache coordinate only the short commit phase instead of holding cache-level
+// same-key ownership for the full caller-controlled write lifetime.
+// BeginStagedSet must keep the currently readable value for key unchanged
+// until Commit succeeds. Abort and failed Commit must leave no visible value
+// from the staged writer, and Delete must not wait for an uncommitted staged
+// writer on the same key to commit or abort.
+type StagingStore interface {
+	BeginStagedSet(ctx context.Context, key string, metadata *Metadata) (StagedWriteSink, error)
+}
+
 // Store defines the interface for a single cache storage tier (e.g., memory, disk).
 type Store interface {
 	// GetStream retrieves an object and its metadata as a stream.
 	// Successful lookups must return non-nil metadata.
 	GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error)
-	// BeginSet returns a sink that stages data into the store.
-	// The currently readable value for key must remain unchanged until the
-	// returned sink is successfully closed or aborted.
+	// BeginSet returns a sink that writes data into the store.
 	BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error)
-	// Delete removes the last committed object from the store.
-	// It must not wait for an uncommitted BeginSet sink on the same key to
-	// close or abort.
+	// Delete removes an object from the store.
 	Delete(ctx context.Context, key string) error
 	// Stat retrieves metadata for an object without its data.
 	Stat(ctx context.Context, key string) (*Metadata, error)

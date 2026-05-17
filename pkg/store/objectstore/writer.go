@@ -41,8 +41,16 @@ func (w *writer) Write(p []byte) (int, error) {
 }
 
 func (w *writer) Close() error {
+	return w.Commit(w.ctx)
+}
+
+func (w *writer) Commit(ctx context.Context) error {
 	if !w.markDone() {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		_ = w.segment.Abort()
+		return err
 	}
 	if err := w.ctx.Err(); err != nil {
 		_ = w.segment.Abort()

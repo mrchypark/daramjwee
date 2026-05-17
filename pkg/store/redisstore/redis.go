@@ -127,6 +127,14 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 
 // BeginSet returns a sink that streams data into Redis.
 func (rs *RedisStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return rs.beginSet(ctx, key, metadata)
+}
+
+func (rs *RedisStore) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	return rs.beginSet(ctx, key, metadata)
+}
+
+func (rs *RedisStore) beginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (*redisStoreWriter, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -193,8 +201,18 @@ func (w *redisStoreWriter) Write(p []byte) (n int, err error) {
 
 // Close commits the metadata to Redis.
 func (w *redisStoreWriter) Close() error {
+	return w.Commit(w.ctx)
+}
+
+func (w *redisStoreWriter) Commit(ctx context.Context) error {
 	if !w.markDone() {
 		return nil
+	}
+	select {
+	case <-ctx.Done():
+		_ = w.rs.client.Del(context.Background(), w.tempKey).Err()
+		return ctx.Err()
+	default:
 	}
 	select {
 	case <-w.ctx.Done():
@@ -206,11 +224,14 @@ func (w *redisStoreWriter) Close() error {
 	metaBytes, err := json.Marshal(w.metadata)
 	if err != nil {
 		level.Error(w.rs.logger).Log("msg", "failed to marshal metadata", "key", w.key, "err", err)
+		if delErr := w.rs.client.Del(context.Background(), w.tempKey).Err(); delErr != nil {
+			level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
+		}
 		return err
 	}
 
 	_, err = w.rs.client.Eval(
-		w.ctx,
+		ctx,
 		commitLuaScript,
 		[]string{w.rs.DataKey(w.key), w.rs.MetaKey(w.key), w.tempKey},
 		metaBytes,
@@ -218,7 +239,7 @@ func (w *redisStoreWriter) Close() error {
 	if err != nil {
 		level.Error(w.rs.logger).Log("msg", "failed to commit data and metadata", "key", w.key, "err", err)
 		// Attempt to clean up the temporary key
-		if delErr := w.rs.client.Del(w.ctx, w.tempKey).Err(); delErr != nil {
+		if delErr := w.rs.client.Del(context.Background(), w.tempKey).Err(); delErr != nil {
 			level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
 		}
 		return err
