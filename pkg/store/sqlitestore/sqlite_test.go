@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,6 +104,18 @@ func TestSQLiteStore_NewWithContextHonorsCanceledContext(t *testing.T) {
 	store, err := NewWithContext(ctx, filepath.Join(t.TempDir(), "cache.db"), log.NewNopLogger())
 	require.Nil(t, store)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSQLiteStore_NewCreatesParentDirectoryPrivate(t *testing.T) {
+	dbDir := filepath.Join(t.TempDir(), "private-cache")
+
+	store, err := New(filepath.Join(dbDir, "cache.db"), log.NewNopLogger())
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	info, err := os.Stat(dbDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), info.Mode().Perm())
 }
 
 func TestSQLiteStore_WithConnectionPoolAppliesLimits(t *testing.T) {

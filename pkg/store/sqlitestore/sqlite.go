@@ -90,7 +90,7 @@ func New(path string, logger log.Logger, opts ...Option) (*SQLiteStore, error) {
 // NewWithContext opens or creates a SQLite database at path and initializes the store schema.
 func NewWithContext(ctx context.Context, path string, logger log.Logger, opts ...Option) (*SQLiteStore, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sqlitestore: open database: context error: %w", err)
 	}
 	if logger == nil {
 		logger = log.NewNopLogger()
@@ -99,7 +99,7 @@ func NewWithContext(ctx context.Context, path string, logger log.Logger, opts ..
 		return nil, errors.New("sqlitestore: path cannot be empty")
 	}
 	cleanPath := filepath.Clean(path)
-	if err := os.MkdirAll(filepath.Dir(cleanPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0700); err != nil {
 		return nil, fmt.Errorf("sqlitestore: create database directory: %w", err)
 	}
 	absPath, err := filepath.Abs(cleanPath)
@@ -151,7 +151,7 @@ func (s *SQLiteStore) Close() error {
 // GetStream retrieves a committed object and its metadata as a chunked stream.
 func (s *SQLiteStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("sqlitestore: get stream for key %q: context error: %w", key, err)
 	}
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -162,13 +162,13 @@ func (s *SQLiteStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 	meta, err := statInTx(ctx, tx, key)
 	if err != nil {
 		s.rollbackReadTx(tx, "failed to rollback sqlite read transaction after stat failure")
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("sqlitestore: get stream for key %q: stat entry: %w", key, err)
 	}
 
 	rows, err := tx.QueryContext(ctx, `SELECT data FROM chunks WHERE key = ? ORDER BY seq`, key)
 	if err != nil {
 		s.rollbackReadTx(tx, "failed to rollback sqlite read transaction after query failure")
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("sqlitestore: get stream for key %q: query chunks: %w", key, err)
 	}
 	return &chunkReader{ctx: ctx, tx: tx, rows: rows}, meta, nil
 }
@@ -177,7 +177,7 @@ func (s *SQLiteStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 // unchanged until the returned sink is closed successfully.
 func (s *SQLiteStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sqlitestore: begin set for key %q: context error: %w", key, err)
 	}
 	generation, err := s.nextGeneration(ctx)
 	if err != nil {
@@ -199,7 +199,7 @@ func (s *SQLiteStore) BeginSet(ctx context.Context, key string, metadata *daramj
 // for staged writes that have not reached Close.
 func (s *SQLiteStore) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("sqlitestore: delete key %q: context error: %w", key, err)
 	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		generation, err := s.nextGenerationInTx(ctx, tx)
@@ -216,16 +216,20 @@ func (s *SQLiteStore) Delete(ctx context.Context, key string) error {
 		if err != nil {
 			return fmt.Errorf("sqlitestore: update generation floor for deleted key %q: %w", key, err)
 		}
-		return err
+		return nil
 	})
 }
 
 // Stat retrieves metadata without opening the object stream.
 func (s *SQLiteStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sqlitestore: stat key %q: context error: %w", key, err)
 	}
-	return statInTx(ctx, s.db, key)
+	meta, err := statInTx(ctx, s.db, key)
+	if err != nil {
+		return nil, fmt.Errorf("sqlitestore: stat key %q: %w", key, err)
+	}
+	return meta, nil
 }
 
 type queryer interface {
@@ -245,7 +249,7 @@ func statInTx(ctx context.Context, q queryer, key string) (*daramjwee.Metadata, 
 		return nil, daramjwee.ErrNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query entry metadata for key %q: %w", key, err)
 	}
 	if cachedAt != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, cachedAt)
@@ -330,7 +334,7 @@ func (s *SQLiteStore) nextGeneration(ctx context.Context) (int64, error) {
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		next, err := s.nextGenerationInTx(ctx, tx)
 		if err != nil {
-			return err
+			return fmt.Errorf("next generation: %w", err)
 		}
 		generation = next
 		return nil
@@ -340,25 +344,37 @@ func (s *SQLiteStore) nextGeneration(ctx context.Context) (int64, error) {
 
 func (s *SQLiteStore) nextGenerationInTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 	if _, err := tx.ExecContext(ctx, `UPDATE generation_sequence SET generation = generation + 1 WHERE id = 1`); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("increment generation sequence: %w", err)
 	}
 	var generation int64
 	if err := tx.QueryRowContext(ctx, `SELECT generation FROM generation_sequence WHERE id = 1`).Scan(&generation); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("read generation sequence: %w", err)
 	}
 	return generation, nil
 }
 
-func (s *SQLiteStore) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
+func (s *SQLiteStore) withTx(ctx context.Context, fn func(*sql.Tx) error) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			level.Warn(s.logger).Log("msg", "failed to rollback sqlite transaction", "err", rollbackErr)
+		}
+	}()
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 func (s *SQLiteStore) getBuffer() []byte {
@@ -425,7 +441,7 @@ func (w *sqliteSink) Write(p []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	if err := w.ctx.Err(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("sqlitestore: write key %q: context error: %w", w.key, err)
 	}
 
 	written := len(p)
@@ -492,6 +508,7 @@ func (w *sqliteSink) flushLocked() error {
 
 func (w *sqliteSink) commitLocked() error {
 	meta := w.metadata
+	cachedAt := meta.CachedAt.Round(0).UTC()
 	return w.store.withTx(w.ctx, func(tx *sql.Tx) error {
 		var floor int64
 		err := tx.QueryRowContext(w.ctx, `SELECT generation FROM generation_floor WHERE key = ?`, w.key).Scan(&floor)
@@ -517,7 +534,7 @@ func (w *sqliteSink) commitLocked() error {
 		if _, err := tx.ExecContext(w.ctx, `
 			INSERT INTO entries(key, cache_tag, is_negative, cached_at, generation)
 			VALUES(?, ?, ?, ?, ?)
-		`, w.key, meta.CacheTag, boolToInt(meta.IsNegative), meta.CachedAt.UTC().Format(time.RFC3339Nano), w.generation); err != nil {
+		`, w.key, meta.CacheTag, boolToInt(meta.IsNegative), cachedAt.Format(time.RFC3339Nano), w.generation); err != nil {
 			return fmt.Errorf("sqlitestore: insert entry for key %q: %w", w.key, err)
 		}
 		if _, err := tx.ExecContext(w.ctx, `
@@ -552,7 +569,10 @@ func (w *sqliteSink) cleanup(ctx context.Context, cause error) error {
 		}
 		return cause
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("sqlitestore: clean staged chunks for key %q: %w", w.key, err)
+	}
+	return nil
 }
 
 func (w *sqliteSink) releaseBuffer() {
@@ -576,7 +596,7 @@ func (r *chunkReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	if err := r.ctx.Err(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("sqlitestore: read chunk stream: context error: %w", err)
 	}
 	for len(r.current) == 0 {
 		if !r.rows.Next() {

@@ -29,6 +29,6 @@ reclaims staged chunks older than 24 hours; committed reads ignore those rows. I
 that cleanup removes chunks from an unusually long-lived active writer, its later
 `Close` fails instead of publishing a partial object.
 
-`New` creates the database parent directory with `0755` permissions when it does
-not already exist. Create the directory yourself with stricter permissions before
-opening the store if the cache path needs narrower access.
+`New` creates the database parent directory with `0700` permissions when it does
+not already exist. Create the directory yourself before opening the store if the
+cache path needs shared group or world-readable access.
