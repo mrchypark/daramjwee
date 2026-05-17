@@ -21,6 +21,9 @@ import (
 
 const (
 	defaultChunkSize     = 512 * 1024
+	defaultMaxOpenConns  = 16
+	defaultMaxIdleConns  = 4
+	defaultTempChunkTTL  = 24 * time.Hour
 	sqliteDriverName     = "sqlite"
 	sqliteSchemaUserVers = 1
 )
@@ -38,12 +41,28 @@ func WithChunkSize(size int) Option {
 	}
 }
 
+// WithConnectionPool sets SQLite database/sql pool limits.
+// Values less than 1 are ignored independently.
+func WithConnectionPool(maxOpen, maxIdle int) Option {
+	return func(s *SQLiteStore) {
+		if maxOpen > 0 {
+			s.maxOpenConns = maxOpen
+		}
+		if maxIdle > 0 {
+			s.maxIdleConns = maxIdle
+		}
+	}
+}
+
 // SQLiteStore is a SQLite-backed daramjwee.Store implementation.
 type SQLiteStore struct {
-	db        *sql.DB
-	logger    log.Logger
-	chunkSize int
-	ownerID   string
+	db           *sql.DB
+	logger       log.Logger
+	chunkSize    int
+	maxOpenConns int
+	maxIdleConns int
+	ownerID      string
+	bufPool      sync.Pool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -65,6 +84,14 @@ func (s *SQLiteStore) BeginSetUsesContext() bool { return true }
 
 // New opens or creates a SQLite database at path and initializes the store schema.
 func New(path string, logger log.Logger, opts ...Option) (*SQLiteStore, error) {
+	return NewWithContext(context.Background(), path, logger, opts...)
+}
+
+// NewWithContext opens or creates a SQLite database at path and initializes the store schema.
+func NewWithContext(ctx context.Context, path string, logger log.Logger, opts ...Option) (*SQLiteStore, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
@@ -84,20 +111,30 @@ func New(path string, logger log.Logger, opts ...Option) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlitestore: open database: %w", err)
 	}
-	db.SetMaxOpenConns(16)
-	db.SetMaxIdleConns(4)
 
 	store := &SQLiteStore{
-		db:        db,
-		logger:    logger,
-		chunkSize: defaultChunkSize,
-		ownerID:   uuid.NewString(),
+		db:           db,
+		logger:       logger,
+		chunkSize:    defaultChunkSize,
+		maxOpenConns: defaultMaxOpenConns,
+		maxIdleConns: defaultMaxIdleConns,
+		ownerID:      uuid.NewString(),
 	}
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.bufPool.New = func() any {
+		return make([]byte, 0, store.chunkSize)
+	}
+	db.SetMaxOpenConns(store.maxOpenConns)
+	db.SetMaxIdleConns(store.maxIdleConns)
 
-	if err := store.initSchema(context.Background()); err != nil {
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlitestore: ping database: %w", err)
+	}
+
+	if err := store.initSchema(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -155,7 +192,7 @@ func (s *SQLiteStore) BeginSet(ctx context.Context, key string, metadata *daramj
 		writeID:    uuid.NewString(),
 		chunkSize:  s.chunkSize,
 		generation: generation,
-		buf:        make([]byte, 0, s.chunkSize),
+		buf:        s.getBuffer(),
 	}, nil
 }
 
@@ -270,7 +307,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	`, now); err != nil {
 		return fmt.Errorf("sqlitestore: initialize generation sequence: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM temp_chunks WHERE owner_id = ?`, s.ownerID); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM temp_chunks WHERE created_at < ?`, time.Now().Add(-defaultTempChunkTTL).UnixNano()); err != nil {
 		return fmt.Errorf("sqlitestore: clean stale temporary chunks: %w", err)
 	}
 	return nil
@@ -320,6 +357,21 @@ func (s *SQLiteStore) withTx(ctx context.Context, fn func(*sql.Tx) error) error 
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *SQLiteStore) getBuffer() []byte {
+	buf := s.bufPool.Get().([]byte)
+	if cap(buf) < s.chunkSize {
+		return make([]byte, 0, s.chunkSize)
+	}
+	return buf[:0]
+}
+
+func (s *SQLiteStore) putBuffer(buf []byte) {
+	if cap(buf) < s.chunkSize {
+		return
+	}
+	s.bufPool.Put(buf[:0])
 }
 
 func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
@@ -436,6 +488,15 @@ func (w *sqliteSink) commitLocked() error {
 		if floor > w.generation {
 			return nil
 		}
+		var stagedChunks int
+		if err := tx.QueryRowContext(w.ctx, `
+			SELECT COUNT(*) FROM temp_chunks WHERE owner_id = ? AND write_id = ?
+		`, w.store.ownerID, w.writeID).Scan(&stagedChunks); err != nil {
+			return err
+		}
+		if stagedChunks != w.seq {
+			return fmt.Errorf("sqlitestore: staged chunk count mismatch for key %q: got %d, want %d", w.key, stagedChunks, w.seq)
+		}
 
 		if _, err := tx.ExecContext(w.ctx, `DELETE FROM entries WHERE key = ?`, w.key); err != nil {
 			return err
@@ -461,6 +522,7 @@ func (w *sqliteSink) commitLocked() error {
 }
 
 func (w *sqliteSink) cleanup(ctx context.Context, cause error) error {
+	w.releaseBuffer()
 	_, err := w.store.db.ExecContext(ctx, `DELETE FROM temp_chunks WHERE owner_id = ? AND write_id = ?`, w.store.ownerID, w.writeID)
 	if cause != nil {
 		if err != nil {
@@ -469,6 +531,14 @@ func (w *sqliteSink) cleanup(ctx context.Context, cause error) error {
 		return cause
 	}
 	return err
+}
+
+func (w *sqliteSink) releaseBuffer() {
+	if w.buf == nil {
+		return
+	}
+	w.store.putBuffer(w.buf)
+	w.buf = nil
 }
 
 type chunkReader struct {

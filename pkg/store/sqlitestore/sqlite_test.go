@@ -96,6 +96,22 @@ func TestSQLiteStore_ReopenPreservesCommittedEntries(t *testing.T) {
 	assert.Equal(t, "v1", meta.CacheTag)
 }
 
+func TestSQLiteStore_NewWithContextHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	store, err := NewWithContext(ctx, filepath.Join(t.TempDir(), "cache.db"), log.NewNopLogger())
+	require.Nil(t, store)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSQLiteStore_WithConnectionPoolAppliesLimits(t *testing.T) {
+	store := setupTestStore(t, WithConnectionPool(3, 2))
+
+	stats := store.db.Stats()
+	assert.Equal(t, 3, stats.MaxOpenConnections)
+}
+
 func TestSQLiteStore_ReopenAdvancesGenerationPastPersistedFloor(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "cache.db")
@@ -397,6 +413,31 @@ func TestSQLiteStore_NewDoesNotDeleteOtherSessionStagedChunks(t *testing.T) {
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("first chunk flushed and buffered"), body)
+}
+
+func TestSQLiteStore_OldStagedChunkCleanupCannotPartiallyPublishLiveWriter(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+
+	first, err := New(dbPath, log.NewNopLogger(), WithChunkSize(4))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, first.Close()) })
+
+	sink, err := first.BeginSet(ctx, "old-staged-key", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = sink.Write([]byte("first chunk remains staged"))
+	require.NoError(t, err)
+
+	_, err = first.db.ExecContext(ctx, `UPDATE temp_chunks SET created_at = ?`, time.Now().Add(-25*time.Hour).UnixNano())
+	require.NoError(t, err)
+
+	second, err := New(dbPath, log.NewNopLogger())
+	require.NoError(t, err)
+	require.NoError(t, second.Close())
+
+	require.Error(t, sink.Close())
+	_, _, err = first.GetStream(ctx, "old-staged-key")
+	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
 func TestSQLiteStore_GetStreamReadsAcrossChunks(t *testing.T) {

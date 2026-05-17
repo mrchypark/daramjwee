@@ -22,5 +22,7 @@ defer store.Close()
 The store opens SQLite in WAL mode. Keep the database file together with its
 `-wal` and `-shm` sidecars when copying or backing up the cache. Staged chunks
 are cleaned on normal close/abort paths. If a process exits while a writer is
-open, orphaned staged chunks from that process remain until a future maintenance
-path removes them; committed reads ignore those rows.
+open, orphaned staged chunks from that process remain until a future store open
+reclaims staged chunks older than 24 hours; committed reads ignore those rows.
+If that cleanup removes chunks from an unusually long-lived active writer, its
+later `Close` fails instead of publishing a partial object.
