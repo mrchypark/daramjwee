@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -263,43 +264,15 @@ func statInTx(ctx context.Context, q queryer, key string) (*daramjwee.Metadata, 
 }
 
 func (s *SQLiteStore) initSchema(ctx context.Context) error {
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS entries (
-			key TEXT PRIMARY KEY,
-			cache_tag TEXT NOT NULL,
-			is_negative INTEGER NOT NULL,
-			cached_at TEXT NOT NULL,
-			generation INTEGER NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS chunks (
-			key TEXT NOT NULL,
-			seq INTEGER NOT NULL,
-			data BLOB NOT NULL,
-			PRIMARY KEY (key, seq),
-			FOREIGN KEY (key) REFERENCES entries(key) ON DELETE CASCADE
-		)`,
-		`CREATE TABLE IF NOT EXISTS temp_chunks (
-			write_id TEXT NOT NULL,
-			seq INTEGER NOT NULL,
-			data BLOB NOT NULL,
-			created_at INTEGER NOT NULL,
-			PRIMARY KEY (write_id, seq)
-		)`,
-		`CREATE INDEX IF NOT EXISTS temp_chunks_created_at_idx ON temp_chunks(created_at)`,
-		`CREATE TABLE IF NOT EXISTS generation_floor (
-			key TEXT PRIMARY KEY,
-			generation INTEGER NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS generation_sequence (
-			id INTEGER PRIMARY KEY CHECK (id = 1),
-			generation INTEGER NOT NULL
-		)`,
-		fmt.Sprintf(`PRAGMA user_version = %d`, sqliteSchemaUserVers),
+	currentVersion, err := s.schemaVersion(ctx)
+	if err != nil {
+		return err
 	}
-	for _, stmt := range statements {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("sqlitestore: initialize schema: %w", err)
-		}
+	if currentVersion > sqliteSchemaUserVers {
+		return fmt.Errorf("sqlitestore: database uses newer sqlite schema version %d, supported version is %d", currentVersion, sqliteSchemaUserVers)
+	}
+	if err := s.migrateSchema(ctx, currentVersion); err != nil {
+		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO generation_sequence(id, generation)
@@ -318,8 +291,76 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	return nil
 }
 
+func (s *SQLiteStore) schemaVersion(ctx context.Context) (int, error) {
+	var version int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("sqlitestore: read sqlite schema version: %w", err)
+	}
+	return version, nil
+}
+
+func (s *SQLiteStore) migrateSchema(ctx context.Context, currentVersion int) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		for version := currentVersion + 1; version <= sqliteSchemaUserVers; version++ {
+			switch version {
+			case 1:
+				if err := initSchemaV1(ctx, tx); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("sqlitestore: no migration for sqlite schema version %d", version)
+			}
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, version)); err != nil {
+				return fmt.Errorf("sqlitestore: set sqlite schema version %d: %w", version, err)
+			}
+		}
+		return nil
+	})
+}
+
+func initSchemaV1(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS entries (
+				key TEXT PRIMARY KEY,
+			cache_tag TEXT NOT NULL,
+			is_negative INTEGER NOT NULL,
+			cached_at TEXT NOT NULL,
+			generation INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS chunks (
+			key TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			data BLOB NOT NULL,
+			PRIMARY KEY (key, seq),
+			FOREIGN KEY (key) REFERENCES entries(key) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE IF NOT EXISTS temp_chunks (
+			write_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			data BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (write_id, seq)
+			)`,
+		`CREATE INDEX IF NOT EXISTS temp_chunks_created_at_idx ON temp_chunks(created_at)`,
+		`CREATE TABLE IF NOT EXISTS generation_floor (
+			key TEXT PRIMARY KEY,
+			generation INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS generation_sequence (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+				generation INTEGER NOT NULL
+			)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("sqlitestore: initialize schema: %w", err)
+		}
+	}
+	return nil
+}
+
 func sqliteDSN(path string) string {
-	u := url.URL{Scheme: "file", Path: path}
+	u := url.URL{Scheme: "file", Path: strings.ReplaceAll(filepath.ToSlash(path), `\`, `/`)}
 	q := u.Query()
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "synchronous(NORMAL)")

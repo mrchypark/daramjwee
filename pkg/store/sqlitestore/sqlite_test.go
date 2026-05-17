@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"io"
 	"os"
 	"path/filepath"
@@ -116,6 +117,27 @@ func TestSQLiteStore_NewCreatesParentDirectoryPrivate(t *testing.T) {
 	info, err := os.Stat(dbDir)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0700), info.Mode().Perm())
+}
+
+func TestSQLiteStore_NewRejectsNewerSchemaVersion(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	db, err := sql.Open(sqliteDriverName, sqliteDSN(dbPath))
+	require.NoError(t, err)
+	_, err = db.Exec(`PRAGMA user_version = 2`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := New(dbPath, log.NewNopLogger())
+	require.Nil(t, store)
+	assert.ErrorContains(t, err, "newer sqlite schema version")
+}
+
+func TestSQLiteDSNNormalizesBackslashes(t *testing.T) {
+	dsn := sqliteDSN(`C:\cache\store.db`)
+
+	assert.NotContains(t, dsn, `\`)
+	assert.NotContains(t, dsn, `%5C`)
+	assert.Contains(t, dsn, "C:/cache/store.db")
 }
 
 func TestSQLiteStore_WithConnectionPoolAppliesLimits(t *testing.T) {
