@@ -1,0 +1,66 @@
+{
+  "name": "daramjwee",
+  "scope": "repo",
+  "repo": "mrchypark/daramjwee",
+  "categories": {
+    "cache_write_integrity": {
+      "description": "Cache writes must not publish partial, stale, or corrupt objects when copy, close, abort, or delete races occur.",
+      "patterns": [
+        "\\bstale\\b",
+        "\\bgeneration\\b",
+        "\\bpartial object\\b",
+        "\\bcorrupt\\b",
+        "\\bClose\\(\\)",
+        "\\bAbort\\(\\)",
+        "\\bdelete\\b"
+      ]
+    },
+    "store_path_security": {
+      "description": "Store paths must avoid traversal, ambiguous legacy encodings, and cross-platform path parsing bugs.",
+      "patterns": [
+        "\\bpath traversal\\b",
+        "\\bfilepath\\b",
+        "\\bbaseDir\\b",
+        "\\blegacy\\b",
+        "\\bWindows\\b",
+        "\\bURI\\b",
+        "\\bbackslash\\b"
+      ]
+    },
+    "store_resource_lifecycle": {
+      "description": "Readers, writers, transactions, buffers, and staged rows need explicit close, rollback, cleanup, and leak handling.",
+      "patterns": [
+        "\\bClose\\b",
+        "\\bRollback\\b",
+        "\\bcleanup\\b",
+        "\\bleak\\b",
+        "\\bbuffer\\b",
+        "\\bstaged\\b",
+        "\\btemp_chunks\\b"
+      ]
+    },
+    "policy_freshness_time": {
+      "description": "Freshness, TTL, cached timestamps, and clock behavior must be explicit and deterministic.",
+      "patterns": [
+        "\\bfresh\\b",
+        "\\bstale\\b",
+        "\\bTTL\\b",
+        "\\btimestamp\\b",
+        "\\bmonotonic\\b",
+        "\\btime\\b"
+      ]
+    },
+    "prodlike_store_compatibility": {
+      "description": "Store changes should preserve behavior across memory, file, object, Redis, and SQLite backends where contracts overlap.",
+      "patterns": [
+        "\\bstoretest\\b",
+        "\\bprodlike\\b",
+        "\\bcompat",
+        "\\bfilestore\\b",
+        "\\bobjectstore\\b",
+        "\\bredisstore\\b",
+        "\\bsqlitestore\\b"
+      ]
+    }
+  }
+}
