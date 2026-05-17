@@ -244,7 +244,7 @@ func TestSQLiteStore_LateCloseDoesNotOverwriteNewerValue(t *testing.T) {
 	_, err = newWriter.Write([]byte("new"))
 	require.NoError(t, err)
 	require.NoError(t, newWriter.Close())
-	require.NoError(t, oldWriter.Close())
+	require.ErrorIs(t, oldWriter.Close(), daramjwee.ErrTopWriteInvalidated)
 
 	reader, meta, err := store.GetStream(ctx, "ordered-key")
 	require.NoError(t, err)
@@ -265,7 +265,7 @@ func TestSQLiteStore_DeleteAfterBeginSetPreventsStalePublish(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, store.Delete(ctx, "racy-key"))
-	require.NoError(t, sink.Close())
+	require.ErrorIs(t, sink.Close(), daramjwee.ErrTopWriteInvalidated)
 
 	_, _, err = store.GetStream(ctx, "racy-key")
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
@@ -288,7 +288,7 @@ func TestSQLiteStore_DeleteFromOtherInstancePreventsStalePublish(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, first.Delete(ctx, "cross-instance-key"))
-	require.NoError(t, sink.Close())
+	require.ErrorIs(t, sink.Close(), daramjwee.ErrTopWriteInvalidated)
 
 	_, _, err = first.GetStream(ctx, "cross-instance-key")
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)

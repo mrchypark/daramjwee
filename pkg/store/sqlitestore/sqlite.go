@@ -495,41 +495,44 @@ func (w *sqliteSink) commitLocked() error {
 		var floor uint64
 		err := tx.QueryRowContext(w.ctx, `SELECT generation FROM generation_floor WHERE key = ?`, w.key).Scan(&floor)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
+			return fmt.Errorf("sqlitestore: read generation floor for key %q: %w", w.key, err)
 		}
 		if floor > w.generation {
-			return nil
+			return fmt.Errorf("sqlitestore: stale write rejected for key %q: %w", w.key, daramjwee.ErrTopWriteInvalidated)
 		}
 		var stagedChunks int
 		if err := tx.QueryRowContext(w.ctx, `
 			SELECT COUNT(*) FROM temp_chunks WHERE owner_id = ? AND write_id = ?
 		`, w.store.ownerID, w.writeID).Scan(&stagedChunks); err != nil {
-			return err
+			return fmt.Errorf("sqlitestore: count staged chunks for key %q: %w", w.key, err)
 		}
 		if stagedChunks != w.seq {
 			return fmt.Errorf("sqlitestore: staged chunk count mismatch for key %q: got %d, want %d", w.key, stagedChunks, w.seq)
 		}
 
 		if _, err := tx.ExecContext(w.ctx, `DELETE FROM entries WHERE key = ?`, w.key); err != nil {
-			return err
+			return fmt.Errorf("sqlitestore: delete existing entry for key %q: %w", w.key, err)
 		}
 		if _, err := tx.ExecContext(w.ctx, `
 			INSERT INTO entries(key, cache_tag, is_negative, cached_at, generation)
 			VALUES(?, ?, ?, ?, ?)
 		`, w.key, meta.CacheTag, boolToInt(meta.IsNegative), meta.CachedAt.UTC().Format(time.RFC3339Nano), w.generation); err != nil {
-			return err
+			return fmt.Errorf("sqlitestore: insert entry for key %q: %w", w.key, err)
 		}
 		if _, err := tx.ExecContext(w.ctx, `
 			INSERT INTO chunks(key, seq, data)
 			SELECT ?, seq, data FROM temp_chunks WHERE owner_id = ? AND write_id = ? ORDER BY seq
 		`, w.key, w.store.ownerID, w.writeID); err != nil {
-			return err
+			return fmt.Errorf("sqlitestore: publish staged chunks for key %q: %w", w.key, err)
 		}
 		_, err = tx.ExecContext(w.ctx, `
 			INSERT INTO generation_floor(key, generation) VALUES(?, ?)
 			ON CONFLICT(key) DO UPDATE SET generation = max(generation_floor.generation, excluded.generation)
 		`, w.key, w.generation)
-		return err
+		if err != nil {
+			return fmt.Errorf("sqlitestore: update generation floor for key %q: %w", w.key, err)
+		}
+		return nil
 	})
 }
 
