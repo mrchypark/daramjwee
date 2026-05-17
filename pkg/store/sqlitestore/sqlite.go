@@ -325,8 +325,8 @@ func sqliteDSN(path string) string {
 	return u.String()
 }
 
-func (s *SQLiteStore) nextGeneration(ctx context.Context) (uint64, error) {
-	var generation uint64
+func (s *SQLiteStore) nextGeneration(ctx context.Context) (int64, error) {
+	var generation int64
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		next, err := s.nextGenerationInTx(ctx, tx)
 		if err != nil {
@@ -338,11 +338,11 @@ func (s *SQLiteStore) nextGeneration(ctx context.Context) (uint64, error) {
 	return generation, err
 }
 
-func (s *SQLiteStore) nextGenerationInTx(ctx context.Context, tx *sql.Tx) (uint64, error) {
+func (s *SQLiteStore) nextGenerationInTx(ctx context.Context, tx *sql.Tx) (int64, error) {
 	if _, err := tx.ExecContext(ctx, `UPDATE generation_sequence SET generation = generation + 1 WHERE id = 1`); err != nil {
 		return 0, err
 	}
-	var generation uint64
+	var generation int64
 	if err := tx.QueryRowContext(ctx, `SELECT generation FROM generation_sequence WHERE id = 1`).Scan(&generation); err != nil {
 		return 0, err
 	}
@@ -410,7 +410,7 @@ type sqliteSink struct {
 	metadata   *daramjwee.Metadata
 	writeID    string
 	chunkSize  int
-	generation uint64
+	generation int64
 
 	mu   sync.Mutex
 	buf  []byte
@@ -493,7 +493,7 @@ func (w *sqliteSink) flushLocked() error {
 func (w *sqliteSink) commitLocked() error {
 	meta := w.metadata
 	return w.store.withTx(w.ctx, func(tx *sql.Tx) error {
-		var floor uint64
+		var floor int64
 		err := tx.QueryRowContext(w.ctx, `SELECT generation FROM generation_floor WHERE key = ?`, w.key).Scan(&floor)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("sqlitestore: read generation floor for key %q: %w", w.key, err)
