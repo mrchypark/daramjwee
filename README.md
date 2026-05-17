@@ -25,6 +25,7 @@ A pragmatic and lightweight hybrid caching middleware for Go.
 
       * **`FileStore`**: Guarantees atomic writes by default using a "write-to-temp-then-rename" pattern to prevent data corruption. It also offers a copy-based alternative (`WithCopyWrite`) for compatibility with network filesystems, though this option is **not atomic and may leave orphan files on failure**, and it is not supported as a top-tier (tier 0) store due to limitations with the stream-through publish contract.
       * **`MemStore`**: A thread-safe, high-throughput in-memory store with fully integrated capacity-based eviction logic. Its performance is optimized using `sync.Pool` to reduce memory allocations under high concurrency.
+      * **`SQLiteStore`**: A local persistent store backed by SQLite. It stages writes in temporary chunk rows and publishes them transactionally on `Close`, making it useful when you want a compact durable tier without managing a filesystem object layout.
       * **`objectstore`**: A first-party `Store` for `thanos-io/objstore` providers (S3, GCS, Azure Blob Storage). It is designed for cost-efficient durable caching, especially when object count and large-object read cost matter, while still fitting into the same ordered-tier cache model as the other backends. Its local `dataDir` is an ingest/catalog workspace, not a persistent local read-cache tier. If you want durable remote backing plus local file-cache hits, place `FileStore` ahead of `objectstore` in `WithTiers(...)`. In distributed deployments, concurrent writes to the same key are still last-writer-wins unless you coordinate writers externally.
         Local emulator demos for the objectstore path now live under [`examples/file_objstore_gcs_vind`](./examples/file_objstore_gcs_vind) and [`examples/file_objstore_s3_vind`](./examples/file_objstore_s3_vind), while the older GCS examples remain real-cloud configuration examples.
 
@@ -292,6 +293,26 @@ defer group.Close()
 
 See [`examples/cache_group`](./examples/cache_group) for a runnable local demo.
 See [`examples/file_objstore_gcs_vind`](./examples/file_objstore_gcs_vind) and [`examples/file_objstore_s3_vind`](./examples/file_objstore_s3_vind) for runnable local objectstore demos on emulator-backed buckets.
+
+## SQLiteStore Configuration
+
+`sqlitestore` provides a local durable `Store` backed by SQLite:
+
+```go
+store, err := sqlitestore.New(
+    "/var/lib/daramjwee/cache.db",
+    log.With(logger, "tier", "sqlite"),
+    sqlitestore.WithChunkSize(512<<10),
+)
+if err != nil {
+    return err
+}
+defer store.Close()
+```
+
+The default chunk size is 512 KiB. Smaller chunks reduce the maximum blob size of each row, while larger chunks reduce row count for large objects.
+
+The store enables WAL mode, so SQLite may create `-wal` and `-shm` sidecar files next to the database. Treat the database and sidecars as one cache artifact for backup, copy, and cleanup purposes.
 
 ## objectstore Configuration
 

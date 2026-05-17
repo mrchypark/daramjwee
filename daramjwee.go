@@ -29,6 +29,10 @@ var ErrCacheableNotFound = errors.New("daramjwee: resource not found, but this s
 // is invoked without a Fetcher.
 var ErrNilFetcher = errors.New("daramjwee: nil fetcher")
 
+// ErrTopWriteInvalidated is returned when a coordinated top-tier write loses
+// the generation race to a newer write or delete.
+var ErrTopWriteInvalidated = errors.New("daramjwee: top-tier write invalidated")
+
 // Cache is the primary public interface for interacting with daramjwee.
 // It enforces a memory-safe, stream-based interaction model.
 type Cache interface {
