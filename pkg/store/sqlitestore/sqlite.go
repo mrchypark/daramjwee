@@ -157,7 +157,7 @@ func (s *SQLiteStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("sqlitestore: get stream for key %q: begin read transaction: %w", key, err)
 	}
 
 	meta, err := statInTx(ctx, tx, key)
@@ -182,7 +182,7 @@ func (s *SQLiteStore) BeginSet(ctx context.Context, key string, metadata *daramj
 	}
 	generation, err := s.nextGeneration(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sqlitestore: begin set for key %q: get next generation: %w", key, err)
 	}
 	return &sqliteSink{
 		ctx:        ctx,
@@ -205,15 +205,18 @@ func (s *SQLiteStore) Delete(ctx context.Context, key string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		generation, err := s.nextGenerationInTx(ctx, tx)
 		if err != nil {
-			return err
+			return fmt.Errorf("sqlitestore: delete key %q: get next generation: %w", key, err)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM entries WHERE key = ?`, key); err != nil {
-			return err
+			return fmt.Errorf("sqlitestore: delete entry for key %q: %w", key, err)
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO generation_floor(key, generation) VALUES(?, ?)
 			ON CONFLICT(key) DO UPDATE SET generation = max(generation_floor.generation, excluded.generation)
 		`, key, generation)
+		if err != nil {
+			return fmt.Errorf("sqlitestore: update generation floor for deleted key %q: %w", key, err)
+		}
 		return err
 	})
 }
@@ -317,6 +320,7 @@ func sqliteDSN(path string) string {
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()
 	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "foreign_keys(ON)")
 	u.RawQuery = q.Encode()
@@ -481,7 +485,7 @@ func (w *sqliteSink) flushLocked() error {
 	if _, err := w.store.db.ExecContext(w.ctx, `
 		INSERT INTO temp_chunks(owner_id, write_id, seq, data, created_at) VALUES(?, ?, ?, ?, ?)
 	`, w.store.ownerID, w.writeID, w.seq, w.buf, time.Now().UnixNano()); err != nil {
-		return err
+		return fmt.Errorf("sqlitestore: flush staged chunk for key %q: %w", w.key, err)
 	}
 	w.seq++
 	w.buf = w.buf[:0]
@@ -573,12 +577,12 @@ func (r *chunkReader) Read(p []byte) (int, error) {
 	for len(r.current) == 0 {
 		if !r.rows.Next() {
 			if err := r.rows.Err(); err != nil {
-				return 0, err
+				return 0, fmt.Errorf("sqlitestore: read chunk stream: iterate chunks: %w", err)
 			}
 			return 0, io.EOF
 		}
 		if err := r.rows.Scan(&r.current); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("sqlitestore: read chunk stream: scan chunk data: %w", err)
 		}
 	}
 	n := copy(p, r.current)
