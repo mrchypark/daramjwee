@@ -20,9 +20,11 @@ defer store.Close()
 ```
 
 The store opens SQLite in WAL mode. Keep the database file together with its
-`-wal` and `-shm` sidecars when copying or backing up the cache. Staged chunks
-are cleaned on normal close/abort paths. If a process exits while a writer is
-open, orphaned staged chunks from that process remain until a future store open
-reclaims staged chunks older than 24 hours; committed reads ignore those rows.
-If that cleanup removes chunks from an unusually long-lived active writer, its
-later `Close` fails instead of publishing a partial object.
+`-wal` and `-shm` sidecars when copying or backing up the cache. Close streams
+returned by `GetStream` promptly; they hold a read transaction for snapshot
+consistency and long-lived readers can delay WAL checkpointing. Staged chunks are
+cleaned on normal close/abort paths. If a process exits while a writer is open,
+orphaned staged chunks from that process remain until a future store open
+reclaims staged chunks older than 24 hours; committed reads ignore those rows. If
+that cleanup removes chunks from an unusually long-lived active writer, its later
+`Close` fails instead of publishing a partial object.
