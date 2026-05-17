@@ -20,12 +20,13 @@ import (
 )
 
 const (
-	defaultChunkSize     = 512 * 1024
-	defaultMaxOpenConns  = 16
-	defaultMaxIdleConns  = 4
-	defaultTempChunkTTL  = 24 * time.Hour
-	sqliteDriverName     = "sqlite"
-	sqliteSchemaUserVers = 1
+	defaultChunkSize      = 512 * 1024
+	defaultMaxOpenConns   = 16
+	defaultMaxIdleConns   = 4
+	defaultTempChunkTTL   = 24 * time.Hour
+	defaultCleanupTimeout = 10 * time.Second
+	sqliteDriverName      = "sqlite"
+	sqliteSchemaUserVers  = 1
 )
 
 // Option configures SQLiteStore.
@@ -61,7 +62,6 @@ type SQLiteStore struct {
 	chunkSize    int
 	maxOpenConns int
 	maxIdleConns int
-	ownerID      string
 	bufPool      sync.Pool
 
 	closeOnce sync.Once
@@ -118,7 +118,6 @@ func NewWithContext(ctx context.Context, path string, logger log.Logger, opts ..
 		chunkSize:    defaultChunkSize,
 		maxOpenConns: defaultMaxOpenConns,
 		maxIdleConns: defaultMaxIdleConns,
-		ownerID:      uuid.NewString(),
 	}
 	for _, opt := range opts {
 		opt(store)
@@ -276,12 +275,11 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 			FOREIGN KEY (key) REFERENCES entries(key) ON DELETE CASCADE
 		)`,
 		`CREATE TABLE IF NOT EXISTS temp_chunks (
-			owner_id TEXT NOT NULL,
 			write_id TEXT NOT NULL,
 			seq INTEGER NOT NULL,
 			data BLOB NOT NULL,
 			created_at INTEGER NOT NULL,
-			PRIMARY KEY (owner_id, write_id, seq)
+			PRIMARY KEY (write_id, seq)
 		)`,
 		`CREATE INDEX IF NOT EXISTS temp_chunks_created_at_idx ON temp_chunks(created_at)`,
 		`CREATE TABLE IF NOT EXISTS generation_floor (
@@ -455,17 +453,17 @@ func (w *sqliteSink) Close() error {
 	}
 	w.done = true
 	if err := w.ctx.Err(); err != nil {
-		return w.cleanup(context.Background(), err)
+		return w.cleanupWithTimeout(err)
 	}
 	if len(w.buf) > 0 {
 		if err := w.flushLocked(); err != nil {
-			return w.cleanup(context.Background(), err)
+			return w.cleanupWithTimeout(err)
 		}
 	}
 	if err := w.commitLocked(); err != nil {
-		return w.cleanup(context.Background(), err)
+		return w.cleanupWithTimeout(err)
 	}
-	return w.cleanup(context.Background(), nil)
+	return w.cleanupWithTimeout(nil)
 }
 
 func (w *sqliteSink) Abort() error {
@@ -475,7 +473,7 @@ func (w *sqliteSink) Abort() error {
 		return nil
 	}
 	w.done = true
-	return w.cleanup(context.Background(), nil)
+	return w.cleanupWithTimeout(nil)
 }
 
 func (w *sqliteSink) flushLocked() error {
@@ -483,8 +481,8 @@ func (w *sqliteSink) flushLocked() error {
 		return nil
 	}
 	if _, err := w.store.db.ExecContext(w.ctx, `
-		INSERT INTO temp_chunks(owner_id, write_id, seq, data, created_at) VALUES(?, ?, ?, ?, ?)
-	`, w.store.ownerID, w.writeID, w.seq, w.buf, time.Now().UnixNano()); err != nil {
+		INSERT INTO temp_chunks(write_id, seq, data, created_at) VALUES(?, ?, ?, ?)
+	`, w.writeID, w.seq, w.buf, time.Now().UnixNano()); err != nil {
 		return fmt.Errorf("sqlitestore: flush staged chunk for key %q: %w", w.key, err)
 	}
 	w.seq++
@@ -505,8 +503,8 @@ func (w *sqliteSink) commitLocked() error {
 		}
 		var stagedChunks int
 		if err := tx.QueryRowContext(w.ctx, `
-			SELECT COUNT(*) FROM temp_chunks WHERE owner_id = ? AND write_id = ?
-		`, w.store.ownerID, w.writeID).Scan(&stagedChunks); err != nil {
+			SELECT COUNT(*) FROM temp_chunks WHERE write_id = ?
+		`, w.writeID).Scan(&stagedChunks); err != nil {
 			return fmt.Errorf("sqlitestore: count staged chunks for key %q: %w", w.key, err)
 		}
 		if stagedChunks != w.seq {
@@ -524,8 +522,8 @@ func (w *sqliteSink) commitLocked() error {
 		}
 		if _, err := tx.ExecContext(w.ctx, `
 			INSERT INTO chunks(key, seq, data)
-			SELECT ?, seq, data FROM temp_chunks WHERE owner_id = ? AND write_id = ? ORDER BY seq
-		`, w.key, w.store.ownerID, w.writeID); err != nil {
+			SELECT ?, seq, data FROM temp_chunks WHERE write_id = ? ORDER BY seq
+		`, w.key, w.writeID); err != nil {
 			return fmt.Errorf("sqlitestore: publish staged chunks for key %q: %w", w.key, err)
 		}
 		_, err = tx.ExecContext(w.ctx, `
@@ -539,9 +537,15 @@ func (w *sqliteSink) commitLocked() error {
 	})
 }
 
+func (w *sqliteSink) cleanupWithTimeout(cause error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
+	defer cancel()
+	return w.cleanup(ctx, cause)
+}
+
 func (w *sqliteSink) cleanup(ctx context.Context, cause error) error {
 	w.releaseBuffer()
-	_, err := w.store.db.ExecContext(ctx, `DELETE FROM temp_chunks WHERE owner_id = ? AND write_id = ?`, w.store.ownerID, w.writeID)
+	_, err := w.store.db.ExecContext(ctx, `DELETE FROM temp_chunks WHERE write_id = ?`, w.writeID)
 	if cause != nil {
 		if err != nil {
 			level.Warn(w.store.logger).Log("msg", "failed to clean staged sqlite chunks", "key", w.key, "err", err)
