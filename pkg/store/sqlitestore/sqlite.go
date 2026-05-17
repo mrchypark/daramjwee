@@ -281,6 +281,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			PRIMARY KEY (owner_id, write_id, seq)
 		)`,
+		`CREATE INDEX IF NOT EXISTS temp_chunks_created_at_idx ON temp_chunks(created_at)`,
 		`CREATE TABLE IF NOT EXISTS generation_floor (
 			key TEXT PRIMARY KEY,
 			generation INTEGER NOT NULL
