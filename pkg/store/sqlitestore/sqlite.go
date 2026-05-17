@@ -130,12 +130,12 @@ func NewWithContext(ctx context.Context, path string, logger log.Logger, opts ..
 	db.SetMaxIdleConns(store.maxIdleConns)
 
 	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
+		logDBCloseError(logger, db, "failed to close sqlite database after ping failure")
 		return nil, fmt.Errorf("sqlitestore: ping database: %w", err)
 	}
 
 	if err := store.initSchema(ctx); err != nil {
-		_ = db.Close()
+		logDBCloseError(logger, db, "failed to close sqlite database after schema initialization failure")
 		return nil, err
 	}
 	return store, nil
@@ -162,13 +162,13 @@ func (s *SQLiteStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 
 	meta, err := statInTx(ctx, tx, key)
 	if err != nil {
-		_ = tx.Rollback()
+		s.rollbackReadTx(tx, "failed to rollback sqlite read transaction after stat failure")
 		return nil, nil, err
 	}
 
 	rows, err := tx.QueryContext(ctx, `SELECT data FROM chunks WHERE key = ? ORDER BY seq`, key)
 	if err != nil {
-		_ = tx.Rollback()
+		s.rollbackReadTx(tx, "failed to rollback sqlite read transaction after query failure")
 		return nil, nil, err
 	}
 	return &chunkReader{ctx: ctx, tx: tx, rows: rows}, meta, nil
@@ -372,6 +372,18 @@ func (s *SQLiteStore) putBuffer(buf []byte) {
 		return
 	}
 	s.bufPool.Put(buf[:0])
+}
+
+func (s *SQLiteStore) rollbackReadTx(tx *sql.Tx, msg string) {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		level.Warn(s.logger).Log("msg", msg, "err", err)
+	}
+}
+
+func logDBCloseError(logger log.Logger, db *sql.DB, msg string) {
+	if err := db.Close(); err != nil {
+		level.Warn(logger).Log("msg", msg, "err", err)
+	}
 }
 
 func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
@@ -579,11 +591,8 @@ func (r *chunkReader) Close() error {
 	r.closed = true
 	rowsErr := r.rows.Close()
 	txErr := r.tx.Rollback()
-	if rowsErr != nil {
-		return rowsErr
+	if txErr != nil && errors.Is(txErr, sql.ErrTxDone) {
+		txErr = nil
 	}
-	if txErr != nil && !errors.Is(txErr, sql.ErrTxDone) {
-		return txErr
-	}
-	return nil
+	return errors.Join(rowsErr, txErr)
 }
