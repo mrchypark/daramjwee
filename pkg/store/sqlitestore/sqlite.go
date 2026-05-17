@@ -257,7 +257,6 @@ func statInTx(ctx context.Context, q queryer, key string) (*daramjwee.Metadata, 
 }
 
 func (s *SQLiteStore) initSchema(ctx context.Context) error {
-	now := time.Now().UnixNano()
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS entries (
 			key TEXT PRIMARY KEY,
@@ -299,13 +298,13 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO generation_sequence(id, generation)
-		SELECT 1, max(?,
+		SELECT 1, max(
 			COALESCE((SELECT MAX(generation) FROM entries), 0),
 			COALESCE((SELECT MAX(generation) FROM generation_floor), 0),
 			COALESCE((SELECT generation FROM generation_sequence WHERE id = 1), 0)
 		)
 		ON CONFLICT(id) DO UPDATE SET generation = max(generation_sequence.generation, excluded.generation)
-	`, now); err != nil {
+	`); err != nil {
 		return fmt.Errorf("sqlitestore: initialize generation sequence: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM temp_chunks WHERE created_at < ?`, time.Now().Add(-defaultTempChunkTTL).UnixNano()); err != nil {
