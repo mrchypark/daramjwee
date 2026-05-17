@@ -170,9 +170,6 @@ func (s *SQLiteStore) Delete(ctx context.Context, key string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE key = ?`, key); err != nil {
-			return err
-		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM entries WHERE key = ?`, key); err != nil {
 			return err
 		}
@@ -440,9 +437,6 @@ func (w *sqliteSink) commitLocked() error {
 			return nil
 		}
 
-		if _, err := tx.ExecContext(w.ctx, `DELETE FROM chunks WHERE key = ?`, w.key); err != nil {
-			return err
-		}
 		if _, err := tx.ExecContext(w.ctx, `DELETE FROM entries WHERE key = ?`, w.key); err != nil {
 			return err
 		}
