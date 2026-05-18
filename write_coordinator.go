@@ -437,7 +437,7 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 			s.coord.stateChanged.Wait()
 		}
 
-		if s.coord.latestGenerationLocked() != s.generation {
+		if s.coord.committedGeneration > s.generation {
 			s.coord.ensureReservationsLocked()
 			delete(s.coord.activeReservations, s.generation)
 			s.coord.stateChanged.Broadcast()
@@ -468,7 +468,7 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 			s.err = closeErr
 			return
 		}
-		if s.coord.latestGenerationLocked() != s.generation {
+		if s.coord.committedGeneration > s.generation {
 			s.coord.ensureReservationsLocked()
 			delete(s.coord.activeReservations, s.generation)
 			s.coord.stateChanged.Broadcast()
@@ -510,7 +510,7 @@ func (s *coordinatedTopWriteSink) Close() error {
 			s.coord.stateChanged.Wait()
 		}
 
-		if s.coord.latestGenerationLocked() != s.generation {
+		if s.coord.committedGeneration > s.generation {
 			s.coord.ensureReservationsLocked()
 			delete(s.coord.activeReservations, s.generation)
 			s.coord.stateChanged.Broadcast()
@@ -539,7 +539,7 @@ func (s *coordinatedTopWriteSink) Close() error {
 			s.err = closeErr
 			return
 		}
-		if s.coord.latestGenerationLocked() != s.generation {
+		if s.coord.committedGeneration > s.generation {
 			s.coord.ensureReservationsLocked()
 			delete(s.coord.activeReservations, s.generation)
 			s.coord.stateChanged.Broadcast()
@@ -601,7 +601,7 @@ func (s *conditionalGenerationWriteSink) Close() error {
 			s.coord.stateChanged.Wait()
 		}
 
-		if s.coord.latestGenerationLocked() != s.generation {
+		if s.coord.committedGeneration > s.generation {
 			s.coord.stateMu.Unlock()
 			abortErr := s.WriteSink.Abort()
 			s.err = ErrTopWriteInvalidated
@@ -624,7 +624,7 @@ func (s *conditionalGenerationWriteSink) Close() error {
 			s.err = closeErr
 			return
 		}
-		if s.coord.latestGenerationLocked() != s.generation {
+		if s.coord.committedGeneration > s.generation {
 			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {

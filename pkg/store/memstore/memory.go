@@ -151,15 +151,14 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 	}
 	if err := ctx.Err(); err != nil {
 		w.done = true
-		w.buf.Reset()
 		w.release()
 		return err
 	}
-	w.ms.mu.Lock()
-	defer w.ms.mu.Unlock()
+	ms := w.ms
+	ms.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		w.done = true
-		w.buf.Reset()
+		ms.mu.Unlock()
 		w.release()
 		return err
 	}
@@ -171,8 +170,8 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 	newItemSize := int64(len(finalData))
 
 	// If the item already exists, subtract its old size from currentSize.
-	if oldEntry, ok := w.ms.data[w.key]; ok {
-		w.ms.currentSize -= int64(len(oldEntry.value))
+	if oldEntry, ok := ms.data[w.key]; ok {
+		ms.currentSize -= int64(len(oldEntry.value))
 	}
 
 	newEntry := entry{
@@ -180,15 +179,15 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 		metadata: cloneMetadata(w.metadata),
 	}
 
-	w.ms.data[w.key] = newEntry
+	ms.data[w.key] = newEntry
 	// Add the new item's size to currentSize.
-	w.ms.currentSize += newItemSize
-	w.ms.policy.Add(w.key, newItemSize)
+	ms.currentSize += newItemSize
+	ms.policy.Add(w.key, newItemSize)
 
 	// Eviction logic: if capacity is positive and exceeded, evict items.
-	if w.ms.capacity > 0 {
-		for w.ms.currentSize > w.ms.capacity {
-			keysToEvict := w.ms.policy.Evict()
+	if ms.capacity > 0 {
+		for ms.currentSize > ms.capacity {
+			keysToEvict := ms.policy.Evict()
 			if len(keysToEvict) == 0 {
 				// No more candidates for eviction, break to prevent infinite loop.
 				break
@@ -196,10 +195,10 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 
 			var actuallyEvicted bool
 			for _, keyToEvict := range keysToEvict {
-				if entryToEvict, ok := w.ms.data[keyToEvict]; ok {
-					w.ms.currentSize -= int64(len(entryToEvict.value))
-					delete(w.ms.data, keyToEvict)
-					w.ms.policy.Remove(keyToEvict)
+				if entryToEvict, ok := ms.data[keyToEvict]; ok {
+					ms.currentSize -= int64(len(entryToEvict.value))
+					delete(ms.data, keyToEvict)
+					ms.policy.Remove(keyToEvict)
 					actuallyEvicted = true
 				}
 			}
@@ -211,8 +210,7 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 		}
 	}
 
-	// Reset the writer and return it to the pool.
-	w.buf.Reset()
+	ms.mu.Unlock()
 	w.release()
 
 	return nil

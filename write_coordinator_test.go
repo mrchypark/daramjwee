@@ -204,6 +204,9 @@ func TestStaleStagedCloseAbortCleanupDoesNotBlockNewerCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newer Set failed: %v", err)
 	}
+	if err := newer.Close(); err != nil {
+		t.Fatalf("newer Close failed: %v", err)
+	}
 
 	olderDone := make(chan error, 1)
 	go func() {
@@ -216,18 +219,23 @@ func TestStaleStagedCloseAbortCleanupDoesNotBlockNewerCommit(t *testing.T) {
 		t.Fatal("stale older Close did not reach store abort cleanup")
 	}
 
-	newerDone := make(chan error, 1)
+	third, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "third"})
+	if err != nil {
+		t.Fatalf("third Set failed: %v", err)
+	}
+
+	thirdDone := make(chan error, 1)
 	go func() {
-		newerDone <- newer.Close()
+		thirdDone <- third.Close()
 	}()
 
 	select {
-	case err := <-newerDone:
+	case err := <-thirdDone:
 		if err != nil {
-			t.Fatalf("newer Close should not be blocked by stale abort cleanup, got %v", err)
+			t.Fatalf("third Close should not be blocked by stale abort cleanup, got %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("newer Close blocked behind stale abort cleanup")
+		t.Fatal("third Close blocked behind stale abort cleanup")
 	}
 
 	close(store.releaseAbort)

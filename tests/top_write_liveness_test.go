@@ -97,6 +97,32 @@ func TestCache_NewerAbortedSetDoesNotInvalidateOlderSetForBuiltInStagingStores(t
 	}
 }
 
+func TestCache_OlderSetCanPublishWhileNewerSetIsStillStagedForBuiltInStagingStores(t *testing.T) {
+	for _, tc := range topWriteLivenessStores(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			cache, err := daramjwee.New(nil, daramjwee.WithTiers(tc.store), daramjwee.WithOpTimeout(2*time.Second))
+			require.NoError(t, err)
+			defer cache.Close()
+
+			older := beginSetWithin(t, cache, "same-key", "older-v1", topWriteLivenessTimeout)
+			t.Cleanup(func() { _ = older.Abort() })
+			_, err = older.Write([]byte("older-value"))
+			require.NoError(t, err)
+
+			newer := beginSetWithin(t, cache, "same-key", "newer-v2", topWriteLivenessTimeout)
+			t.Cleanup(func() { _ = newer.Abort() })
+			_, err = newer.Write([]byte("newer-value"))
+			require.NoError(t, err)
+
+			require.NoError(t, closeSinkWithin(t, older, topWriteLivenessTimeout))
+			requireStoreValue(t, tc.store, "same-key", "older-value", "older-v1")
+
+			require.NoError(t, newer.Abort())
+			requireStoreValue(t, tc.store, "same-key", "older-value", "older-v1")
+		})
+	}
+}
+
 func TestCache_StaleSetCloseReportsInvalidatedForBuiltInStagingStores(t *testing.T) {
 	for _, tc := range topWriteLivenessStores(t) {
 		t.Run(tc.name, func(t *testing.T) {
