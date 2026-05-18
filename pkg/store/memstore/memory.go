@@ -72,6 +72,9 @@ func (ms *MemStore) BeginSet(ctx context.Context, key string, metadata *daramjwe
 }
 
 func (ms *MemStore) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

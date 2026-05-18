@@ -135,6 +135,9 @@ func (rs *RedisStore) BeginStagedSet(ctx context.Context, key string, metadata *
 }
 
 func (rs *RedisStore) beginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (*redisStoreWriter, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

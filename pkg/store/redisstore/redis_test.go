@@ -302,6 +302,30 @@ func TestRedisStore_StagedWriteCommitsOnlyOnCommit(t *testing.T) {
 	require.Equal(t, "v1", meta.CacheTag)
 }
 
+func TestRedisStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := New(client, log.NewNopLogger()).(*RedisStore)
+	ctx := context.Background()
+
+	sink, err := store.BeginStagedSet(nil, "staged-nil-context", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = sink.Write([]byte("nil context staged"))
+	require.NoError(t, err)
+	require.NoError(t, sink.Commit(ctx))
+
+	reader, meta, err := store.GetStream(ctx, "staged-nil-context")
+	require.NoError(t, err)
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, "nil context staged", string(body))
+	require.Equal(t, "v1", meta.CacheTag)
+}
+
 func TestRedisStore_StagedAbortDeletesTempKey(t *testing.T) {
 	mr := setupMiniRedis(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})

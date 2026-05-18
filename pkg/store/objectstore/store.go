@@ -270,6 +270,9 @@ func (s *Store) BeginStagedSet(ctx context.Context, key string, metadata *daramj
 }
 
 func (s *Store) beginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (*writer, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}

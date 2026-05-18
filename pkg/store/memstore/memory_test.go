@@ -135,6 +135,24 @@ func TestMemStore_CanceledStagedCommitIsTerminal(t *testing.T) {
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestMemStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
+	store := New(0, nil)
+
+	writer, err := store.BeginStagedSet(nil, "nil-context", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("value"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Commit(context.Background()))
+
+	reader, meta, err := store.GetStream(context.Background(), "nil-context")
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "value", string(body))
+	assert.Equal(t, "v1", meta.CacheTag)
+}
+
 // TestMemStore_Get_NotFound tests getting a non-existent key.
 func TestMemStore_Get_NotFound(t *testing.T) {
 	ctx := context.Background()
