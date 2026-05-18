@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -284,10 +285,11 @@ func topWriteLivenessStores(t *testing.T) []topWriteLivenessStore {
 	fileStore, err := filestore.New(t.TempDir(), log.NewNopLogger())
 	require.NoError(t, err)
 
+	objectDir := objectStoreTempDir(t)
 	objectStore := objectstore.New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		objectstore.WithDir(t.TempDir()),
+		objectstore.WithDir(objectDir),
 	)
 
 	mr, err := miniredis.Run()
@@ -307,10 +309,11 @@ func topWriteLivenessStores(t *testing.T) []topWriteLivenessStore {
 func contextAwareTopWriteLivenessStores(t *testing.T) []topWriteLivenessStore {
 	t.Helper()
 
+	objectDir := objectStoreTempDir(t)
 	objectStore := objectstore.New(
 		objstore.NewInMemBucket(),
 		log.NewNopLogger(),
-		objectstore.WithDir(t.TempDir()),
+		objectstore.WithDir(objectDir),
 	)
 
 	mr, err := miniredis.Run()
@@ -323,6 +326,18 @@ func contextAwareTopWriteLivenessStores(t *testing.T) []topWriteLivenessStore {
 		{name: "objectstore", store: objectStore},
 		{name: "redisstore", store: redisstore.New(client, log.NewNopLogger())},
 	}
+}
+
+func objectStoreTempDir(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "daramjwee-liveness-objectstore-*")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		time.Sleep(2 * topWriteLivenessTimeout)
+		_ = os.RemoveAll(dir)
+	})
+	return dir
 }
 
 func setAndCloseWithin(t *testing.T, cache daramjwee.Cache, key, value, tag string, timeout time.Duration) {

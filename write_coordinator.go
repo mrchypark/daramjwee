@@ -520,22 +520,33 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 		s.coord.stateMu.Unlock()
 
 		closeErr := s.sink.Commit(commitCtx)
-
-		// The store commit may already be visible. Keep commitMu while a racing
-		// delete finishes so invalidation cleanup cannot delete a later writer.
-		s.coord.stateMu.Lock()
-		for s.coord.activeDeletes > 0 {
-			s.coord.stateChanged.Wait()
-		}
-
 		if closeErr != nil {
+			s.coord.stateMu.Lock()
 			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = closeErr
 			return
 		}
+
+		s.coord.stateMu.Lock()
+		s.coord.removeReservationLocked(s.generation)
+		if s.coord.committedGeneration < s.generation {
+			s.coord.committedGeneration = s.generation
+			s.coord.stateChanged.Broadcast()
+		}
+		s.coord.stateMu.Unlock()
+
+		// The store commit may already be visible. Keep commitMu while a racing
+		// delete finishes so invalidation cleanup cannot delete a later writer.
+		postCommitWaitCtx, cancelPostCommitWait := newCoordinatorWaitContext(s.waitTimeout)
+		defer cancelPostCommitWait()
+		if err := s.coord.waitForNoActiveDeletes(postCommitWaitCtx); err != nil {
+			s.err = err
+			return
+		}
+
+		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
-			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {
@@ -545,8 +556,6 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 			}
 			return
 		}
-		s.coord.removeReservationLocked(s.generation)
-		s.coord.committedGeneration = s.generation
 		s.coord.stateMu.Unlock()
 	})
 	return s.err

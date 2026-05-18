@@ -124,6 +124,7 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 
 // memStoreSink is a helper type that satisfies the daramjwee.WriteSink interface.
 type memStoreSink struct {
+	mu       sync.Mutex
 	ms       *MemStore
 	key      string
 	metadata *daramjwee.Metadata
@@ -133,6 +134,8 @@ type memStoreSink struct {
 
 // Write writes the provided data to the internal buffer.
 func (w *memStoreSink) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.done {
 		return 0, io.ErrClosedPipe
 	}
@@ -146,6 +149,8 @@ func (w *memStoreSink) Close() error {
 }
 
 func (w *memStoreSink) Commit(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.done {
 		return nil
 	}
@@ -217,6 +222,8 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 }
 
 func (w *memStoreSink) Abort() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.done {
 		return nil
 	}
