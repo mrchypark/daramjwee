@@ -618,7 +618,9 @@ func (s *coordinatedTopWriteSink) Close() error {
 			return
 		}
 		s.coord.removeReservationLocked(s.generation)
-		s.coord.committedGeneration = s.generation
+		if s.coord.committedGeneration < s.generation {
+			s.coord.committedGeneration = s.generation
+		}
 		s.coord.stateMu.Unlock()
 	})
 	return s.err
