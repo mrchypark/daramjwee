@@ -287,7 +287,7 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 		defer fs.finishGenerationTracking(key)
 		defer func() {
 			if cleanupErr := cleanupTemp(); cleanupErr != nil && err == nil {
-				err = cleanupErr
+				err = fmt.Errorf("filestore: cleanup: %w", cleanupErr)
 			}
 		}()
 

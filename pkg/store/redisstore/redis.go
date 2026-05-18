@@ -227,9 +227,6 @@ func (w *redisStoreWriter) Commit(ctx context.Context) error {
 	case <-ctx.Done():
 		_ = w.rs.client.Del(context.Background(), w.tempKey).Err()
 		return fmt.Errorf("redisstore: commit: %w", ctx.Err())
-	default:
-	}
-	select {
 	case <-w.ctx.Done():
 		_ = w.rs.client.Del(context.Background(), w.tempKey).Err()
 		return fmt.Errorf("redisstore: commit: %w", w.ctx.Err())
@@ -242,7 +239,7 @@ func (w *redisStoreWriter) Commit(ctx context.Context) error {
 		if delErr := w.rs.client.Del(context.Background(), w.tempKey).Err(); delErr != nil {
 			level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
 		}
-		return err
+		return fmt.Errorf("redisstore: marshal metadata: %w", err)
 	}
 
 	_, err = w.rs.client.Eval(
@@ -257,7 +254,7 @@ func (w *redisStoreWriter) Commit(ctx context.Context) error {
 		if delErr := w.rs.client.Del(context.Background(), w.tempKey).Err(); delErr != nil {
 			level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
 		}
-		return err
+		return fmt.Errorf("redisstore: commit: %w", err)
 	}
 
 	return nil
