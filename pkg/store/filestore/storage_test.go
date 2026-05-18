@@ -131,6 +131,17 @@ func TestFileStore_StagedWriteInvisibleBeforeCommit(t *testing.T) {
 	assert.Equal(t, "staged payload", string(body))
 }
 
+func TestFileStore_BeginSetRejectsCanceledContext(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	writer, err := fs.BeginSet(ctx, "canceled-begin", &daramjwee.Metadata{CacheTag: "v1"})
+	require.Nil(t, writer)
+	require.ErrorIs(t, err, context.Canceled)
+	requireNoTempFiles(t, fs)
+}
+
 func TestFileStore_StagedAbortDiscardsTempData(t *testing.T) {
 	fs := setupTestStore(t)
 	ctx := context.Background()

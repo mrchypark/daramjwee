@@ -68,6 +68,12 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 // BeginSet returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
 func (ms *MemStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return ms.beginSet(key, metadata), nil
 }
 

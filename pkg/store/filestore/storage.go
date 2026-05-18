@@ -220,6 +220,12 @@ func (fs *FileStore) GetStream(ctx context.Context, key string) (io.ReadCloser, 
 // The data is written to a temporary file and then atomically moved to the final location
 // upon closing the writer, or copied if WithCopyWrite option is used.
 func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return fs.beginStagedSet(key, metadata)
 }
 

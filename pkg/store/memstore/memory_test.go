@@ -153,6 +153,16 @@ func TestMemStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	assert.Equal(t, "v1", meta.CacheTag)
 }
 
+func TestMemStore_BeginSetRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := New(0, nil)
+
+	writer, err := store.BeginSet(ctx, "canceled-begin", &daramjwee.Metadata{CacheTag: "v1"})
+	require.Nil(t, writer)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 // TestMemStore_Get_NotFound tests getting a non-existent key.
 func TestMemStore_Get_NotFound(t *testing.T) {
 	ctx := context.Background()
