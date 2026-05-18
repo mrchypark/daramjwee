@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.9.0
+
+### 🚀 Features & Enhancements
+
+*   **New SQLite-backed persistent store**: added `pkg/store/sqlitestore`, a local durable `Store` implementation that stages writes in temporary chunk rows and publishes them transactionally on `Close`.
+*   **SQLite cache documentation**: documented the SQLite tier in the main README and added a focused `pkg/store/sqlitestore/README.md` covering WAL sidecars, chunk sizing, and reader behavior.
+
+### 🐛 Bug Fixes & Refinements
+
+*   **SQLite write lifecycle hardening**: schema initialization, stale write handling, staged chunk cleanup, and generation seeding are covered by targeted regression tests.
+
+### ✅ Verification
+
+*   `go test ./...`
+
 ## v0.8.0
 
 ### ⚠️ Breaking Changes & API Updates
