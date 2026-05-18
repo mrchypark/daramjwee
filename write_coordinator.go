@@ -6,6 +6,8 @@ import (
 	"sync"
 )
 
+var ErrTopWriteInvalidated = errors.New("daramjwee: top-tier write invalidated")
+
 type topWriteManager struct {
 	coords sync.Map
 }
