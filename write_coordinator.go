@@ -295,9 +295,7 @@ func newCoordinatorWaitContext(timeout time.Duration) (context.Context, context.
 func (c *writeCoordinator) unregisterReservation(generation uint64) {
 	c.init()
 	c.stateMu.Lock()
-	if _, ok := c.activeReservations[generation]; ok {
-		c.removeReservationLocked(generation)
-	}
+	c.removeReservationLocked(generation)
 	c.stateMu.Unlock()
 }
 
