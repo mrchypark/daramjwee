@@ -206,6 +206,27 @@ type WriteSink interface {
 	Abort() error
 }
 
+// StagedWriteSink is an optional store capability used by the cache core to
+// separate invisible staging from visible publish.
+type StagedWriteSink interface {
+	io.Writer
+	Commit(ctx context.Context) error
+	Abort() error
+}
+
+// StagingStore is an optional Store extension. Stores that implement it let the
+// cache coordinate only the short commit phase instead of holding cache-level
+// same-key ownership for the full caller-controlled write lifetime.
+// BeginStagedSet must keep the currently readable value for key unchanged
+// until Commit succeeds. Abort and failed Commit must leave no visible value
+// from the staged writer, and Delete must not wait for an uncommitted staged
+// writer on the same key to commit or abort. Commit and Abort are terminal and
+// must tolerate repeated cleanup calls because the cache may call Abort after a
+// failed Commit to release hidden staging resources.
+type StagingStore interface {
+	BeginStagedSet(ctx context.Context, key string, metadata *Metadata) (StagedWriteSink, error)
+}
+
 // Store defines the interface for a single cache storage tier (e.g., memory, disk).
 type Store interface {
 	// GetStream retrieves an object and its metadata as a stream.

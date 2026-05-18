@@ -107,6 +107,132 @@ func TestFileStore_SetAndGet(t *testing.T) {
 	assert.Equal(t, content, string(readBytes))
 }
 
+func TestFileStore_StagedWriteInvisibleBeforeCommit(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "staged-invisible"
+
+	writer, err := fs.BeginStagedSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("staged payload"))
+	require.NoError(t, err)
+
+	_, _, err = fs.GetStream(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	require.NoError(t, writer.Commit(ctx))
+
+	reader, meta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "v1", meta.CacheTag)
+	assert.Equal(t, "staged payload", string(body))
+}
+
+func TestFileStore_BeginSetRejectsCanceledContext(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	writer, err := fs.BeginSet(ctx, "canceled-begin", &daramjwee.Metadata{CacheTag: "v1"})
+	require.Nil(t, writer)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "filestore: begin set")
+	requireNoTempFiles(t, fs)
+}
+
+func TestFileStore_StagedAbortDiscardsTempData(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "staged-abort"
+
+	writer, err := fs.BeginStagedSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("discard me"))
+	require.NoError(t, err)
+
+	require.NoError(t, writer.Abort())
+
+	_, _, err = fs.GetStream(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	_, err = os.Stat(fs.toDataPath(key))
+	require.True(t, os.IsNotExist(err), "aborted staged write should not leave final data")
+	requireNoTempFiles(t, fs)
+}
+
+func TestFileStore_StagedCommitWithCanceledContextDoesNotPublish(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "staged-canceled"
+
+	current, err := fs.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = current.Write([]byte("current"))
+	require.NoError(t, err)
+	require.NoError(t, current.Close())
+
+	writer, err := fs.BeginStagedSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("new"))
+	require.NoError(t, err)
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err = writer.Commit(canceledCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "filestore: commit")
+
+	reader, meta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "v1", meta.CacheTag)
+	assert.Equal(t, "current", string(body))
+	requireNoTempFiles(t, fs)
+}
+
+func TestFileStore_StagedCommitPublishesWhileOlderStagedWriterIsAbandoned(t *testing.T) {
+	fs := setupTestStore(t)
+	ctx := context.Background()
+	key := "staged-abandoned"
+
+	older, err := fs.BeginStagedSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = older.Abort()
+	})
+	_, err = older.Write([]byte("older"))
+	require.NoError(t, err)
+
+	newer, err := fs.BeginStagedSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+	require.NoError(t, err)
+	_, err = newer.Write([]byte("newer"))
+	require.NoError(t, err)
+
+	commitDone := make(chan error, 1)
+	go func() {
+		commitDone <- newer.Commit(ctx)
+	}()
+
+	select {
+	case err := <-commitDone:
+		require.NoError(t, err)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("newer staged commit blocked behind abandoned staged writer")
+	}
+
+	reader, meta, err := fs.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", meta.CacheTag)
+	assert.Equal(t, "newer", string(body))
+}
+
 // TestFileStore_Get_NotFound tests that getting a non-existent key returns the correct error.
 func TestFileStore_Get_NotFound(t *testing.T) {
 	fs := setupTestStore(t)
@@ -114,6 +240,19 @@ func TestFileStore_Get_NotFound(t *testing.T) {
 
 	_, _, err := fs.GetStream(ctx, "non-existent-key")
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func requireNoTempFiles(t *testing.T, fs *FileStore) {
+	t.Helper()
+	err := filepath.Walk(fs.baseDir, func(path string, info os.FileInfo, err error) error {
+		require.NoError(t, err)
+		if info.IsDir() {
+			return nil
+		}
+		require.Falsef(t, strings.HasPrefix(info.Name(), "daramjwee-tmp-"), "temporary file still exists: %s", path)
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 // TestFileStore_Stat tests getting metadata without file content.
@@ -1105,14 +1244,16 @@ func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t
 	assert.NotEqual(t, legacyInfo.Size()+encodedInfo.Size(), currentSize)
 }
 
-func TestLockedWriteCloser_DoesNotCommitWhenFileCloseFails(t *testing.T) {
+func TestStagedFileWriteSink_DoesNotCommitWhenFileCloseFails(t *testing.T) {
 	var committed bool
 	var aborted bool
 
-	badFile := os.NewFile(^uintptr(0), "bad-file")
-	writer := newLockedWriteCloser(
+	badFile, err := os.CreateTemp(t.TempDir(), "bad-file-*")
+	require.NoError(t, err)
+	require.NoError(t, badFile.Close())
+	writer := newStagedFileWriteSink(
 		badFile,
-		func() error {
+		func(context.Context) error {
 			committed = true
 			return nil
 		},
@@ -1122,7 +1263,7 @@ func TestLockedWriteCloser_DoesNotCommitWhenFileCloseFails(t *testing.T) {
 		},
 	)
 
-	err := writer.Close()
+	err = writer.Close()
 	require.Error(t, err)
 	assert.False(t, committed)
 	assert.True(t, aborted)

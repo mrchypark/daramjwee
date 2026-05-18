@@ -163,6 +163,9 @@ func (s *Store) ValidateTier(index int) error {
 
 // GetStream returns the current published generation for a key.
 func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := s.ensureReady(); err != nil {
 		return nil, nil, err
 	}
@@ -262,10 +265,21 @@ func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Met
 
 // BeginSet starts a staged write for a new immutable generation.
 func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
-	if err := s.ensureReady(); err != nil {
-		return nil, err
+	return s.beginSet(ctx, key, metadata, "begin set")
+}
+
+func (s *Store) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	return s.beginSet(ctx, key, metadata, "begin staged set")
+}
+
+func (s *Store) beginSet(ctx context.Context, key string, metadata *daramjwee.Metadata, operation string) (*writer, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("objectstore: %s: %w", operation, err)
+	}
+	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
 
@@ -291,6 +305,9 @@ func (s *Store) BeginSet(ctx context.Context, key string, metadata *daramjwee.Me
 // Delete removes the currently visible entry for a key.
 // Blob reclamation is handled by best-effort cleanup and conservative sweep.
 func (s *Store) Delete(ctx context.Context, key string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
@@ -316,6 +333,9 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 
 // Stat returns metadata for the published generation.
 func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}

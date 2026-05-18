@@ -2,6 +2,7 @@ package objectstore
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 
@@ -41,12 +42,23 @@ func (w *writer) Write(p []byte) (int, error) {
 }
 
 func (w *writer) Close() error {
+	return w.Commit(w.ctx)
+}
+
+func (w *writer) Commit(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !w.markDone() {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		_ = w.segment.Abort()
+		return fmt.Errorf("objectstore: commit: %w", err)
+	}
 	if err := w.ctx.Err(); err != nil {
 		_ = w.segment.Abort()
-		return err
+		return fmt.Errorf("objectstore: commit: %w", err)
 	}
 
 	sealedPath, size, err := w.segment.Seal()

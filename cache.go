@@ -134,7 +134,9 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	coord := c.topWrites.coordinator(key)
-	coord.beginDelete()
+	if err := coord.beginDelete(ctx); err != nil {
+		return err
+	}
 	topDeleteSucceeded := false
 	defer func() {
 		coord.finishDelete(topDeleteSucceeded)

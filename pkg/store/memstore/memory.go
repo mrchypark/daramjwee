@@ -3,6 +3,7 @@ package memstore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"sync"
 
@@ -68,15 +69,34 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 // BeginSet returns a writer that streams data into an in-memory buffer.
 // When the writer is closed, the buffered data is committed to the main map.
 func (ms *MemStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("memstore: begin set: %w", err)
+	}
+	return ms.beginSet(key, metadata), nil
+}
+
+func (ms *MemStore) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("memstore: begin staged set: %w", err)
+	}
+	return ms.beginSet(key, metadata), nil
+}
+
+func (ms *MemStore) beginSet(key string, metadata *daramjwee.Metadata) *memStoreSink {
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
-	w := &memStoreSink{
+	return &memStoreSink{
 		ms:       ms,
 		key:      key,
 		metadata: metadata,
 		buf:      buf,
 	}
-	return w, nil
 }
 
 // Delete removes an object from the in-memory map.
@@ -114,6 +134,7 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 
 // memStoreSink is a helper type that satisfies the daramjwee.WriteSink interface.
 type memStoreSink struct {
+	mu       sync.Mutex
 	ms       *MemStore
 	key      string
 	metadata *daramjwee.Metadata
@@ -123,6 +144,8 @@ type memStoreSink struct {
 
 // Write writes the provided data to the internal buffer.
 func (w *memStoreSink) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.done {
 		return 0, io.ErrClosedPipe
 	}
@@ -132,37 +155,55 @@ func (w *memStoreSink) Write(p []byte) (n int, err error) {
 // Close is called when the write operation is complete.
 // It commits the buffered data to the MemStore and handles eviction if capacity is exceeded.
 func (w *memStoreSink) Close() error {
+	return w.Commit(context.Background())
+}
+
+func (w *memStoreSink) Commit(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.done {
 		return nil
 	}
-	w.done = true
-	w.ms.mu.Lock()
-	defer w.ms.mu.Unlock()
-
-	finalData := make([]byte, w.buf.Len())
-	copy(finalData, w.buf.Bytes())
-
-	newItemSize := int64(len(finalData))
-
-	// If the item already exists, subtract its old size from currentSize.
-	if oldEntry, ok := w.ms.data[w.key]; ok {
-		w.ms.currentSize -= int64(len(oldEntry.value))
+	if err := ctx.Err(); err != nil {
+		w.done = true
+		w.release()
+		return fmt.Errorf("memstore: commit: %w", err)
 	}
 
+	finalData := bytes.Clone(w.buf.Bytes())
+	newItemSize := int64(len(finalData))
 	newEntry := entry{
 		value:    finalData,
 		metadata: cloneMetadata(w.metadata),
 	}
 
-	w.ms.data[w.key] = newEntry
+	ms := w.ms
+	ms.mu.Lock()
+	defer w.release()
+	defer ms.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		w.done = true
+		return fmt.Errorf("memstore: commit: %w", err)
+	}
+	w.done = true
+
+	// If the item already exists, subtract its old size from currentSize.
+	if oldEntry, ok := ms.data[w.key]; ok {
+		ms.currentSize -= int64(len(oldEntry.value))
+	}
+
+	ms.data[w.key] = newEntry
 	// Add the new item's size to currentSize.
-	w.ms.currentSize += newItemSize
-	w.ms.policy.Add(w.key, newItemSize)
+	ms.currentSize += newItemSize
+	ms.policy.Add(w.key, newItemSize)
 
 	// Eviction logic: if capacity is positive and exceeded, evict items.
-	if w.ms.capacity > 0 {
-		for w.ms.currentSize > w.ms.capacity {
-			keysToEvict := w.ms.policy.Evict()
+	if ms.capacity > 0 {
+		for ms.currentSize > ms.capacity {
+			keysToEvict := ms.policy.Evict()
 			if len(keysToEvict) == 0 {
 				// No more candidates for eviction, break to prevent infinite loop.
 				break
@@ -170,10 +211,10 @@ func (w *memStoreSink) Close() error {
 
 			var actuallyEvicted bool
 			for _, keyToEvict := range keysToEvict {
-				if entryToEvict, ok := w.ms.data[keyToEvict]; ok {
-					w.ms.currentSize -= int64(len(entryToEvict.value))
-					delete(w.ms.data, keyToEvict)
-					w.ms.policy.Remove(keyToEvict)
+				if entryToEvict, ok := ms.data[keyToEvict]; ok {
+					ms.currentSize -= int64(len(entryToEvict.value))
+					delete(ms.data, keyToEvict)
+					ms.policy.Remove(keyToEvict)
 					actuallyEvicted = true
 				}
 			}
@@ -185,14 +226,12 @@ func (w *memStoreSink) Close() error {
 		}
 	}
 
-	// Reset the writer and return it to the pool.
-	w.buf.Reset()
-	w.release()
-
 	return nil
 }
 
 func (w *memStoreSink) Abort() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.done {
 		return nil
 	}

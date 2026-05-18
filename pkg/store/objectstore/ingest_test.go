@@ -46,6 +46,126 @@ func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
 	assert.Equal(t, "v1", meta.CacheTag)
 }
 
+func TestStore_StagedWriteCommitsOnlyOnCommit(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(ctx, "staged-local-key", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "hello staged local")
+	require.NoError(t, err)
+
+	_, err = store.Stat(ctx, "staged-local-key")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	require.NoError(t, writer.Commit(ctx))
+
+	stream, meta, err := store.GetStream(ctx, "staged-local-key")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "hello staged local", string(body))
+	assert.Equal(t, "v1", meta.CacheTag)
+}
+
+func TestStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(nil, "staged-nil-context", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "nil context staged")
+	require.NoError(t, err)
+	require.NoError(t, writer.Commit(nil))
+
+	stream, meta, err := store.GetStream(nil, "staged-nil-context")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "nil context staged", string(body))
+	assert.Equal(t, "v1", meta.CacheTag)
+	stat, err := store.Stat(nil, "staged-nil-context")
+	require.NoError(t, err)
+	assert.Equal(t, "v1", stat.CacheTag)
+	require.NoError(t, store.Delete(nil, "staged-nil-context"))
+}
+
+func TestStore_BeginStagedSetRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+
+	writer, err := store.BeginStagedSet(ctx, "staged-canceled-begin", &daramjwee.Metadata{CacheTag: "v1"})
+	require.Nil(t, writer)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "objectstore: begin staged set")
+}
+
+func TestStore_StagedAbortLeavesNoVisibleLocalEntry(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(ctx, "staged-abort-local", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "partial")
+	require.NoError(t, err)
+	require.NoError(t, writer.Abort())
+
+	_, err = store.Stat(ctx, "staged-abort-local")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func TestStore_CanceledStagedCommitLeavesNoVisibleLocalEntry(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(ctx, "staged-cancel-local", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "partial")
+	require.NoError(t, err)
+
+	commitCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err = writer.Commit(commitCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "objectstore: commit")
+
+	_, err = store.Stat(ctx, "staged-cancel-local")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
 func TestStore_BeginSetDoesNotHoldKeyLockForWriterLifetime(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

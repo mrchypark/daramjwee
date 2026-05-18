@@ -74,7 +74,7 @@ func TestConcurrentAccess(t *testing.T) {
 					// Set
 					value := fmt.Sprintf("set-value-%d-%d", id, j)
 					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "test"})
-					if err != nil {
+					if err != nil && !isExpectedTopWriteConflict(err) {
 						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
 					}
 				}
@@ -249,6 +249,8 @@ func BenchmarkConcurrentAccess(b *testing.B) {
 				if err != nil {
 					if isExpectedTopWriteConflict(err) {
 						conflictCount.Add(1)
+						i++
+						continue
 					}
 					firstErr.CompareAndSwap(nil, fmt.Errorf("set failed: %w", err))
 					return
