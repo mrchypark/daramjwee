@@ -105,6 +105,22 @@ func TestStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	require.NoError(t, store.Delete(nil, "staged-nil-context"))
 }
 
+func TestStore_BeginStagedSetRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+
+	writer, err := store.BeginStagedSet(ctx, "staged-canceled-begin", &daramjwee.Metadata{CacheTag: "v1"})
+	require.Nil(t, writer)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "objectstore: begin staged set")
+}
+
 func TestStore_StagedAbortLeavesNoVisibleLocalEntry(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -142,7 +158,9 @@ func TestStore_CanceledStagedCommitLeavesNoVisibleLocalEntry(t *testing.T) {
 
 	commitCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	require.ErrorIs(t, writer.Commit(commitCtx), context.Canceled)
+	err = writer.Commit(commitCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "objectstore: commit")
 
 	_, err = store.Stat(ctx, "staged-cancel-local")
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)

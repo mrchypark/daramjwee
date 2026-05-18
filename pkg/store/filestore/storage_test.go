@@ -139,6 +139,7 @@ func TestFileStore_BeginSetRejectsCanceledContext(t *testing.T) {
 	writer, err := fs.BeginSet(ctx, "canceled-begin", &daramjwee.Metadata{CacheTag: "v1"})
 	require.Nil(t, writer)
 	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "filestore: begin set")
 	requireNoTempFiles(t, fs)
 }
 
@@ -179,7 +180,9 @@ func TestFileStore_StagedCommitWithCanceledContextDoesNotPublish(t *testing.T) {
 
 	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	require.ErrorIs(t, writer.Commit(canceledCtx), context.Canceled)
+	err = writer.Commit(canceledCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "filestore: commit")
 
 	reader, meta, err := fs.GetStream(ctx, key)
 	require.NoError(t, err)

@@ -130,20 +130,20 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 
 // BeginSet returns a sink that streams data into Redis.
 func (rs *RedisStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
-	return rs.beginSet(ctx, key, metadata)
+	return rs.beginSet(ctx, key, metadata, "begin set")
 }
 
 func (rs *RedisStore) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
-	return rs.beginSet(ctx, key, metadata)
+	return rs.beginSet(ctx, key, metadata, "begin staged set")
 }
 
-func (rs *RedisStore) beginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (*redisStoreWriter, error) {
+func (rs *RedisStore) beginSet(ctx context.Context, key string, metadata *daramjwee.Metadata, operation string) (*redisStoreWriter, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("redisstore: %s: %w", operation, ctx.Err())
 	default:
 	}
 
@@ -226,13 +226,13 @@ func (w *redisStoreWriter) Commit(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		_ = w.rs.client.Del(context.Background(), w.tempKey).Err()
-		return ctx.Err()
+		return fmt.Errorf("redisstore: commit: %w", ctx.Err())
 	default:
 	}
 	select {
 	case <-w.ctx.Done():
 		_ = w.rs.client.Del(context.Background(), w.tempKey).Err()
-		return w.ctx.Err()
+		return fmt.Errorf("redisstore: commit: %w", w.ctx.Err())
 	default:
 	}
 

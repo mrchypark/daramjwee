@@ -216,6 +216,15 @@ func TestRedisStore_ContextCancellation(t *testing.T) {
 		cancel()
 		_, err := store.BeginSet(ctx, key, metadata)
 		assert.ErrorIs(t, err, context.Canceled)
+		assert.Contains(t, err.Error(), "redisstore: begin set")
+	})
+
+	t.Run("BeginStagedSet", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := store.(daramjwee.StagingStore).BeginStagedSet(ctx, key, metadata)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Contains(t, err.Error(), "redisstore: begin staged set")
 	})
 
 	t.Run("GetStream", func(t *testing.T) {
@@ -367,7 +376,9 @@ func TestRedisStore_CanceledStagedCommitDeletesTempKey(t *testing.T) {
 
 	commitCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	require.ErrorIs(t, sink.Commit(commitCtx), context.Canceled)
+	err = sink.Commit(commitCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "redisstore: commit")
 	require.False(t, mr.Exists(writer.tempKey))
 	require.False(t, mr.Exists(store.DataKey("staged-cancel")))
 	require.False(t, mr.Exists(store.MetaKey("staged-cancel")))

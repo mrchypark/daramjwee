@@ -3,6 +3,7 @@ package memstore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"sync"
 
@@ -72,7 +73,7 @@ func (ms *MemStore) BeginSet(ctx context.Context, key string, metadata *daramjwe
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("memstore: begin set: %w", err)
 	}
 	return ms.beginSet(key, metadata), nil
 }
@@ -82,7 +83,7 @@ func (ms *MemStore) BeginStagedSet(ctx context.Context, key string, metadata *da
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("memstore: begin staged set: %w", err)
 	}
 	return ms.beginSet(key, metadata), nil
 }
@@ -169,7 +170,7 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		w.done = true
 		w.release()
-		return err
+		return fmt.Errorf("memstore: commit: %w", err)
 	}
 	ms := w.ms
 	ms.mu.Lock()
@@ -177,7 +178,7 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 		w.done = true
 		ms.mu.Unlock()
 		w.release()
-		return err
+		return fmt.Errorf("memstore: commit: %w", err)
 	}
 	w.done = true
 

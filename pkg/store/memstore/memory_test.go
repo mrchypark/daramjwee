@@ -128,7 +128,9 @@ func TestMemStore_CanceledStagedCommitIsTerminal(t *testing.T) {
 
 	commitCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	require.ErrorIs(t, writer.Commit(commitCtx), context.Canceled)
+	err = writer.Commit(commitCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "memstore: commit")
 	require.NoError(t, writer.Commit(ctx))
 
 	_, _, err = store.GetStream(ctx, "staged-cancel")
@@ -161,6 +163,7 @@ func TestMemStore_BeginSetRejectsCanceledContext(t *testing.T) {
 	writer, err := store.BeginSet(ctx, "canceled-begin", &daramjwee.Metadata{CacheTag: "v1"})
 	require.Nil(t, writer)
 	require.ErrorIs(t, err, context.Canceled)
+	require.Contains(t, err.Error(), "memstore: begin set")
 }
 
 // TestMemStore_Get_NotFound tests getting a non-existent key.

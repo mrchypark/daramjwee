@@ -224,7 +224,7 @@ func (fs *FileStore) BeginSet(ctx context.Context, key string, metadata *daramjw
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("filestore: begin set: %w", err)
 	}
 	return fs.beginStagedSet(key, metadata)
 }
@@ -234,7 +234,7 @@ func (fs *FileStore) BeginStagedSet(ctx context.Context, key string, metadata *d
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("filestore: begin staged set: %w", err)
 	}
 	return fs.beginStagedSet(key, metadata)
 }
@@ -292,7 +292,7 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 		}()
 
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("filestore: commit: %w", err)
 		}
 
 		locked := fs.lockPaths([]string{path}, nil)
@@ -301,7 +301,7 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 		}()
 
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("filestore: commit: %w", err)
 		}
 
 		if current := fs.generationFloor(key); current > generation {

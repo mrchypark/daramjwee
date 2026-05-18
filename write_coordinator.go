@@ -543,18 +543,6 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 			}
 		}()
 
-		if err := s.coord.waitForNoActiveDeletes(waitCtx); err != nil {
-			s.coord.unregisterReservation(s.generation)
-			s.coord.releaseCommit()
-			commitLocked = false
-			abortErr := s.sink.Abort()
-			s.err = err
-			if abortErr != nil {
-				s.err = errors.Join(s.err, abortErr)
-			}
-			return
-		}
-
 		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
 			s.coord.removeReservationLocked(s.generation)
@@ -590,15 +578,6 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 		}
 		s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration)
 		s.coord.stateMu.Unlock()
-
-		// The store commit may already be visible. Keep the commit lease while a
-		// racing delete finishes so invalidation cleanup cannot delete a later writer.
-		postCommitWaitCtx, cancelPostCommitWait := newCoordinatorWaitContext(s.waitTimeout)
-		defer cancelPostCommitWait()
-		if err := s.coord.waitForNoActiveDeletes(postCommitWaitCtx); err != nil {
-			s.err = err
-			return
-		}
 
 		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
