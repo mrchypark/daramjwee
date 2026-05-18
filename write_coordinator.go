@@ -37,6 +37,7 @@ type coordinatedTopWriteSink struct {
 	WriteSink
 	coord         *writeCoordinator
 	generation    uint64
+	waitTimeout   time.Duration
 	onInvalidated func() error
 	once          sync.Once
 	err           error
@@ -57,6 +58,7 @@ type conditionalGenerationWriteSink struct {
 	WriteSink
 	coord         *writeCoordinator
 	generation    uint64
+	waitTimeout   time.Duration
 	onInvalidated func() error
 	once          sync.Once
 	err           error
@@ -513,6 +515,7 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 		WriteSink:     sink,
 		coord:         coord,
 		generation:    generation,
+		waitTimeout:   c.closeTimeout,
 		onInvalidated: func() error { return c.deleteTopStoreKey(key) },
 	}, nil
 }
@@ -628,11 +631,20 @@ func (s *coordinatedStagedTopWriteSink) Abort() error {
 func (s *coordinatedTopWriteSink) Close() error {
 	s.once.Do(func() {
 		defer s.coord.releaseWrite()
-		s.coord.stateMu.Lock()
-		for s.coord.activeDeletes > 0 {
-			s.coord.stateChanged.Wait()
+		waitCtx, cancelWait := newCoordinatorWaitContext(s.waitTimeout)
+		defer cancelWait()
+
+		if err := s.coord.waitForNoActiveDeletes(waitCtx); err != nil {
+			s.coord.unregisterReservation(s.generation)
+			abortErr := s.WriteSink.Abort()
+			s.err = err
+			if abortErr != nil {
+				s.err = errors.Join(s.err, abortErr)
+			}
+			return
 		}
 
+		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
 			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
@@ -647,19 +659,30 @@ func (s *coordinatedTopWriteSink) Close() error {
 
 		closeErr := s.WriteSink.Close()
 
-		s.coord.stateMu.Lock()
-		for s.coord.activeDeletes > 0 {
-			s.coord.stateChanged.Wait()
-		}
-
 		if closeErr != nil {
+			s.coord.stateMu.Lock()
 			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = closeErr
 			return
 		}
+
+		s.coord.stateMu.Lock()
+		if s.coord.committedGeneration < s.generation {
+			s.coord.committedGeneration = s.generation
+		}
+		s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration)
+		s.coord.stateMu.Unlock()
+
+		postCloseWaitCtx, cancelPostCloseWait := newCoordinatorWaitContext(s.waitTimeout)
+		defer cancelPostCloseWait()
+		if err := s.coord.waitForNoActiveDeletes(postCloseWaitCtx); err != nil {
+			s.err = err
+			return
+		}
+
+		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
-			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {
@@ -669,10 +692,6 @@ func (s *coordinatedTopWriteSink) Close() error {
 			}
 			return
 		}
-		if s.coord.committedGeneration < s.generation {
-			s.coord.committedGeneration = s.generation
-		}
-		s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration)
 		s.coord.stateMu.Unlock()
 	})
 	return s.err
@@ -701,23 +720,31 @@ func (s *coordinatedTopWriteSink) Abort() error {
 	return s.err
 }
 
-func newConditionalGenerationWriteSink(sink WriteSink, coord *writeCoordinator, generation uint64, onInvalidated func() error) WriteSink {
+func newConditionalGenerationWriteSink(sink WriteSink, coord *writeCoordinator, generation uint64, waitTimeout time.Duration, onInvalidated func() error) WriteSink {
 	return &conditionalGenerationWriteSink{
 		WriteSink:     sink,
 		coord:         coord,
 		generation:    generation,
+		waitTimeout:   waitTimeout,
 		onInvalidated: onInvalidated,
 	}
 }
 
 func (s *conditionalGenerationWriteSink) Close() error {
 	s.once.Do(func() {
-		s.coord.init()
-		s.coord.stateMu.Lock()
-		for s.coord.activeDeletes > 0 {
-			s.coord.stateChanged.Wait()
+		waitCtx, cancelWait := newCoordinatorWaitContext(s.waitTimeout)
+		defer cancelWait()
+
+		if err := s.coord.waitForNoActiveDeletes(waitCtx); err != nil {
+			abortErr := s.WriteSink.Abort()
+			s.err = err
+			if abortErr != nil {
+				s.err = errors.Join(s.err, abortErr)
+			}
+			return
 		}
 
+		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
 			s.coord.stateMu.Unlock()
 			abortErr := s.WriteSink.Abort()
@@ -731,16 +758,19 @@ func (s *conditionalGenerationWriteSink) Close() error {
 
 		closeErr := s.WriteSink.Close()
 
-		s.coord.stateMu.Lock()
-		for s.coord.activeDeletes > 0 {
-			s.coord.stateChanged.Wait()
-		}
-
 		if closeErr != nil {
-			s.coord.stateMu.Unlock()
 			s.err = closeErr
 			return
 		}
+
+		postCloseWaitCtx, cancelPostCloseWait := newCoordinatorWaitContext(s.waitTimeout)
+		defer cancelPostCloseWait()
+		if err := s.coord.waitForNoActiveDeletes(postCloseWaitCtx); err != nil {
+			s.err = err
+			return
+		}
+
+		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
 			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated

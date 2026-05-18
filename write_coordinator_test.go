@@ -278,6 +278,43 @@ func TestStagedCloseWaitingForDeleteTimesOutAndReleasesReservation(t *testing.T)
 	}
 }
 
+func TestLegacyTopWriteCloseWaitingForDeleteTimesOut(t *testing.T) {
+	store := &countingBeginSetStore{}
+	cache := &DaramjweeCache{
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: 25 * time.Millisecond,
+	}
+
+	writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	defer writer.Abort()
+
+	coord := cache.topWrites.coordinator("key")
+	if err := coord.beginDelete(context.Background()); err != nil {
+		t.Fatalf("beginDelete failed: %v", err)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- writer.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected close wait timeout, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		coord.finishDelete(false)
+		t.Fatal("legacy top write Close blocked past close timeout while delete was active")
+	}
+
+	coord.finishDelete(false)
+}
+
 func TestStagedCloseWaitingForCommitLeaseTimesOutAndReleasesReservation(t *testing.T) {
 	store := &blockingFirstCommitStagingStore{
 		commitStarted: make(chan struct{}),
@@ -494,6 +531,31 @@ func TestSetStreamToTopStoreWithGenerationHonorsCanceledContextWhileDeleteInProg
 	}
 }
 
+func TestConditionalGenerationWriteSinkWaitingForDeleteTimesOut(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+	if err := coord.beginDelete(context.Background()); err != nil {
+		t.Fatalf("beginDelete failed: %v", err)
+	}
+	defer coord.finishDelete(false)
+
+	sink := newConditionalGenerationWriteSink(&testWriteSink{}, coord, 1, 25*time.Millisecond, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sink.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected conditional close wait timeout, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("conditional generation Close blocked past close timeout while delete was active")
+	}
+}
+
 func TestSetWithAbandonedTopWriteSinkReturnsWhenContextExpires(t *testing.T) {
 	store := &countingBeginSetStore{}
 	cache := &DaramjweeCache{
@@ -551,7 +613,7 @@ func TestInvalidatedCleanupDoesNotHoldStateMu(t *testing.T) {
 			<-releaseClose
 			return nil
 		},
-	}, coord, 1, func() error {
+	}, coord, 1, time.Second, func() error {
 		close(cleanupStarted)
 		<-releaseCleanup
 		return nil
@@ -719,7 +781,7 @@ func TestFanoutWriteManagerOrdersStaleCleanupBeforeNewerWrite(t *testing.T) {
 				<-releaseFirstClose
 				return nil
 			},
-		}, coord, 1, func() error {
+		}, coord, 1, time.Second, func() error {
 			close(firstCleanupDone)
 			return nil
 		})
@@ -743,7 +805,7 @@ func TestFanoutWriteManagerOrdersStaleCleanupBeforeNewerWrite(t *testing.T) {
 				close(secondWriteDone)
 				return nil
 			},
-		}, coord, 2, nil)
+		}, coord, 2, time.Second, nil)
 		secondSinkDone <- sink.Close()
 	}()
 
