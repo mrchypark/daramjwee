@@ -163,6 +163,9 @@ func (s *Store) ValidateTier(index int) error {
 
 // GetStream returns the current published generation for a key.
 func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := s.ensureReady(); err != nil {
 		return nil, nil, err
 	}
@@ -302,6 +305,9 @@ func (s *Store) beginSet(ctx context.Context, key string, metadata *daramjwee.Me
 // Delete removes the currently visible entry for a key.
 // Blob reclamation is handled by best-effort cleanup and conservative sweep.
 func (s *Store) Delete(ctx context.Context, key string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
@@ -327,6 +333,9 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 
 // Stat returns metadata for the published generation.
 func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}

@@ -87,6 +87,9 @@ func (rs *RedisStore) getMetadata(ctx context.Context, key string) (*daramjwee.M
 
 // GetStream retrieves an object and its metadata as a stream from Redis.
 func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
@@ -156,6 +159,9 @@ func (rs *RedisStore) beginSet(ctx context.Context, key string, metadata *daramj
 
 // Delete removes an object and its metadata from Redis.
 func (rs *RedisStore) Delete(ctx context.Context, key string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -166,6 +172,9 @@ func (rs *RedisStore) Delete(ctx context.Context, key string) error {
 
 // Stat retrieves metadata for an object without its data from Redis.
 func (rs *RedisStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -208,6 +217,9 @@ func (w *redisStoreWriter) Close() error {
 }
 
 func (w *redisStoreWriter) Commit(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !w.markDone() {
 		return nil
 	}

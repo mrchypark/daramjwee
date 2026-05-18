@@ -45,6 +45,9 @@ func (w *writer) Close() error {
 }
 
 func (w *writer) Commit(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !w.markDone() {
 		return nil
 	}

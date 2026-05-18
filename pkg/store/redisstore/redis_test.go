@@ -308,15 +308,14 @@ func TestRedisStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	store := New(client, log.NewNopLogger()).(*RedisStore)
-	ctx := context.Background()
 
 	sink, err := store.BeginStagedSet(nil, "staged-nil-context", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = sink.Write([]byte("nil context staged"))
 	require.NoError(t, err)
-	require.NoError(t, sink.Commit(ctx))
+	require.NoError(t, sink.Commit(nil))
 
-	reader, meta, err := store.GetStream(ctx, "staged-nil-context")
+	reader, meta, err := store.GetStream(nil, "staged-nil-context")
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -324,6 +323,10 @@ func TestRedisStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "nil context staged", string(body))
 	require.Equal(t, "v1", meta.CacheTag)
+	stat, err := store.Stat(nil, "staged-nil-context")
+	require.NoError(t, err)
+	require.Equal(t, "v1", stat.CacheTag)
+	require.NoError(t, store.Delete(nil, "staged-nil-context"))
 }
 
 func TestRedisStore_StagedAbortDeletesTempKey(t *testing.T) {

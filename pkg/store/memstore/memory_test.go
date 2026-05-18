@@ -142,7 +142,7 @@ func TestMemStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("value"))
 	require.NoError(t, err)
-	require.NoError(t, writer.Commit(context.Background()))
+	require.NoError(t, writer.Commit(nil))
 
 	reader, meta, err := store.GetStream(context.Background(), "nil-context")
 	require.NoError(t, err)

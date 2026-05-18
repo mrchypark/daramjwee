@@ -77,7 +77,6 @@ func TestStore_StagedWriteCommitsOnlyOnCommit(t *testing.T) {
 }
 
 func TestStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
-	ctx := context.Background()
 	dataDir := t.TempDir()
 	store := New(
 		objstore.NewInMemBucket(),
@@ -90,9 +89,9 @@ func TestStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "nil context staged")
 	require.NoError(t, err)
-	require.NoError(t, writer.Commit(ctx))
+	require.NoError(t, writer.Commit(nil))
 
-	stream, meta, err := store.GetStream(ctx, "staged-nil-context")
+	stream, meta, err := store.GetStream(nil, "staged-nil-context")
 	require.NoError(t, err)
 	defer stream.Close()
 
@@ -100,6 +99,10 @@ func TestStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "nil context staged", string(body))
 	assert.Equal(t, "v1", meta.CacheTag)
+	stat, err := store.Stat(nil, "staged-nil-context")
+	require.NoError(t, err)
+	assert.Equal(t, "v1", stat.CacheTag)
+	require.NoError(t, store.Delete(nil, "staged-nil-context"))
 }
 
 func TestStore_StagedAbortLeavesNoVisibleLocalEntry(t *testing.T) {

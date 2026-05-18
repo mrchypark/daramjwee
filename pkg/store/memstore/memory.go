@@ -152,6 +152,9 @@ func (w *memStoreSink) Close() error {
 }
 
 func (w *memStoreSink) Commit(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.done {
