@@ -117,16 +117,16 @@ func TestLaterStagedBeginFailureDoesNotInvalidateOlderWriter(t *testing.T) {
 
 	select {
 	case err := <-olderDone:
-		t.Fatalf("older Close completed while later BeginStagedSet was still pending: %v", err)
-	case <-time.After(50 * time.Millisecond):
+		if err != nil {
+			t.Fatalf("older Close should publish while later BeginStagedSet is still pending, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("older Close blocked behind later BeginStagedSet")
 	}
 
 	close(store.releaseSecondBegin)
 	if err := <-secondDone; !errors.Is(err, beginErr) {
 		t.Fatalf("expected second BeginStagedSet error, got %v", err)
-	}
-	if err := <-olderDone; err != nil {
-		t.Fatalf("older Close should publish after later begin failure, got %v", err)
 	}
 }
 
@@ -241,6 +241,38 @@ func TestStaleStagedCloseAbortCleanupDoesNotBlockNewerCommit(t *testing.T) {
 	close(store.releaseAbort)
 	if err := <-olderDone; !errors.Is(err, ErrTopWriteInvalidated) {
 		t.Fatalf("expected older Close to be invalidated, got %v", err)
+	}
+}
+
+func TestStagedCloseWaitingForDeleteTimesOutAndReleasesReservation(t *testing.T) {
+	store := &stubStagingStore{}
+	cache := &DaramjweeCache{
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: 25 * time.Millisecond,
+	}
+
+	writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	defer writer.Abort()
+
+	coord := cache.topWrites.coordinator("key")
+	coord.beginDelete()
+
+	closeErr := writer.Close()
+	if !errors.Is(closeErr, context.DeadlineExceeded) {
+		t.Fatalf("expected close wait timeout, got %v", closeErr)
+	}
+
+	coord.finishDelete(false)
+	next, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v2"})
+	if err != nil {
+		t.Fatalf("next Set should not be poisoned by timed-out close, got %v", err)
+	}
+	if err := next.Close(); err != nil {
+		t.Fatalf("next Close should succeed, got %v", err)
 	}
 }
 

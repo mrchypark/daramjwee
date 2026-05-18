@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 var ErrTopWriteInvalidated = errors.New("daramjwee: top-tier write invalidated")
@@ -46,6 +47,7 @@ type coordinatedStagedTopWriteSink struct {
 	coord         *writeCoordinator
 	generation    uint64
 	conditional   bool
+	waitTimeout   time.Duration
 	onInvalidated func() error
 	once          sync.Once
 	err           error
@@ -236,6 +238,58 @@ func (c *writeCoordinator) reserve(ctx context.Context, expected *uint64) (uint6
 	return generation, nil
 }
 
+func (c *writeCoordinator) waitForNoActiveDeletes(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.init()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.activeDeletes > 0 {
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				c.stateMu.Lock()
+				c.stateChanged.Broadcast()
+				c.stateMu.Unlock()
+			case <-done:
+			}
+		}()
+		defer close(done)
+	}
+	for c.activeDeletes > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.stateChanged.Wait()
+	}
+	return ctx.Err()
+}
+
+func (c *writeCoordinator) lockCommitWhenNoActiveDeletes(ctx context.Context) error {
+	for {
+		if err := c.waitForNoActiveDeletes(ctx); err != nil {
+			return err
+		}
+		c.commitMu.Lock()
+		c.stateMu.Lock()
+		if c.activeDeletes == 0 {
+			c.stateMu.Unlock()
+			return nil
+		}
+		c.stateMu.Unlock()
+		c.commitMu.Unlock()
+	}
+}
+
+func newCoordinatorWaitContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.Background(), func() {}
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
 func (c *writeCoordinator) unregisterReservation(generation uint64) {
 	c.init()
 	c.stateMu.Lock()
@@ -381,24 +435,21 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 	store := c.topWriteStore()
 	coord := c.topWrites.coordinator(key)
 	if staging, ok := store.(StagingStore); ok {
-		coord.commitMu.Lock()
 		generation, err := coord.reserve(ctx, expectedGeneration)
 		if err != nil {
-			coord.commitMu.Unlock()
 			return nil, err
 		}
 		sink, err := staging.BeginStagedSet(ctx, key, metadata)
 		if err != nil {
 			coord.unregisterReservation(generation)
-			coord.commitMu.Unlock()
 			return nil, err
 		}
-		coord.commitMu.Unlock()
 		return &coordinatedStagedTopWriteSink{
 			sink:          sink,
 			coord:         coord,
 			generation:    generation,
 			conditional:   expectedGeneration != nil,
+			waitTimeout:   c.closeTimeout,
 			onInvalidated: func() error { return c.deleteTopStoreKey(key) },
 		}, nil
 	}
@@ -423,8 +474,19 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 
 func (s *coordinatedStagedTopWriteSink) Close() error {
 	s.once.Do(func() {
-		ctx := context.Background()
-		s.coord.commitMu.Lock()
+		commitCtx := context.Background()
+		waitCtx, cancelWait := newCoordinatorWaitContext(s.waitTimeout)
+		defer cancelWait()
+
+		if err := s.coord.lockCommitWhenNoActiveDeletes(waitCtx); err != nil {
+			s.coord.unregisterReservation(s.generation)
+			abortErr := s.sink.Abort()
+			s.err = err
+			if abortErr != nil {
+				s.err = errors.Join(s.err, abortErr)
+			}
+			return
+		}
 		commitMuLocked := true
 		defer func() {
 			if commitMuLocked {
@@ -453,8 +515,10 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 		}
 		s.coord.stateMu.Unlock()
 
-		closeErr := s.sink.Commit(ctx)
+		closeErr := s.sink.Commit(commitCtx)
 
+		// The store commit may already be visible. Keep commitMu while a racing
+		// delete finishes so invalidation cleanup cannot delete a later writer.
 		s.coord.stateMu.Lock()
 		for s.coord.activeDeletes > 0 {
 			s.coord.stateChanged.Wait()
