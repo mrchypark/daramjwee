@@ -47,7 +47,6 @@ type coordinatedStagedTopWriteSink struct {
 	sink          StagedWriteSink
 	coord         *writeCoordinator
 	generation    uint64
-	conditional   bool
 	waitTimeout   time.Duration
 	onInvalidated func() error
 	once          sync.Once
@@ -175,6 +174,9 @@ func (c *writeCoordinator) latestGenerationLocked() uint64 {
 	if len(c.activeReservations) == 0 {
 		return latest
 	}
+	// nextGeneration is only an assignment high-water mark. Rolled-back
+	// reservations must not invalidate conditional writes, so compare only
+	// generations that are committed or still active.
 	for generation := range c.activeReservations {
 		if generation > latest {
 			latest = generation
@@ -465,7 +467,6 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 			sink:          sink,
 			coord:         coord,
 			generation:    generation,
-			conditional:   expectedGeneration != nil,
 			waitTimeout:   c.closeTimeout,
 			onInvalidated: func() error { return c.deleteTopStoreKey(key) },
 		}, nil

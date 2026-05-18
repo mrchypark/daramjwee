@@ -57,6 +57,25 @@ func TestSetStreamToStoreWithTopGenerationRestoresGenerationOnBeginSetFailure(t 
 	}
 }
 
+func TestRolledBackReservationDoesNotInvalidateConditionalWrite(t *testing.T) {
+	coord := &writeCoordinator{}
+	generation, err := coord.reserve(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("reserve failed: %v", err)
+	}
+	coord.unregisterReservation(generation)
+
+	expected := uint64(0)
+	next, err := coord.reserve(context.Background(), &expected)
+	if err != nil {
+		t.Fatalf("rolled-back unpublished generation should not invalidate conditional reserve: %v", err)
+	}
+	if next <= generation {
+		t.Fatalf("next generation should keep monotonic assignment, got %d after %d", next, generation)
+	}
+	coord.unregisterReservation(next)
+}
+
 func TestSetStreamToTopStoreDoesNotExposeStagedCommitBypass(t *testing.T) {
 	store := &stubStagingStore{}
 	cache := &DaramjweeCache{
