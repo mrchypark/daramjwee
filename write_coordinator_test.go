@@ -315,6 +315,37 @@ func TestLegacyTopWriteCloseWaitingForDeleteTimesOut(t *testing.T) {
 	coord.finishDelete(false)
 }
 
+func TestLegacyTopWriteCloseDoesNotReturnTimeoutAfterSuccessfulCommit(t *testing.T) {
+	coord := &writeCoordinator{}
+	if err := coord.acquireWrite(context.Background()); err != nil {
+		t.Fatalf("acquireWrite failed: %v", err)
+	}
+
+	deleteStarted := false
+	sink := &coordinatedTopWriteSink{
+		WriteSink: &testWriteSink{
+			closeFn: func() error {
+				if err := coord.beginDelete(context.Background()); err != nil {
+					return err
+				}
+				deleteStarted = true
+				return nil
+			},
+		},
+		coord:       coord,
+		generation:  1,
+		waitTimeout: 25 * time.Millisecond,
+	}
+
+	if err := sink.Close(); err != nil {
+		t.Fatalf("successful legacy top write should not be reported as a timeout, got %v", err)
+	}
+	if !deleteStarted {
+		t.Fatal("test did not start the racing delete")
+	}
+	coord.finishDelete(false)
+}
+
 func TestStagedCloseWaitingForCommitLeaseTimesOutAndReleasesReservation(t *testing.T) {
 	store := &blockingFirstCommitStagingStore{
 		commitStarted: make(chan struct{}),
@@ -554,6 +585,29 @@ func TestConditionalGenerationWriteSinkWaitingForDeleteTimesOut(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("conditional generation Close blocked past close timeout while delete was active")
 	}
+}
+
+func TestConditionalGenerationWriteSinkDoesNotReturnTimeoutAfterSuccessfulClose(t *testing.T) {
+	coord := &writeCoordinator{}
+
+	deleteStarted := false
+	sink := newConditionalGenerationWriteSink(&testWriteSink{
+		closeFn: func() error {
+			if err := coord.beginDelete(context.Background()); err != nil {
+				return err
+			}
+			deleteStarted = true
+			return nil
+		},
+	}, coord, 1, 25*time.Millisecond, nil)
+
+	if err := sink.Close(); err != nil {
+		t.Fatalf("successful conditional close should not be reported as a timeout, got %v", err)
+	}
+	if !deleteStarted {
+		t.Fatal("test did not start the racing delete")
+	}
+	coord.finishDelete(false)
 }
 
 func TestSetWithAbandonedTopWriteSinkReturnsWhenContextExpires(t *testing.T) {

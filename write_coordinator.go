@@ -655,10 +655,7 @@ func (s *coordinatedTopWriteSink) Close() error {
 
 		postCloseWaitCtx, cancelPostCloseWait := newCoordinatorWaitContext(s.waitTimeout)
 		defer cancelPostCloseWait()
-		if err := s.coord.waitForNoActiveDeletes(postCloseWaitCtx); err != nil {
-			s.err = err
-			return
-		}
+		_ = s.coord.waitForNoActiveDeletes(postCloseWaitCtx)
 
 		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
@@ -744,10 +741,7 @@ func (s *conditionalGenerationWriteSink) Close() error {
 
 		postCloseWaitCtx, cancelPostCloseWait := newCoordinatorWaitContext(s.waitTimeout)
 		defer cancelPostCloseWait()
-		if err := s.coord.waitForNoActiveDeletes(postCloseWaitCtx); err != nil {
-			s.err = err
-			return
-		}
+		_ = s.coord.waitForNoActiveDeletes(postCloseWaitCtx)
 
 		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {

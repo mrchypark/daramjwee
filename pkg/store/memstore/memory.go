@@ -172,29 +172,28 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 		w.release()
 		return fmt.Errorf("memstore: commit: %w", err)
 	}
+
+	finalData := make([]byte, w.buf.Len())
+	copy(finalData, w.buf.Bytes())
+	newItemSize := int64(len(finalData))
+	newEntry := entry{
+		value:    finalData,
+		metadata: cloneMetadata(w.metadata),
+	}
+
 	ms := w.ms
 	ms.mu.Lock()
+	defer w.release()
+	defer ms.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		w.done = true
-		ms.mu.Unlock()
-		w.release()
 		return fmt.Errorf("memstore: commit: %w", err)
 	}
 	w.done = true
 
-	finalData := make([]byte, w.buf.Len())
-	copy(finalData, w.buf.Bytes())
-
-	newItemSize := int64(len(finalData))
-
 	// If the item already exists, subtract its old size from currentSize.
 	if oldEntry, ok := ms.data[w.key]; ok {
 		ms.currentSize -= int64(len(oldEntry.value))
-	}
-
-	newEntry := entry{
-		value:    finalData,
-		metadata: cloneMetadata(w.metadata),
 	}
 
 	ms.data[w.key] = newEntry
@@ -227,9 +226,6 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 			}
 		}
 	}
-
-	ms.mu.Unlock()
-	w.release()
 
 	return nil
 }
