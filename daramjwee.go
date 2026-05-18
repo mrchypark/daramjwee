@@ -220,7 +220,9 @@ type StagedWriteSink interface {
 // BeginStagedSet must keep the currently readable value for key unchanged
 // until Commit succeeds. Abort and failed Commit must leave no visible value
 // from the staged writer, and Delete must not wait for an uncommitted staged
-// writer on the same key to commit or abort.
+// writer on the same key to commit or abort. Commit and Abort are terminal and
+// must tolerate repeated cleanup calls because the cache may call Abort after a
+// failed Commit to release hidden staging resources.
 type StagingStore interface {
 	BeginStagedSet(ctx context.Context, key string, metadata *Metadata) (StagedWriteSink, error)
 }
@@ -230,9 +232,13 @@ type Store interface {
 	// GetStream retrieves an object and its metadata as a stream.
 	// Successful lookups must return non-nil metadata.
 	GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error)
-	// BeginSet returns a sink that writes data into the store.
+	// BeginSet returns a sink that stages data into the store.
+	// The currently readable value for key must remain unchanged until the
+	// returned sink is successfully closed or aborted.
 	BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error)
-	// Delete removes an object from the store.
+	// Delete removes the last committed object from the store.
+	// It must not wait for an uncommitted BeginSet sink on the same key to
+	// close or abort.
 	Delete(ctx context.Context, key string) error
 	// Stat retrieves metadata for an object without its data.
 	Stat(ctx context.Context, key string) (*Metadata, error)

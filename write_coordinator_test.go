@@ -259,7 +259,9 @@ func TestStagedCloseWaitingForDeleteTimesOutAndReleasesReservation(t *testing.T)
 	defer writer.Abort()
 
 	coord := cache.topWrites.coordinator("key")
-	coord.beginDelete()
+	if err := coord.beginDelete(context.Background()); err != nil {
+		t.Fatalf("beginDelete failed: %v", err)
+	}
 
 	closeErr := writer.Close()
 	if !errors.Is(closeErr, context.DeadlineExceeded) {
@@ -273,6 +275,178 @@ func TestStagedCloseWaitingForDeleteTimesOutAndReleasesReservation(t *testing.T)
 	}
 	if err := next.Close(); err != nil {
 		t.Fatalf("next Close should succeed, got %v", err)
+	}
+}
+
+func TestStagedCloseWaitingForCommitLeaseTimesOutAndReleasesReservation(t *testing.T) {
+	store := &blockingFirstCommitStagingStore{
+		commitStarted: make(chan struct{}),
+		releaseCommit: make(chan struct{}),
+	}
+	cache := &DaramjweeCache{
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: 25 * time.Millisecond,
+	}
+
+	first, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
+	if err != nil {
+		t.Fatalf("first Set failed: %v", err)
+	}
+	second, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v2"})
+	if err != nil {
+		t.Fatalf("second Set failed: %v", err)
+	}
+	defer second.Abort()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.Close()
+	}()
+
+	select {
+	case <-store.commitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first Commit did not start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- second.Close()
+	}()
+
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected second Close to time out waiting for commit lease, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(store.releaseCommit)
+		<-firstDone
+		t.Fatal("second Close blocked past close timeout while commit lease was held")
+	}
+
+	close(store.releaseCommit)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Close should finish after release, got %v", err)
+	}
+
+	third, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v3"})
+	if err != nil {
+		t.Fatalf("third Set should not be poisoned by timed-out second close, got %v", err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatalf("third Close should succeed, got %v", err)
+	}
+}
+
+func TestCommittedStagedWritePrunesOlderAbandonedReservations(t *testing.T) {
+	store := &stubStagingStore{}
+	cache := &DaramjweeCache{
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: time.Second,
+	}
+
+	abandoned, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
+	if err != nil {
+		t.Fatalf("abandoned Set failed: %v", err)
+	}
+	defer abandoned.Abort()
+
+	newer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v2"})
+	if err != nil {
+		t.Fatalf("newer Set failed: %v", err)
+	}
+	if err := newer.Close(); err != nil {
+		t.Fatalf("newer Close failed: %v", err)
+	}
+
+	coord := cache.topWrites.coordinator("key")
+	coord.stateMu.Lock()
+	defer coord.stateMu.Unlock()
+	if _, ok := coord.activeReservations[1]; ok {
+		t.Fatal("older abandoned reservation remained after a newer generation committed")
+	}
+}
+
+func TestStagedCloseAbortsUnderlyingSinkAfterCommitFailure(t *testing.T) {
+	commitErr := errors.New("commit failed")
+	store := &failingCommitStagingStore{commitErr: commitErr}
+	cache := &DaramjweeCache{
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: time.Second,
+	}
+
+	writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	closeErr := writer.Close()
+	if !errors.Is(closeErr, commitErr) {
+		t.Fatalf("expected commit failure, got %v", closeErr)
+	}
+	if !store.sink.aborted {
+		t.Fatal("expected failed staged commit to abort underlying sink")
+	}
+}
+
+func TestFailedStagedCommitAbortCleanupDoesNotHoldCommitLease(t *testing.T) {
+	commitErr := errors.New("commit failed")
+	store := &blockingAbortAfterCommitFailureStagingStore{
+		commitErr:    commitErr,
+		abortStarted: make(chan struct{}),
+		releaseAbort: make(chan struct{}),
+	}
+	cache := &DaramjweeCache{
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: 25 * time.Millisecond,
+	}
+
+	first, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
+	if err != nil {
+		t.Fatalf("first Set failed: %v", err)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.Close()
+	}()
+
+	select {
+	case <-store.abortStarted:
+	case <-time.After(time.Second):
+		t.Fatal("failed commit did not start abort cleanup")
+	}
+
+	second, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v2"})
+	if err != nil {
+		close(store.releaseAbort)
+		<-firstDone
+		t.Fatalf("second Set failed: %v", err)
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- second.Close()
+	}()
+
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			close(store.releaseAbort)
+			<-firstDone
+			t.Fatalf("second Close should not wait for failed commit abort cleanup, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(store.releaseAbort)
+		<-firstDone
+		t.Fatal("second Close blocked behind failed commit abort cleanup")
+	}
+
+	close(store.releaseAbort)
+	if err := <-firstDone; !errors.Is(err, commitErr) {
+		t.Fatalf("expected first Close commit failure, got %v", err)
 	}
 }
 
@@ -296,7 +470,9 @@ func TestSetStreamToTopStoreWithGenerationHonorsCanceledContextWhileDeleteInProg
 	}
 
 	coord := cache.topWrites.coordinator("key")
-	coord.beginDelete()
+	if err := coord.beginDelete(context.Background()); err != nil {
+		t.Fatalf("beginDelete failed: %v", err)
+	}
 	defer coord.finishDelete(false)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -831,6 +1007,151 @@ func (s *blockingAbortStagedWriteSink) Commit(ctx context.Context) error {
 	return nil
 }
 func (s *blockingAbortStagedWriteSink) Abort() error {
+	close(s.abortStarted)
+	<-s.releaseAbort
+	return nil
+}
+
+type blockingFirstCommitStagingStore struct {
+	mu            sync.Mutex
+	calls         int
+	commitStarted chan struct{}
+	releaseCommit chan struct{}
+}
+
+func (s *blockingFirstCommitStagingStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
+}
+
+func (s *blockingFirstCommitStagingStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
+	return &stubWriteSink{}, nil
+}
+
+func (s *blockingFirstCommitStagingStore) BeginStagedSet(ctx context.Context, key string, metadata *Metadata) (StagedWriteSink, error) {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 1 {
+		return &blockingCommitStagedWriteSink{
+			commitStarted: s.commitStarted,
+			releaseCommit: s.releaseCommit,
+		}, nil
+	}
+	return &stubStagedWriteSink{}, nil
+}
+
+func (s *blockingFirstCommitStagingStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s *blockingFirstCommitStagingStore) Stat(ctx context.Context, key string) (*Metadata, error) {
+	return nil, ErrNotFound
+}
+
+type blockingCommitStagedWriteSink struct {
+	commitStarted chan struct{}
+	releaseCommit chan struct{}
+}
+
+func (s *blockingCommitStagedWriteSink) Write(p []byte) (int, error) { return len(p), nil }
+func (s *blockingCommitStagedWriteSink) Commit(ctx context.Context) error {
+	close(s.commitStarted)
+	<-s.releaseCommit
+	return nil
+}
+func (s *blockingCommitStagedWriteSink) Abort() error { return nil }
+
+type failingCommitStagingStore struct {
+	commitErr error
+	sink      *failingCommitStagedWriteSink
+}
+
+func (s *failingCommitStagingStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
+}
+
+func (s *failingCommitStagingStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
+	return &stubWriteSink{}, nil
+}
+
+func (s *failingCommitStagingStore) BeginStagedSet(ctx context.Context, key string, metadata *Metadata) (StagedWriteSink, error) {
+	s.sink = &failingCommitStagedWriteSink{commitErr: s.commitErr}
+	return s.sink, nil
+}
+
+func (s *failingCommitStagingStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s *failingCommitStagingStore) Stat(ctx context.Context, key string) (*Metadata, error) {
+	return nil, ErrNotFound
+}
+
+type failingCommitStagedWriteSink struct {
+	commitErr error
+	aborted   bool
+}
+
+func (s *failingCommitStagedWriteSink) Write(p []byte) (int, error) { return len(p), nil }
+func (s *failingCommitStagedWriteSink) Commit(ctx context.Context) error {
+	return s.commitErr
+}
+func (s *failingCommitStagedWriteSink) Abort() error {
+	s.aborted = true
+	return nil
+}
+
+type blockingAbortAfterCommitFailureStagingStore struct {
+	mu           sync.Mutex
+	calls        int
+	commitErr    error
+	abortStarted chan struct{}
+	releaseAbort chan struct{}
+}
+
+func (s *blockingAbortAfterCommitFailureStagingStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
+}
+
+func (s *blockingAbortAfterCommitFailureStagingStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
+	return &stubWriteSink{}, nil
+}
+
+func (s *blockingAbortAfterCommitFailureStagingStore) BeginStagedSet(ctx context.Context, key string, metadata *Metadata) (StagedWriteSink, error) {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 1 {
+		return &blockingAbortAfterCommitFailureSink{
+			commitErr:    s.commitErr,
+			abortStarted: s.abortStarted,
+			releaseAbort: s.releaseAbort,
+		}, nil
+	}
+	return &stubStagedWriteSink{}, nil
+}
+
+func (s *blockingAbortAfterCommitFailureStagingStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s *blockingAbortAfterCommitFailureStagingStore) Stat(ctx context.Context, key string) (*Metadata, error) {
+	return nil, ErrNotFound
+}
+
+type blockingAbortAfterCommitFailureSink struct {
+	commitErr    error
+	abortStarted chan struct{}
+	releaseAbort chan struct{}
+}
+
+func (s *blockingAbortAfterCommitFailureSink) Write(p []byte) (int, error) { return len(p), nil }
+func (s *blockingAbortAfterCommitFailureSink) Commit(ctx context.Context) error {
+	return s.commitErr
+}
+func (s *blockingAbortAfterCommitFailureSink) Abort() error {
 	close(s.abortStarted)
 	<-s.releaseAbort
 	return nil

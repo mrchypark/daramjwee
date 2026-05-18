@@ -21,7 +21,7 @@ type writeCoordinator struct {
 	initOnce     sync.Once
 	leaseOnce    sync.Once
 	writeLease   chan struct{}
-	commitMu     sync.Mutex
+	commitLease  chan struct{}
 	stateMu      sync.Mutex
 	stateChanged *sync.Cond
 	// committedGeneration is the latest generation visible in the top store.
@@ -192,13 +192,23 @@ func (c *writeCoordinator) reserveGenerationLocked() uint64 {
 
 func (c *writeCoordinator) advanceCommittedLocked() {
 	generation := c.reserveGenerationLocked()
-	c.removeReservationLocked(generation)
 	c.committedGeneration = generation
+	c.pruneReservationsThroughLocked(generation)
 }
 
 func (c *writeCoordinator) removeReservationLocked(generation uint64) {
 	c.ensureReservationsLocked()
 	delete(c.activeReservations, generation)
+	c.stateChanged.Broadcast()
+}
+
+func (c *writeCoordinator) pruneReservationsThroughLocked(generation uint64) {
+	c.ensureReservationsLocked()
+	for reserved := range c.activeReservations {
+		if reserved <= generation {
+			delete(c.activeReservations, reserved)
+		}
+	}
 	c.stateChanged.Broadcast()
 }
 
@@ -278,14 +288,16 @@ func (c *writeCoordinator) lockCommitWhenNoActiveDeletes(ctx context.Context) er
 		if err := c.waitForNoActiveDeletes(ctx); err != nil {
 			return err
 		}
-		c.commitMu.Lock()
+		if err := c.acquireCommit(ctx); err != nil {
+			return err
+		}
 		c.stateMu.Lock()
 		if c.activeDeletes == 0 {
 			c.stateMu.Unlock()
 			return nil
 		}
 		c.stateMu.Unlock()
-		c.commitMu.Unlock()
+		c.releaseCommit()
 	}
 }
 
@@ -321,6 +333,8 @@ func (c *writeCoordinator) initLease() {
 	c.leaseOnce.Do(func() {
 		c.writeLease = make(chan struct{}, 1)
 		c.writeLease <- struct{}{}
+		c.commitLease = make(chan struct{}, 1)
+		c.commitLease <- struct{}{}
 	})
 }
 
@@ -339,6 +353,27 @@ func (c *writeCoordinator) acquireWrite(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (c *writeCoordinator) acquireCommit(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.initLease()
+	select {
+	case <-c.commitLease:
+		if err := ctx.Err(); err != nil {
+			c.releaseCommit()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *writeCoordinator) releaseCommit() {
+	c.commitLease <- struct{}{}
 }
 
 func (c *writeCoordinator) releaseWrite() {
@@ -404,11 +439,15 @@ func (c *writeCoordinator) rollbackAndUnlock(generation uint64) {
 	c.releaseWrite()
 }
 
-func (c *writeCoordinator) beginDelete() {
+func (c *writeCoordinator) beginDelete(ctx context.Context) error {
+	if err := c.acquireCommit(ctx); err != nil {
+		return err
+	}
 	c.init()
 	c.stateMu.Lock()
 	c.activeDeletes++
 	c.stateMu.Unlock()
+	return nil
 }
 
 func (c *writeCoordinator) finishDelete(success bool) {
@@ -422,6 +461,7 @@ func (c *writeCoordinator) finishDelete(success bool) {
 	}
 	c.stateChanged.Broadcast()
 	c.stateMu.Unlock()
+	c.releaseCommit()
 }
 
 func (c *DaramjweeCache) currentTopWriteGeneration(key string) uint64 {
@@ -493,23 +533,31 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 			}
 			return
 		}
-		commitMuLocked := true
+		commitLocked := true
 		defer func() {
-			if commitMuLocked {
-				s.coord.commitMu.Unlock()
+			if commitLocked {
+				s.coord.releaseCommit()
 			}
 		}()
 
-		s.coord.stateMu.Lock()
-		for s.coord.activeDeletes > 0 {
-			s.coord.stateChanged.Wait()
+		if err := s.coord.waitForNoActiveDeletes(waitCtx); err != nil {
+			s.coord.unregisterReservation(s.generation)
+			s.coord.releaseCommit()
+			commitLocked = false
+			abortErr := s.sink.Abort()
+			s.err = err
+			if abortErr != nil {
+				s.err = errors.Join(s.err, abortErr)
+			}
+			return
 		}
 
+		s.coord.stateMu.Lock()
 		if s.coord.committedGeneration > s.generation {
 			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
-			s.coord.commitMu.Unlock()
-			commitMuLocked = false
+			s.coord.releaseCommit()
+			commitLocked = false
 			abortErr := s.sink.Abort()
 			s.err = ErrTopWriteInvalidated
 			if abortErr != nil {
@@ -525,19 +573,23 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = closeErr
+			s.coord.releaseCommit()
+			commitLocked = false
+			if abortErr := s.sink.Abort(); abortErr != nil {
+				s.err = errors.Join(s.err, abortErr)
+			}
 			return
 		}
 
 		s.coord.stateMu.Lock()
-		s.coord.removeReservationLocked(s.generation)
 		if s.coord.committedGeneration < s.generation {
 			s.coord.committedGeneration = s.generation
-			s.coord.stateChanged.Broadcast()
 		}
+		s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration)
 		s.coord.stateMu.Unlock()
 
-		// The store commit may already be visible. Keep commitMu while a racing
-		// delete finishes so invalidation cleanup cannot delete a later writer.
+		// The store commit may already be visible. Keep the commit lease while a
+		// racing delete finishes so invalidation cleanup cannot delete a later writer.
 		postCommitWaitCtx, cancelPostCommitWait := newCoordinatorWaitContext(s.waitTimeout)
 		defer cancelPostCommitWait()
 		if err := s.coord.waitForNoActiveDeletes(postCommitWaitCtx); err != nil {
@@ -617,10 +669,10 @@ func (s *coordinatedTopWriteSink) Close() error {
 			}
 			return
 		}
-		s.coord.removeReservationLocked(s.generation)
 		if s.coord.committedGeneration < s.generation {
 			s.coord.committedGeneration = s.generation
 		}
+		s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration)
 		s.coord.stateMu.Unlock()
 	})
 	return s.err
