@@ -173,8 +173,7 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 		return fmt.Errorf("memstore: commit: %w", err)
 	}
 
-	finalData := make([]byte, w.buf.Len())
-	copy(finalData, w.buf.Bytes())
+	finalData := bytes.Clone(w.buf.Bytes())
 	newItemSize := int64(len(finalData))
 	newEntry := entry{
 		value:    finalData,

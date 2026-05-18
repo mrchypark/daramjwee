@@ -653,7 +653,6 @@ func TestSetWithAbandonedTopWriteSinkReturnsWhenContextExpires(t *testing.T) {
 
 func TestInvalidatedCleanupDoesNotHoldStateMu(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.stateChanged = sync.NewCond(&coord.stateMu)
 	coord.committedGeneration = 1
 
 	closeStarted := make(chan struct{})
@@ -815,7 +814,6 @@ func TestFanoutWriteManagerReleasesIdleLocksAfterConcurrentUse(t *testing.T) {
 func TestFanoutWriteManagerOrdersStaleCleanupBeforeNewerWrite(t *testing.T) {
 	var manager fanoutWriteManager
 	coord := &writeCoordinator{}
-	coord.stateChanged = sync.NewCond(&coord.stateMu)
 	coord.committedGeneration = 1
 
 	firstCloseStarted := make(chan struct{})

@@ -18,12 +18,11 @@ type fanoutWriteManager struct {
 }
 
 type writeCoordinator struct {
-	initOnce     sync.Once
-	leaseOnce    sync.Once
-	writeLease   chan struct{}
-	commitLease  chan struct{}
-	stateMu      sync.Mutex
-	stateChanged *sync.Cond
+	initOnce    sync.Once
+	leaseOnce   sync.Once
+	writeLease  chan struct{}
+	commitLease chan struct{}
+	stateMu     sync.Mutex
 	// committedGeneration is the latest generation visible in the top store.
 	// activeReservations tracks in-flight writers so conditional fills can be
 	// invalidated without holding a same-key lock for the writer lifetime.
@@ -31,6 +30,7 @@ type writeCoordinator struct {
 	nextGeneration      uint64
 	activeReservations  map[uint64]struct{}
 	activeDeletes       int
+	activeDeletesDone   chan struct{}
 }
 
 type coordinatedTopWriteSink struct {
@@ -172,6 +172,9 @@ func (c *writeCoordinator) ensureReservationsLocked() {
 
 func (c *writeCoordinator) latestGenerationLocked() uint64 {
 	latest := c.committedGeneration
+	if len(c.activeReservations) == 0 {
+		return latest
+	}
 	for generation := range c.activeReservations {
 		if generation > latest {
 			latest = generation
@@ -201,7 +204,6 @@ func (c *writeCoordinator) advanceCommittedLocked() {
 func (c *writeCoordinator) removeReservationLocked(generation uint64) {
 	c.ensureReservationsLocked()
 	delete(c.activeReservations, generation)
-	c.stateChanged.Broadcast()
 }
 
 func (c *writeCoordinator) pruneReservationsThroughLocked(generation uint64) {
@@ -211,7 +213,6 @@ func (c *writeCoordinator) pruneReservationsThroughLocked(generation uint64) {
 			delete(c.activeReservations, reserved)
 		}
 	}
-	c.stateChanged.Broadcast()
 }
 
 func (c *writeCoordinator) reserve(ctx context.Context, expected *uint64) (uint64, error) {
@@ -223,24 +224,8 @@ func (c *writeCoordinator) reserve(ctx context.Context, expected *uint64) (uint6
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if expected == nil {
-		if c.activeDeletes > 0 {
-			done := make(chan struct{})
-			go func() {
-				select {
-				case <-ctx.Done():
-					c.stateMu.Lock()
-					c.stateChanged.Broadcast()
-					c.stateMu.Unlock()
-				case <-done:
-				}
-			}()
-			defer close(done)
-		}
-		for c.activeDeletes > 0 {
-			if err := ctx.Err(); err != nil {
-				return 0, err
-			}
-			c.stateChanged.Wait()
+		if err := c.waitForNoActiveDeletesLocked(ctx); err != nil {
+			return 0, err
 		}
 	} else if c.activeDeletes > 0 {
 		return 0, ErrTopWriteInvalidated
@@ -252,7 +237,6 @@ func (c *writeCoordinator) reserve(ctx context.Context, expected *uint64) (uint6
 		return 0, ErrTopWriteInvalidated
 	}
 	generation := c.reserveGenerationLocked()
-	c.stateChanged.Broadcast()
 	return generation, nil
 }
 
@@ -263,24 +247,20 @@ func (c *writeCoordinator) waitForNoActiveDeletes(ctx context.Context) error {
 	c.init()
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	if c.activeDeletes > 0 {
-		done := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				c.stateMu.Lock()
-				c.stateChanged.Broadcast()
-				c.stateMu.Unlock()
-			case <-done:
-			}
-		}()
-		defer close(done)
-	}
+	return c.waitForNoActiveDeletesLocked(ctx)
+}
+
+func (c *writeCoordinator) waitForNoActiveDeletesLocked(ctx context.Context) error {
 	for c.activeDeletes > 0 {
-		if err := ctx.Err(); err != nil {
-			return err
+		done := c.activeDeletesDone
+		c.stateMu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			c.stateMu.Lock()
+			return ctx.Err()
 		}
-		c.stateChanged.Wait()
+		c.stateMu.Lock()
 	}
 	return ctx.Err()
 }
@@ -321,8 +301,11 @@ func (c *writeCoordinator) unregisterReservation(generation uint64) {
 
 func (c *writeCoordinator) init() {
 	c.initOnce.Do(func() {
-		if c.stateChanged == nil {
-			c.stateChanged = sync.NewCond(&c.stateMu)
+		if c.activeDeletesDone == nil {
+			c.activeDeletesDone = make(chan struct{})
+			if c.activeDeletes == 0 {
+				close(c.activeDeletesDone)
+			}
 		}
 		if c.activeReservations == nil {
 			c.activeReservations = make(map[uint64]struct{})
@@ -394,26 +377,10 @@ func (c *writeCoordinator) begin(ctx context.Context, expected *uint64) (uint64,
 	}
 	c.stateMu.Lock()
 	if expected == nil {
-		if c.activeDeletes > 0 {
-			done := make(chan struct{})
-			go func() {
-				select {
-				case <-ctx.Done():
-					c.stateMu.Lock()
-					c.stateChanged.Broadcast()
-					c.stateMu.Unlock()
-				case <-done:
-				}
-			}()
-			defer close(done)
-		}
-		for c.activeDeletes > 0 {
-			if err := ctx.Err(); err != nil {
-				c.stateMu.Unlock()
-				c.releaseWrite()
-				return 0, err
-			}
-			c.stateChanged.Wait()
+		if err := c.waitForNoActiveDeletesLocked(ctx); err != nil {
+			c.stateMu.Unlock()
+			c.releaseWrite()
+			return 0, err
 		}
 	} else if c.activeDeletes > 0 {
 		c.stateMu.Unlock()
@@ -431,7 +398,6 @@ func (c *writeCoordinator) begin(ctx context.Context, expected *uint64) (uint64,
 		return 0, ErrTopWriteInvalidated
 	}
 	generation := c.reserveGenerationLocked()
-	c.stateChanged.Broadcast()
 	c.stateMu.Unlock()
 	return generation, nil
 }
@@ -447,6 +413,9 @@ func (c *writeCoordinator) beginDelete(ctx context.Context) error {
 	}
 	c.init()
 	c.stateMu.Lock()
+	if c.activeDeletes == 0 {
+		c.activeDeletesDone = make(chan struct{})
+	}
 	c.activeDeletes++
 	c.stateMu.Unlock()
 	return nil
@@ -460,8 +429,10 @@ func (c *writeCoordinator) finishDelete(success bool) {
 	}
 	if c.activeDeletes > 0 {
 		c.activeDeletes--
+		if c.activeDeletes == 0 {
+			close(c.activeDeletesDone)
+		}
 	}
-	c.stateChanged.Broadcast()
 	c.stateMu.Unlock()
 	c.releaseCommit()
 }
@@ -474,7 +445,6 @@ func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 	coord := c.topWrites.coordinator(key)
 	coord.stateMu.Lock()
 	coord.advanceCommittedLocked()
-	coord.stateChanged.Broadcast()
 	coord.stateMu.Unlock()
 }
 
