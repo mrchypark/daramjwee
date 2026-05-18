@@ -192,8 +192,14 @@ func (c *writeCoordinator) reserveGenerationLocked() uint64 {
 
 func (c *writeCoordinator) advanceCommittedLocked() {
 	generation := c.reserveGenerationLocked()
-	delete(c.activeReservations, generation)
+	c.removeReservationLocked(generation)
 	c.committedGeneration = generation
+}
+
+func (c *writeCoordinator) removeReservationLocked(generation uint64) {
+	c.ensureReservationsLocked()
+	delete(c.activeReservations, generation)
+	c.stateChanged.Broadcast()
 }
 
 func (c *writeCoordinator) reserve(ctx context.Context, expected *uint64) (uint64, error) {
@@ -294,8 +300,7 @@ func (c *writeCoordinator) unregisterReservation(generation uint64) {
 	c.init()
 	c.stateMu.Lock()
 	if _, ok := c.activeReservations[generation]; ok {
-		delete(c.activeReservations, generation)
-		c.stateChanged.Broadcast()
+		c.removeReservationLocked(generation)
 	}
 	c.stateMu.Unlock()
 }
@@ -474,7 +479,8 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 
 func (s *coordinatedStagedTopWriteSink) Close() error {
 	s.once.Do(func() {
-		commitCtx := context.Background()
+		commitCtx, cancelCommit := newCoordinatorWaitContext(s.waitTimeout)
+		defer cancelCommit()
 		waitCtx, cancelWait := newCoordinatorWaitContext(s.waitTimeout)
 		defer cancelWait()
 
@@ -500,9 +506,7 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 		}
 
 		if s.coord.committedGeneration > s.generation {
-			s.coord.ensureReservationsLocked()
-			delete(s.coord.activeReservations, s.generation)
-			s.coord.stateChanged.Broadcast()
+			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.coord.commitMu.Unlock()
 			commitMuLocked = false
@@ -525,17 +529,13 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 		}
 
 		if closeErr != nil {
-			s.coord.ensureReservationsLocked()
-			delete(s.coord.activeReservations, s.generation)
-			s.coord.stateChanged.Broadcast()
+			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = closeErr
 			return
 		}
 		if s.coord.committedGeneration > s.generation {
-			s.coord.ensureReservationsLocked()
-			delete(s.coord.activeReservations, s.generation)
-			s.coord.stateChanged.Broadcast()
+			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {
@@ -545,10 +545,8 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 			}
 			return
 		}
-		s.coord.ensureReservationsLocked()
-		delete(s.coord.activeReservations, s.generation)
+		s.coord.removeReservationLocked(s.generation)
 		s.coord.committedGeneration = s.generation
-		s.coord.stateChanged.Broadcast()
 		s.coord.stateMu.Unlock()
 	})
 	return s.err
@@ -575,9 +573,7 @@ func (s *coordinatedTopWriteSink) Close() error {
 		}
 
 		if s.coord.committedGeneration > s.generation {
-			s.coord.ensureReservationsLocked()
-			delete(s.coord.activeReservations, s.generation)
-			s.coord.stateChanged.Broadcast()
+			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			abortErr := s.WriteSink.Abort()
 			s.err = ErrTopWriteInvalidated
@@ -596,17 +592,13 @@ func (s *coordinatedTopWriteSink) Close() error {
 		}
 
 		if closeErr != nil {
-			s.coord.ensureReservationsLocked()
-			delete(s.coord.activeReservations, s.generation)
-			s.coord.stateChanged.Broadcast()
+			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = closeErr
 			return
 		}
 		if s.coord.committedGeneration > s.generation {
-			s.coord.ensureReservationsLocked()
-			delete(s.coord.activeReservations, s.generation)
-			s.coord.stateChanged.Broadcast()
+			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {
@@ -616,10 +608,8 @@ func (s *coordinatedTopWriteSink) Close() error {
 			}
 			return
 		}
-		s.coord.ensureReservationsLocked()
-		delete(s.coord.activeReservations, s.generation)
+		s.coord.removeReservationLocked(s.generation)
 		s.coord.committedGeneration = s.generation
-		s.coord.stateChanged.Broadcast()
 		s.coord.stateMu.Unlock()
 	})
 	return s.err
