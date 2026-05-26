@@ -424,8 +424,12 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 			}
 		}
 	}
-	if err == nil && tee.sinkErr != nil {
-		err = tee.sinkErr
+	if tee.sinkErr != nil {
+		if err != nil && !errors.Is(err, tee.sinkErr) {
+			err = errors.Join(err, tee.sinkErr)
+		} else if err == nil {
+			err = tee.sinkErr
+		}
 	}
 
 	r.mu.Lock()

@@ -327,17 +327,11 @@ func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ..
 		PositiveFreshness: 0,
 		NegativeFreshness: 0,
 	}
-	settings := settingsForConfig(&cfg)
-	defer optionSettings.Delete(&cfg)
 
 	for _, opt := range opts {
 		if err := opt(&cfg); err != nil {
 			return Config{}, 0, err
 		}
-	}
-	fillLeaseTimeout := time.Duration(0)
-	if settings.fillLeaseTimeout != nil {
-		fillLeaseTimeout = *settings.fillLeaseTimeout
 	}
 
 	switch mode {
@@ -420,7 +414,7 @@ func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ..
 		}
 	}
 
-	return cfg, fillLeaseTimeout, nil
+	return cfg, cfg.fillLeaseTimeout, nil
 }
 
 func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID string, cfg Config, fillLeaseTimeout time.Duration) (Cache, error) {

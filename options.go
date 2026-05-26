@@ -2,7 +2,6 @@ package daramjwee
 
 import (
 	"fmt"
-	"sync"
 	"time"
 )
 
@@ -38,6 +37,7 @@ type Config struct {
 	PositiveFreshness      time.Duration
 	NegativeFreshness      time.Duration
 	TierFreshnessOverrides map[int]TierFreshnessOverride
+	fillLeaseTimeout       time.Duration
 }
 
 type TierFreshnessOverride struct {
@@ -47,12 +47,6 @@ type TierFreshnessOverride struct {
 
 // Option is a function type that modifies the Config.
 type Option func(cfg *Config) error
-
-var optionSettings sync.Map
-
-type optionSetting struct {
-	fillLeaseTimeout *time.Duration
-}
 
 // WithTiers sets the regular cache tiers in top-to-bottom order.
 // It replaces the entire tier chain, so any WithTierFreshness override indices
@@ -155,9 +149,7 @@ func WithFillLeaseTimeout(timeout time.Duration) Option {
 		if timeout < 0 {
 			return &ConfigError{"fill lease timeout cannot be negative"}
 		}
-		settings := settingsForConfig(cfg)
-		value := timeout
-		settings.fillLeaseTimeout = &value
+		cfg.fillLeaseTimeout = timeout
 		return nil
 	}
 }
@@ -217,13 +209,4 @@ func validateFreshness(positive, negative time.Duration) error {
 		return &ConfigError{"negative freshness cannot be a negative value"}
 	}
 	return nil
-}
-
-func settingsForConfig(cfg *Config) *optionSetting {
-	if settings, ok := optionSettings.Load(cfg); ok {
-		return settings.(*optionSetting)
-	}
-	settings := &optionSetting{}
-	actual, _ := optionSettings.LoadOrStore(cfg, settings)
-	return actual.(*optionSetting)
 }

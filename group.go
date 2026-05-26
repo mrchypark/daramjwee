@@ -80,27 +80,28 @@ func (g *cacheGroup) NewCache(name string, opts ...Option) (Cache, error) {
 	g.caches[name] = nil
 	g.constructing++
 	g.mu.Unlock()
-
-	cfg, fillLeaseTimeout, err := buildCacheConfig(cacheConstructionGroup, &g.cfg, opts...)
-	if err != nil {
+	cleanupConstruction := true
+	defer func() {
+		if !cleanupConstruction {
+			return
+		}
 		g.mu.Lock()
-		if g.caches[name] == nil {
+		if current, exists := g.caches[name]; exists && current == nil {
 			delete(g.caches, name)
 		}
 		g.constructing--
 		g.cond.Broadcast()
 		g.mu.Unlock()
+	}()
+
+	cfg, fillLeaseTimeout, err := buildCacheConfig(cacheConstructionGroup, &g.cfg, opts...)
+	if err != nil {
 		return nil, err
 	}
 
 	g.registrationMu.Lock()
 	g.mu.Lock()
 	if g.closed.Load() {
-		if g.caches[name] == nil {
-			delete(g.caches, name)
-		}
-		g.constructing--
-		g.cond.Broadcast()
 		g.mu.Unlock()
 		g.registrationMu.Unlock()
 		return nil, &ConfigError{"cache group is closed"}
@@ -109,25 +110,11 @@ func (g *cacheGroup) NewCache(name string, opts ...Option) (Cache, error) {
 	cache, err := newCacheFromConfig(g.logger, g.rt, name, cfg, fillLeaseTimeout)
 	g.registrationMu.Unlock()
 	if err != nil {
-		g.mu.Lock()
-		if g.caches[name] == nil {
-			delete(g.caches, name)
-		}
-		g.constructing--
-		g.cond.Broadcast()
-		g.mu.Unlock()
 		return nil, err
 	}
 
 	typed, ok := cache.(*DaramjweeCache)
 	if !ok {
-		g.mu.Lock()
-		if g.caches[name] == nil {
-			delete(g.caches, name)
-		}
-		g.constructing--
-		g.cond.Broadcast()
-		g.mu.Unlock()
 		return nil, &ConfigError{"unexpected cache implementation"}
 	}
 	typed.closeHook = func() {
@@ -142,28 +129,15 @@ func (g *cacheGroup) NewCache(name string, opts ...Option) (Cache, error) {
 	if g.closed.Load() {
 		g.mu.Unlock()
 		typed.Close()
-		g.mu.Lock()
-		if g.caches[name] == nil {
-			delete(g.caches, name)
-		}
-		g.constructing--
-		g.cond.Broadcast()
-		g.mu.Unlock()
 		return nil, &ConfigError{"cache group is closed"}
 	}
 	if current, exists := g.caches[name]; !exists || current != nil {
 		g.mu.Unlock()
 		typed.Close()
-		g.mu.Lock()
-		if current, exists := g.caches[name]; exists && current == nil {
-			delete(g.caches, name)
-		}
-		g.constructing--
-		g.cond.Broadcast()
-		g.mu.Unlock()
 		return nil, &ConfigError{fmt.Sprintf("duplicate cache name %q", name)}
 	}
 	g.caches[name] = typed
+	cleanupConstruction = false
 	g.constructing--
 	g.cond.Broadcast()
 	g.mu.Unlock()

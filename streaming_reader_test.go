@@ -197,6 +197,20 @@ func TestStreamThrough_CopyShortWriteWithWriterToAborts(t *testing.T) {
 	assert.False(t, sink.closed)
 }
 
+func TestStreamThrough_CopyWriterToJoinsSourceAndSinkErrors(t *testing.T) {
+	readErr := errors.New("source write-to failed")
+	sinkErr := errors.New("sink write failed")
+	src := &writerToErrorReadCloser{data: []byte("hello"), err: readErr}
+	sink := &recordingWriteSink{writeErr: sinkErr}
+	stream := streamThrough(src, sink, nil, nil)
+
+	n, err := io.Copy(io.Discard, stream)
+	require.ErrorIs(t, err, readErr)
+	require.ErrorIs(t, err, sinkErr)
+	assert.EqualValues(t, 0, n)
+	assert.True(t, sink.aborted)
+}
+
 func TestStreamThrough_ConcurrentCloseWaitsAndReturnsFinalError(t *testing.T) {
 	closeErr := errors.New("abort failed")
 	sink := newBlockingAbortSink(closeErr)
@@ -387,6 +401,24 @@ func (r *writerToSpyReadCloser) WriteTo(w io.Writer) (int64, error) {
 }
 
 func (r *writerToSpyReadCloser) Close() error {
+	return nil
+}
+
+type writerToErrorReadCloser struct {
+	data []byte
+	err  error
+}
+
+func (r *writerToErrorReadCloser) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (r *writerToErrorReadCloser) WriteTo(w io.Writer) (int64, error) {
+	_, _ = w.Write(r.data)
+	return 0, r.err
+}
+
+func (r *writerToErrorReadCloser) Close() error {
 	return nil
 }
 
