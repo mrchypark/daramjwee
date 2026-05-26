@@ -58,6 +58,7 @@ type topFillSink struct {
 	preemptCh   chan struct{}
 	preemptOnce sync.Once
 
+	ioMu                 sync.Mutex
 	mu                   sync.Mutex
 	done                 bool
 	preempted            bool
@@ -65,6 +66,10 @@ type topFillSink struct {
 	reportPreemptOnClose bool
 	wrote                bool
 	err                  error
+}
+
+type fillPreemptDetachedSink interface {
+	detachForFillPreempt() func() error
 }
 
 type streamTeeWriter struct {
@@ -153,17 +158,30 @@ func (s *topFillSink) isPreempted() bool {
 }
 
 func (s *topFillSink) Write(p []byte) (int, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.done || s.preempted {
+		s.mu.Unlock()
 		return len(p), nil
 	}
 	if s.sink == nil {
+		s.mu.Unlock()
 		return len(p), nil
 	}
-	n, err := writeAllCount(s.sink, p)
+	sink := s.sink
+	s.mu.Unlock()
+
+	n, err := writeAllCount(sink, p)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if n > 0 {
 		s.wrote = true
+	}
+	if s.done || s.preempted {
+		return len(p), nil
 	}
 	if err != nil {
 		s.err = err
@@ -173,6 +191,25 @@ func (s *topFillSink) Write(p []byte) (int, error) {
 }
 
 func (s *topFillSink) Close() error {
+	s.mu.Lock()
+	if s.done {
+		if s.preempted {
+			if s.reportPreemptOnClose && s.wrote {
+				s.mu.Unlock()
+				return ErrTopWriteInvalidated
+			}
+			s.mu.Unlock()
+			return nil
+		}
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
+
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
 	s.mu.Lock()
 	if s.done {
 		if s.preempted {
@@ -217,6 +254,21 @@ func (s *topFillSink) Close() error {
 }
 
 func (s *topFillSink) Abort() error {
+	s.mu.Lock()
+	if s.done {
+		if s.preempted {
+			s.mu.Unlock()
+			return nil
+		}
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
+
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
 	s.mu.Lock()
 	if s.done {
 		if s.preempted {
@@ -272,19 +324,35 @@ func (s *topFillSink) Preempt() error {
 	}
 	s.done = true
 	sink := s.sink
+	cancelBegin := s.cancelBegin
 	s.mu.Unlock()
 
-	if _, ok := sink.(*coordinatedStagedTopWriteSink); ok {
-		go func() {
-			_ = s.abortPreemptedSink(sink)
-		}()
-		return nil
+	if cancelBegin != nil {
+		cancelBegin()
 	}
-	return s.abortPreemptedSink(sink)
+	cleanup := s.preemptCleanup(sink)
+	if cleanup != nil {
+		// Detach same-key coordination immediately so Set/Delete can make
+		// progress even if the fill Write is stalled. The actual sink cleanup
+		// stays serialized with Write because WriteSink does not promise that
+		// terminal methods are safe to call concurrently with Write.
+		go s.abortPreemptedSink(cleanup)
+	}
+	return nil
 }
 
-func (s *topFillSink) abortPreemptedSink(sink WriteSink) error {
-	err := sink.Abort()
+func (s *topFillSink) preemptCleanup(sink WriteSink) func() error {
+	if detached, ok := sink.(fillPreemptDetachedSink); ok {
+		return detached.detachForFillPreempt()
+	}
+	return sink.Abort
+}
+
+func (s *topFillSink) abortPreemptedSink(cleanup func() error) error {
+	s.ioMu.Lock()
+	err := cleanup()
+	s.ioMu.Unlock()
+
 	s.mu.Lock()
 	if err != nil {
 		s.err = errors.Join(s.err, err)
@@ -298,7 +366,11 @@ func (s *topFillSink) preemptedSignal() <-chan struct{} {
 }
 
 func (s *topFillSink) finishPreemptedAttach(sink WriteSink) error {
-	err := sink.Abort()
+	cleanup := s.preemptCleanup(sink)
+	var err error
+	if cleanup != nil {
+		err = cleanup()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.done {

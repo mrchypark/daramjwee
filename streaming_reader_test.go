@@ -2,11 +2,13 @@ package daramjwee
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -357,6 +359,116 @@ func TestStreamThrough_AutoCloseSuppressesInvalidationButReportsSourceCloseError
 	require.ErrorIs(t, closeErr, ErrTopWriteInvalidated)
 }
 
+func TestTopFillSinkPreemptDoesNotWaitForBlockedWrite(t *testing.T) {
+	sink := newBlockingWriteSink()
+	fill := newPendingTopFillSink(&writeCoordinator{}, nil, nil)
+	require.True(t, fill.attach(sink))
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := fill.Write([]byte("partial"))
+		writeDone <- err
+	}()
+
+	<-sink.writeStarted
+
+	preemptDone := make(chan error, 1)
+	go func() {
+		preemptDone <- fill.Preempt()
+	}()
+
+	select {
+	case err := <-preemptDone:
+		require.NoError(t, err)
+	case <-time.After(100 * time.Millisecond):
+		close(sink.releaseWrite)
+		t.Fatal("preempt waited for blocked write")
+	}
+
+	close(sink.releaseWrite)
+	require.NoError(t, <-writeDone)
+	select {
+	case <-sink.abortStarted:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("preempt cleanup did not abort sink after write completed")
+	}
+}
+
+func TestTopFillSinkPreemptReleasesCoordinatorBeforeBlockedWriteFinishes(t *testing.T) {
+	sink := newBlockingWriteSink()
+	coord := &writeCoordinator{}
+	require.NoError(t, coord.acquireWrite(context.Background()))
+	coord.stateMu.Lock()
+	generation := coord.reserveGenerationLocked()
+	coord.stateMu.Unlock()
+
+	fill := newPendingTopFillSink(coord, nil, nil)
+	require.True(t, fill.attach(&coordinatedTopWriteSink{
+		WriteSink:   sink,
+		coord:       coord,
+		generation:  generation,
+		waitTimeout: time.Second,
+	}))
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := fill.Write([]byte("partial"))
+		writeDone <- err
+	}()
+
+	<-sink.writeStarted
+	require.NoError(t, fill.Preempt())
+
+	acquireCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	require.NoError(t, coord.acquireWrite(acquireCtx))
+	coord.releaseWrite()
+
+	close(sink.releaseWrite)
+	require.NoError(t, <-writeDone)
+	select {
+	case <-sink.abortStarted:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("preempt cleanup did not abort sink after write completed")
+	}
+}
+
+func TestTopFillSinkCloseDoesNotPublishDuringBlockedWrite(t *testing.T) {
+	sink := newBlockingWriteSink()
+	fill := newPendingTopFillSink(&writeCoordinator{}, nil, nil)
+	require.True(t, fill.attach(sink))
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := fill.Write([]byte("partial"))
+		writeDone <- err
+	}()
+
+	<-sink.writeStarted
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- fill.Close()
+	}()
+
+	select {
+	case <-sink.closeStarted:
+		close(sink.releaseWrite)
+		t.Fatal("close published while write was still blocked")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(sink.releaseWrite)
+	require.NoError(t, <-writeDone)
+	require.NoError(t, <-closeDone)
+
+	select {
+	case <-sink.closeStarted:
+	default:
+		t.Fatal("close did not reach sink after write completed")
+	}
+}
+
 type recordingWriteSink struct {
 	buf        bytes.Buffer
 	closeErr   error
@@ -476,6 +588,44 @@ func (s *blockingAbortSink) Abort() error {
 	<-s.releaseAbort
 	s.aborted = true
 	return s.abortErr
+}
+
+type blockingWriteSink struct {
+	writeStarted chan struct{}
+	releaseWrite chan struct{}
+	closeStarted chan struct{}
+	abortStarted chan struct{}
+	once         sync.Once
+	abortOnce    sync.Once
+}
+
+func newBlockingWriteSink() *blockingWriteSink {
+	return &blockingWriteSink{
+		writeStarted: make(chan struct{}),
+		releaseWrite: make(chan struct{}),
+		closeStarted: make(chan struct{}),
+		abortStarted: make(chan struct{}),
+	}
+}
+
+func (s *blockingWriteSink) Write(p []byte) (int, error) {
+	s.once.Do(func() {
+		close(s.writeStarted)
+	})
+	<-s.releaseWrite
+	return len(p), nil
+}
+
+func (s *blockingWriteSink) Close() error {
+	close(s.closeStarted)
+	return nil
+}
+
+func (s *blockingWriteSink) Abort() error {
+	s.abortOnce.Do(func() {
+		close(s.abortStarted)
+	})
+	return nil
 }
 
 type readAfterCloseTrackingSource struct {

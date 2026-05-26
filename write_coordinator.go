@@ -867,6 +867,18 @@ func (s *coordinatedStagedTopWriteSink) Abort() error {
 	return s.err
 }
 
+func (s *coordinatedStagedTopWriteSink) detachForFillPreempt() func() error {
+	var cleanup func() error
+	s.once.Do(func() {
+		// Fill preemption invalidates the write before storage cleanup so a
+		// newer same-key writer is not held behind a stalled fill Write.
+		s.coord.unregisterReservation(s.generation)
+		s.err = ErrTopWriteInvalidated
+		cleanup = s.sink.Abort
+	})
+	return cleanup
+}
+
 func (s *coordinatedTopWriteSink) Close() error {
 	s.once.Do(func() {
 		defer s.coord.releaseWrite()
@@ -954,6 +966,20 @@ func (s *coordinatedTopWriteSink) Abort() error {
 		s.coord.unregisterReservation(s.generation)
 	})
 	return s.err
+}
+
+func (s *coordinatedTopWriteSink) detachForFillPreempt() func() error {
+	var cleanup func() error
+	s.once.Do(func() {
+		// The Store contract requires BeginSet data to remain unpublished until
+		// Close. Releasing the coordinator here preserves cache liveness while
+		// the abandoned sink is cleaned up after any active Write returns.
+		s.err = ErrTopWriteInvalidated
+		s.coord.unregisterReservation(s.generation)
+		s.coord.releaseWrite()
+		cleanup = s.WriteSink.Abort
+	})
+	return cleanup
 }
 
 func newConditionalGenerationWriteSink(sink WriteSink, coord *writeCoordinator, generation uint64, waitTimeout time.Duration, onInvalidated func() error) WriteSink {
