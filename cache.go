@@ -38,6 +38,7 @@ type DaramjweeCache struct {
 	runtimeQueueLimit      int
 	opTimeout              time.Duration
 	closeTimeout           time.Duration
+	fillLeaseTimeout       time.Duration
 	positiveFreshness      time.Duration
 	negativeFreshness      time.Duration
 	tierFreshnessOverrides map[int]TierFreshnessOverride
@@ -61,6 +62,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 	}
 	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 	topGenerationAtStart := c.currentTopWriteGeneration(key)
+	higherTiersClean := true
 
 	for i, tier := range c.tiers {
 		tierStream, tierMeta, err := c.getStreamFromStore(c.getStreamContextForStore(ctx, setupCtx, tier), tier, key)
@@ -73,7 +75,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 				}
 				return resp, nil
 			}
-			resp, respErr := c.handleLowerTierHit(ctx, setupCtx, key, i, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart)
+			resp, respErr := c.handleLowerTierHit(ctx, setupCtx, key, i, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart, higherTiersClean)
 			if respErr != nil {
 				cancel()
 				return nil, respErr
@@ -86,11 +88,12 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 		}
 		if !errors.Is(err, ErrNotFound) {
 			c.errorLog("msg", "tier get failed", "key", key, "tier_index", i, "err", err)
+			higherTiersClean = false
 		}
 	}
 
 	// 3. Fetch from Origin
-	resp, respErr := c.handleMiss(ctx, setupCtx, key, req, fetcher, cancel, topGenerationAtStart)
+	resp, respErr := c.handleMiss(ctx, setupCtx, key, req, fetcher, cancel, topGenerationAtStart, higherTiersClean)
 	if respErr != nil {
 		cancel()
 		return nil, respErr
@@ -213,7 +216,9 @@ func newSafeCloser(rc io.ReadCloser, cb func()) *safeCloser {
 func (c *safeCloser) Read(p []byte) (n int, err error) {
 	n, err = c.ReadCloser.Read(p)
 	if err == io.EOF {
-		c.Close() // 자동으로 닫기
+		if closeErr := c.Close(); closeErr != nil {
+			return n, closeErr
+		}
 	}
 	return n, err
 }

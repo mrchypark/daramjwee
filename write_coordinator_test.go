@@ -202,6 +202,216 @@ func TestLaterStagedAbortCleanupDoesNotInvalidateOlderWriter(t *testing.T) {
 	}
 }
 
+func TestStagedFillPreemptDoesNotWaitForAbortCleanup(t *testing.T) {
+	store := &blockingFirstAbortStagingStore{
+		abortStarted: make(chan struct{}),
+		releaseAbort: make(chan struct{}),
+	}
+	cache := &DaramjweeCache{
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: time.Second,
+	}
+
+	fill, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
+	if err != nil {
+		t.Fatalf("fill writer failed: %v", err)
+	}
+	if _, err := fill.Write([]byte("partial")); err != nil {
+		t.Fatalf("fill write failed: %v", err)
+	}
+
+	setDone := make(chan error, 1)
+	go func() {
+		writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "user"})
+		if err == nil {
+			err = writer.Abort()
+		}
+		setDone <- err
+	}()
+
+	select {
+	case <-store.abortStarted:
+	case <-time.After(time.Second):
+		t.Fatal("preempted staged fill abort cleanup did not start")
+	}
+
+	select {
+	case err := <-setDone:
+		if err != nil {
+			t.Fatalf("same-key Set should not wait for staged fill abort cleanup, got %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(store.releaseAbort)
+		t.Fatal("same-key Set waited for staged fill abort cleanup")
+	}
+
+	close(store.releaseAbort)
+}
+
+func TestStagedFillDeletePreemptDoesNotWaitForAbortCleanup(t *testing.T) {
+	store := &blockingFirstAbortStagingStore{
+		abortStarted: make(chan struct{}),
+		releaseAbort: make(chan struct{}),
+	}
+	cache := &DaramjweeCache{
+		tiers:        []Store{store},
+		opTimeout:    time.Second,
+		closeTimeout: time.Second,
+	}
+
+	fill, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
+	if err != nil {
+		t.Fatalf("fill writer failed: %v", err)
+	}
+	if _, err := fill.Write([]byte("partial")); err != nil {
+		t.Fatalf("fill write failed: %v", err)
+	}
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- cache.Delete(context.Background(), "key")
+	}()
+
+	select {
+	case <-store.abortStarted:
+	case <-time.After(time.Second):
+		t.Fatal("preempted staged fill abort cleanup did not start")
+	}
+
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			t.Fatalf("Delete should not wait for staged fill abort cleanup, got %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(store.releaseAbort)
+		t.Fatal("Delete waited for staged fill abort cleanup")
+	}
+
+	close(store.releaseAbort)
+}
+
+func TestLegacyFillContextCancelPreemptsPendingBeginSet(t *testing.T) {
+	store := &blockingFirstBeginSetStore{
+		beginStarted: make(chan struct{}),
+		releaseBegin: make(chan struct{}),
+	}
+	cache := &DaramjweeCache{
+		tiers:            []Store{store},
+		opTimeout:        time.Second,
+		closeTimeout:     time.Second,
+		fillLeaseTimeout: time.Hour,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	fillDone := make(chan error, 1)
+	go func() {
+		writer, err := cache.setStreamToTopStoreForFill(ctx, "key", &Metadata{CacheTag: "fill"}, 0)
+		if writer != nil {
+			_ = writer.Abort()
+		}
+		fillDone <- err
+	}()
+
+	select {
+	case <-store.beginStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fill BeginSet did not start")
+	}
+
+	cancel()
+	select {
+	case err := <-fillDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected canceled fill setup, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled fill setup did not return")
+	}
+
+	setDone := make(chan error, 1)
+	go func() {
+		writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "user"})
+		if err == nil {
+			err = writer.Abort()
+		}
+		setDone <- err
+	}()
+
+	select {
+	case err := <-setDone:
+		t.Fatalf("same-key Set completed before pending BeginSet returned: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(store.releaseBegin)
+	select {
+	case err := <-setDone:
+		if err != nil {
+			t.Fatalf("same-key Set should proceed after canceled fill BeginSet returns, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("same-key Set stayed blocked until fill lease expiry")
+	}
+}
+
+func TestLegacyFillPreemptCancelsPendingBeginSet(t *testing.T) {
+	store := &contextBlockingFirstBeginSetStore{
+		beginStarted: make(chan struct{}),
+		releaseBegin: make(chan struct{}),
+	}
+	cache := &DaramjweeCache{
+		tiers:            []Store{store},
+		opTimeout:        time.Second,
+		closeTimeout:     time.Second,
+		fillLeaseTimeout: time.Hour,
+	}
+
+	fillDone := make(chan error, 1)
+	go func() {
+		writer, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
+		if writer != nil {
+			_ = writer.Abort()
+		}
+		fillDone <- err
+	}()
+
+	select {
+	case <-store.beginStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fill BeginSet did not start")
+	}
+
+	setDone := make(chan error, 1)
+	go func() {
+		writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "user"})
+		if err == nil {
+			err = writer.Abort()
+		}
+		setDone <- err
+	}()
+
+	select {
+	case err := <-setDone:
+		if err != nil {
+			t.Fatalf("same-key Set should proceed after preempting pending BeginSet, got %v", err)
+		}
+	case <-time.After(time.Second):
+		close(store.releaseBegin)
+		t.Fatal("same-key Set stayed blocked behind preempted BeginSet")
+	}
+
+	select {
+	case err := <-fillDone:
+		if err != nil {
+			t.Fatalf("preempted fill should return without setup error, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("preempted fill setup did not return")
+	}
+}
+
 func TestStaleStagedCloseAbortCleanupDoesNotBlockNewerCommit(t *testing.T) {
 	store := &blockingFirstAbortStagingStore{
 		abortStarted: make(chan struct{}),
@@ -1018,6 +1228,69 @@ func (s *stubStagedWriteSink) Commit(ctx context.Context) error {
 	return nil
 }
 func (s *stubStagedWriteSink) Abort() error { return nil }
+
+type blockingFirstBeginSetStore struct {
+	beginStarted chan struct{}
+	releaseBegin chan struct{}
+}
+
+func (s *blockingFirstBeginSetStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
+}
+
+func (s *blockingFirstBeginSetStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
+	select {
+	case <-s.beginStarted:
+	default:
+		close(s.beginStarted)
+	}
+	<-s.releaseBegin
+	return &stubWriteSink{}, nil
+}
+
+func (s *blockingFirstBeginSetStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s *blockingFirstBeginSetStore) Stat(ctx context.Context, key string) (*Metadata, error) {
+	return nil, ErrNotFound
+}
+
+type contextBlockingFirstBeginSetStore struct {
+	mu           sync.Mutex
+	calls        int
+	beginStarted chan struct{}
+	releaseBegin chan struct{}
+}
+
+func (s *contextBlockingFirstBeginSetStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
+}
+
+func (s *contextBlockingFirstBeginSetStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
+	s.mu.Lock()
+	s.calls++
+	first := s.calls == 1
+	s.mu.Unlock()
+	if !first {
+		return &stubWriteSink{}, nil
+	}
+	close(s.beginStarted)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.releaseBegin:
+		return &stubWriteSink{}, nil
+	}
+}
+
+func (s *contextBlockingFirstBeginSetStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s *contextBlockingFirstBeginSetStore) Stat(ctx context.Context, key string) (*Metadata, error) {
+	return nil, ErrNotFound
+}
 
 type blockingSecondBeginStagingStore struct {
 	mu                 sync.Mutex

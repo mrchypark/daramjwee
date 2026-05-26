@@ -1,0 +1,62 @@
+{
+  "task": "fix file-cache stuck keys with repeated principal-team, subagent, and oracle review",
+  "large_model_actions": 8,
+  "small_model_actions": 12,
+  "oracle_calls": 5,
+  "oracle_adopted": 16,
+  "skills_used": [
+    "codex-principal-team",
+    "remote-review",
+    "review-loop",
+    "oracle",
+    "writing-go"
+  ],
+  "new_skills": [],
+  "scripts_used": [],
+  "new_scripts": [],
+  "manual_activities": [
+    "parent integration of active fill preemption and fill lease behavior",
+    "parent integration of conditional lower-tier no-sync-promotion behavior",
+    "parent integration of group NewCache/Close constructor barrier",
+    "parent integration of negative-cache best-effort writes",
+    "parent integration of higher-tier read-error clean-miss separation",
+    "final verification orchestration"
+  ],
+  "failures": [
+    "initial review found active-fill registration race",
+    "initial review found exported Config field compatibility issue",
+    "review found fill lease timer install/preempt race",
+    "review found conditional lower-tier promotion blocking behind unconsumed fill",
+    "review found CacheGroup Close racing in-flight NewCache construction",
+    "review found negative-cache writes blocking behind active fill",
+    "review found preempted fill BeginSet failure leaking writeMu",
+    "oracle found higher-tier read error treated as clean miss",
+    "subagent found stale negative lower-tier returned as OK after top read error"
+  ],
+  "rework_items": [
+    "register active fill before Store.BeginSet returns",
+    "remove exported FillLeaseTimeout field from Config while preserving option API",
+    "start fill lease only after BeginSet returns",
+    "use activeFill TryLock/pass-through for fill paths",
+    "skip synchronous top promotion for conditional lower-tier NotModified",
+    "add constructor/registration barrier for CacheGroup Close",
+    "make negative expected writes best-effort to avoid active-fill blocking",
+    "always unlock writeMu on fill BeginSet failure even after preempted close",
+    "separate clean ErrNotFound miss from higher-tier read failures",
+    "preserve negative NotFound semantics before stale positive serving"
+  ],
+  "tests_run": [
+    "go test ./...",
+    "go test -race ./...",
+    "git diff --check",
+    "DJ_REPRO_CACHE_STUCK=1 go test ./tests targeted cache-stuck loop for 60s",
+    "targeted conditional lower-tier, negative-cache, BeginSet failure, group lifecycle, and higher-tier read-error tests"
+  ],
+  "follow_up_candidates": [
+    "consider documenting WithFillLeaseTimeout in README",
+    "consider keeping a dedicated deterministic script for the 60s cache-stuck regression loop"
+  ],
+  "parent_patch_count": 10,
+  "worker_patch_count": 0,
+  "user_requested_delegation": true
+}

@@ -121,6 +121,55 @@ func TestScheduleRefresh_DoesNotPublishPartialDataOnCopyFailure(t *testing.T) {
 	assert.Equal(t, "v0", meta.CacheTag)
 }
 
+func TestScheduleRefresh_DoesNotPublishWhenSourceCloseFails(t *testing.T) {
+	hot := newMockStore()
+
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithOpTimeout(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	ctx := context.Background()
+	key := "refresh-close-error"
+	wc, err := cache.Set(ctx, key, &daramjwee.Metadata{CacheTag: "v0"})
+	require.NoError(t, err)
+	_, err = wc.Write([]byte("old-value"))
+	require.NoError(t, err)
+	require.NoError(t, wc.Close())
+
+	closeErr := errors.New("refresh source close failed")
+	closed := make(chan struct{})
+	fetcher := &readCloserRefreshFetcher{
+		body: &closeTrackingReadCloser{
+			Reader:   bytes.NewReader([]byte("new-value")),
+			onClose:  func() { close(closed) },
+			closeErr: closeErr,
+		},
+		meta: &daramjwee.Metadata{CacheTag: "v1"},
+	}
+
+	require.NoError(t, cache.ScheduleRefresh(ctx, key, fetcher))
+	require.Eventually(t, func() bool {
+		select {
+		case <-closed:
+			return true
+		default:
+			return false
+		}
+	}, 2*time.Second, 10*time.Millisecond)
+
+	reader, meta, err := hot.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "old-value", string(body))
+	assert.Equal(t, "v0", meta.CacheTag)
+}
+
 func TestScheduleRefresh_WithoutColdStoreDoesNotPanicWorker(t *testing.T) {
 	logBuf := &lockedBuffer{}
 	logger := log.NewLogfmtLogger(logBuf)
@@ -1096,6 +1145,18 @@ type failingRefreshFetcher struct {
 }
 
 func (f *failingRefreshFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	return &daramjwee.FetchResult{
+		Body:     f.body,
+		Metadata: f.meta,
+	}, nil
+}
+
+type readCloserRefreshFetcher struct {
+	body io.ReadCloser
+	meta *daramjwee.Metadata
+}
+
+func (f *readCloserRefreshFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	return &daramjwee.FetchResult{
 		Body:     f.body,
 		Metadata: f.meta,

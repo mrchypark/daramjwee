@@ -21,9 +21,12 @@ type cacheGroup struct {
 	cfg    GroupConfig
 	rt     *groupRuntime
 
-	closed atomic.Bool
-	mu     sync.Mutex
-	caches map[string]*DaramjweeCache
+	closed         atomic.Bool
+	registrationMu sync.Mutex
+	mu             sync.Mutex
+	cond           *sync.Cond
+	constructing   int
+	caches         map[string]*DaramjweeCache
 }
 
 var _ CacheGroup = (*cacheGroup)(nil)
@@ -47,12 +50,14 @@ func NewGroup(logger log.Logger, opts ...GroupOption) (CacheGroup, error) {
 		}
 	}
 
-	return &cacheGroup{
+	group := &cacheGroup{
 		logger: logger,
 		cfg:    cfg,
 		rt:     newGroupRuntime(logger, cfg.Workers, cfg.WorkerTimeout),
 		caches: make(map[string]*DaramjweeCache),
-	}, nil
+	}
+	group.cond = sync.NewCond(&group.mu)
+	return group, nil
 }
 
 func (g *cacheGroup) NewCache(name string, opts ...Option) (Cache, error) {
@@ -64,18 +69,46 @@ func (g *cacheGroup) NewCache(name string, opts ...Option) (Cache, error) {
 	}
 
 	g.mu.Lock()
+	if g.closed.Load() {
+		g.mu.Unlock()
+		return nil, &ConfigError{"cache group is closed"}
+	}
 	if _, exists := g.caches[name]; exists {
 		g.mu.Unlock()
 		return nil, &ConfigError{fmt.Sprintf("duplicate cache name %q", name)}
 	}
+	g.caches[name] = nil
+	g.constructing++
 	g.mu.Unlock()
+	cleanupConstruction := true
+	defer func() {
+		if !cleanupConstruction {
+			return
+		}
+		g.mu.Lock()
+		if current, exists := g.caches[name]; exists && current == nil {
+			delete(g.caches, name)
+		}
+		g.constructing--
+		g.cond.Broadcast()
+		g.mu.Unlock()
+	}()
 
-	cfg, err := buildCacheConfig(cacheConstructionGroup, &g.cfg, opts...)
+	cfg, fillLeaseTimeout, err := buildCacheConfig(cacheConstructionGroup, &g.cfg, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	cache, err := newCacheFromConfig(g.logger, g.rt, name, cfg)
+	g.registrationMu.Lock()
+	g.mu.Lock()
+	if g.closed.Load() {
+		g.mu.Unlock()
+		g.registrationMu.Unlock()
+		return nil, &ConfigError{"cache group is closed"}
+	}
+	g.mu.Unlock()
+	cache, err := newCacheFromConfig(g.logger, g.rt, name, cfg, fillLeaseTimeout)
+	g.registrationMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +119,9 @@ func (g *cacheGroup) NewCache(name string, opts ...Option) (Cache, error) {
 	}
 	typed.closeHook = func() {
 		g.mu.Lock()
-		delete(g.caches, name)
+		if g.caches[name] == typed {
+			delete(g.caches, name)
+		}
 		g.mu.Unlock()
 	}
 
@@ -96,19 +131,35 @@ func (g *cacheGroup) NewCache(name string, opts ...Option) (Cache, error) {
 		typed.Close()
 		return nil, &ConfigError{"cache group is closed"}
 	}
+	if current, exists := g.caches[name]; !exists || current != nil {
+		g.mu.Unlock()
+		typed.Close()
+		return nil, &ConfigError{fmt.Sprintf("duplicate cache name %q", name)}
+	}
 	g.caches[name] = typed
+	cleanupConstruction = false
+	g.constructing--
+	g.cond.Broadcast()
 	g.mu.Unlock()
 	return cache, nil
 }
 
 func (g *cacheGroup) Close() {
+	g.registrationMu.Lock()
 	if g.closed.Swap(true) {
+		g.registrationMu.Unlock()
 		return
 	}
+	g.registrationMu.Unlock()
 	g.mu.Lock()
+	for g.constructing > 0 {
+		g.cond.Wait()
+	}
 	caches := make([]*DaramjweeCache, 0, len(g.caches))
 	for _, cache := range g.caches {
-		caches = append(caches, cache)
+		if cache != nil {
+			caches = append(caches, cache)
+		}
 	}
 	g.mu.Unlock()
 

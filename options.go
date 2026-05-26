@@ -37,6 +37,7 @@ type Config struct {
 	PositiveFreshness      time.Duration
 	NegativeFreshness      time.Duration
 	TierFreshnessOverrides map[int]TierFreshnessOverride
+	fillLeaseTimeout       time.Duration
 }
 
 type TierFreshnessOverride struct {
@@ -134,6 +135,21 @@ func WithOpTimeout(timeout time.Duration) Option {
 			return &ConfigError{"operation timeout must be positive"}
 		}
 		cfg.OpTimeout = timeout
+		return nil
+	}
+}
+
+// WithFillLeaseTimeout bounds how long a cache miss or lower-tier promotion
+// response may hold the top-tier write lock while the caller consumes the body.
+// The lease can preempt only after the target store's BeginSet has returned a
+// sink; BeginSet setup time is bounded by the operation context instead.
+// A timeout of 0 disables the lease timer; negative values are rejected.
+func WithFillLeaseTimeout(timeout time.Duration) Option {
+	return func(cfg *Config) error {
+		if timeout < 0 {
+			return &ConfigError{"fill lease timeout cannot be negative"}
+		}
+		cfg.fillLeaseTimeout = timeout
 		return nil
 	}
 }

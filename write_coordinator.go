@@ -31,6 +31,8 @@ type writeCoordinator struct {
 	activeReservations  map[uint64]struct{}
 	activeDeletes       int
 	activeDeletesDone   chan struct{}
+	activeFill          *topFillSink
+	fillPreemptions     int
 }
 
 type coordinatedTopWriteSink struct {
@@ -163,6 +165,14 @@ func (c *writeCoordinator) current() uint64 {
 	return c.committedGeneration
 }
 
+func (c *writeCoordinator) canAttemptExpectedTopWrite(expectedGeneration uint64) bool {
+	c.init()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.activeDeletes == 0 &&
+		c.committedGeneration == expectedGeneration
+}
+
 func (c *writeCoordinator) ensureReservationsLocked() {
 	if c.activeReservations == nil {
 		c.activeReservations = make(map[uint64]struct{})
@@ -239,6 +249,51 @@ func (c *writeCoordinator) reserve(ctx context.Context, expected *uint64) (uint6
 		return 0, ErrTopWriteInvalidated
 	}
 	generation := c.reserveGenerationLocked()
+	return generation, nil
+}
+
+func (c *writeCoordinator) reserveBestEffort(ctx context.Context, expected *uint64) (uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	c.init()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.activeFill != nil || c.activeDeletes > 0 || c.fillPreemptions > 0 {
+		return 0, ErrTopWriteInvalidated
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if expected != nil && c.latestGenerationLocked() != *expected {
+		return 0, ErrTopWriteInvalidated
+	}
+	return c.reserveGenerationLocked(), nil
+}
+
+func (c *writeCoordinator) reserveWithFill(ctx context.Context, expected uint64, fill *topFillSink) (uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	c.init()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.activeFill != nil || c.activeDeletes > 0 || c.fillPreemptions > 0 {
+		return 0, ErrTopWriteInvalidated
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if c.latestGenerationLocked() != expected {
+		return 0, ErrTopWriteInvalidated
+	}
+	generation := c.reserveGenerationLocked()
+	if fill != nil {
+		fill.registered = true
+		c.activeFill = fill
+	}
 	return generation, nil
 }
 
@@ -340,6 +395,23 @@ func (c *writeCoordinator) acquireWrite(ctx context.Context) error {
 	}
 }
 
+func (c *writeCoordinator) tryAcquireWrite(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.initLease()
+	select {
+	case <-c.writeLease:
+		if err := ctx.Err(); err != nil {
+			c.releaseWrite()
+			return err
+		}
+		return nil
+	default:
+		return ErrTopWriteInvalidated
+	}
+}
+
 func (c *writeCoordinator) acquireCommit(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -363,6 +435,30 @@ func (c *writeCoordinator) releaseCommit() {
 
 func (c *writeCoordinator) releaseWrite() {
 	c.writeLease <- struct{}{}
+}
+
+func (c *writeCoordinator) beginBestEffort(ctx context.Context, expected *uint64) (uint64, error) {
+	if err := c.tryAcquireWrite(ctx); err != nil {
+		return 0, err
+	}
+	generation, err := c.reserveBestEffort(ctx, expected)
+	if err != nil {
+		c.releaseWrite()
+		return 0, err
+	}
+	return generation, nil
+}
+
+func (c *writeCoordinator) beginWithFill(ctx context.Context, expected uint64, fill *topFillSink) (uint64, error) {
+	if err := c.tryAcquireWrite(ctx); err != nil {
+		return 0, err
+	}
+	generation, err := c.reserveWithFill(ctx, expected, fill)
+	if err != nil {
+		c.releaseWrite()
+		return 0, err
+	}
+	return generation, nil
 }
 
 // begin serializes same-key top writes for stores that cannot stage separately.
@@ -402,6 +498,55 @@ func (c *writeCoordinator) begin(ctx context.Context, expected *uint64) (uint64,
 	return generation, nil
 }
 
+func (c *writeCoordinator) registerActiveFill(fill *topFillSink) {
+	c.init()
+	c.stateMu.Lock()
+	c.activeFill = fill
+	c.stateMu.Unlock()
+}
+
+func (c *writeCoordinator) unregisterActiveFill(fill *topFillSink) {
+	c.init()
+	c.stateMu.Lock()
+	if c.activeFill == fill {
+		c.activeFill = nil
+	}
+	c.stateMu.Unlock()
+}
+
+func (c *writeCoordinator) preemptActiveFill() {
+	c.init()
+	c.stateMu.Lock()
+	fill := c.activeFill
+	c.stateMu.Unlock()
+	if fill != nil {
+		_ = fill.Preempt()
+	}
+}
+
+func (c *writeCoordinator) preemptActiveFillForWrite() func() {
+	c.init()
+	c.stateMu.Lock()
+	fill := c.activeFill
+	if fill != nil {
+		c.fillPreemptions++
+	}
+	c.stateMu.Unlock()
+	if fill != nil {
+		_ = fill.Preempt()
+	}
+	return func() {
+		if fill == nil {
+			return
+		}
+		c.stateMu.Lock()
+		if c.fillPreemptions > 0 {
+			c.fillPreemptions--
+		}
+		c.stateMu.Unlock()
+	}
+}
+
 func (c *writeCoordinator) rollbackAndUnlock(generation uint64) {
 	c.unregisterReservation(generation)
 	c.releaseWrite()
@@ -418,6 +563,7 @@ func (c *writeCoordinator) beginDelete(ctx context.Context) error {
 	}
 	c.activeDeletes++
 	c.stateMu.Unlock()
+	c.preemptActiveFill()
 	return nil
 }
 
@@ -451,6 +597,10 @@ func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
 	store := c.topWriteStore()
 	coord := c.topWrites.coordinator(key)
+	if expectedGeneration == nil {
+		unblockFills := coord.preemptActiveFillForWrite()
+		defer unblockFills()
+	}
 	if staging, ok := store.(StagingStore); ok {
 		generation, err := coord.reserve(ctx, expectedGeneration)
 		if err != nil {
@@ -487,6 +637,147 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 		waitTimeout:   c.closeTimeout,
 		onInvalidated: func() error { return c.deleteTopStoreKey(key) },
 	}, nil
+}
+
+func (c *DaramjweeCache) setStreamToTopStoreBestEffortWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
+	store := c.topWriteStore()
+	coord := c.topWrites.coordinator(key)
+	if staging, ok := store.(StagingStore); ok {
+		generation, err := coord.reserveBestEffort(ctx, expectedGeneration)
+		if err != nil {
+			return nil, err
+		}
+		sink, err := staging.BeginStagedSet(ctx, key, metadata)
+		if err != nil {
+			coord.unregisterReservation(generation)
+			return nil, err
+		}
+		return &coordinatedStagedTopWriteSink{
+			sink:          sink,
+			coord:         coord,
+			generation:    generation,
+			waitTimeout:   c.closeTimeout,
+			onInvalidated: func() error { return c.deleteTopStoreKey(key) },
+		}, nil
+	}
+
+	generation, err := coord.beginBestEffort(ctx, expectedGeneration)
+	if err != nil {
+		return nil, err
+	}
+	sink, err := store.BeginSet(ctx, key, metadata)
+	if err != nil {
+		coord.rollbackAndUnlock(generation)
+		return nil, err
+	}
+	return &coordinatedTopWriteSink{
+		WriteSink:     sink,
+		coord:         coord,
+		generation:    generation,
+		waitTimeout:   c.closeTimeout,
+		onInvalidated: func() error { return c.deleteTopStoreKey(key) },
+	}, nil
+}
+
+func (c *DaramjweeCache) setStreamToTopStoreForFill(ctx context.Context, key string, metadata *Metadata, expectedGeneration uint64) (WriteSink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	store := c.topWriteStore()
+	coord := c.topWrites.coordinator(key)
+	var generation uint64
+
+	if staging, ok := store.(StagingStore); ok {
+		fillCtx, cancelFill := context.WithCancel(ctx)
+		fill := newPendingTopFillSink(coord, func() {
+			coord.unregisterReservation(generation)
+		}, cancelFill)
+		fill.reportPreemptOnClose = true
+		var err error
+		generation, err = coord.reserveWithFill(fillCtx, expectedGeneration, fill)
+		if err != nil {
+			cancelFill()
+			return nil, err
+		}
+		sink, err := staging.BeginStagedSet(fillCtx, key, metadata)
+		if err != nil {
+			fill.failBeginSet(err)
+			return nil, err
+		}
+		topWriter := &coordinatedStagedTopWriteSink{
+			sink:          sink,
+			coord:         coord,
+			generation:    generation,
+			waitTimeout:   c.closeTimeout,
+			onInvalidated: func() error { return c.deleteTopStoreKey(key) },
+		}
+		if fill.attach(topWriter) {
+			fill.startLease(c.fillLeaseTimeout)
+		} else {
+			_ = fill.finishPreemptedAttach(topWriter)
+		}
+		return fill, nil
+	}
+
+	fillCtx, cancelFill := context.WithCancel(ctx)
+	fill := newPendingTopFillSink(coord, func() {
+		coord.rollbackAndUnlock(generation)
+	}, cancelFill)
+	generation, err := coord.beginWithFill(fillCtx, expectedGeneration, fill)
+	if err != nil {
+		cancelFill()
+		return nil, err
+	}
+	type beginResult struct {
+		sink WriteSink
+		err  error
+	}
+	beginDone := make(chan beginResult, 1)
+	go func() {
+		sink, err := store.BeginSet(fillCtx, key, metadata)
+		beginDone <- beginResult{sink: sink, err: err}
+	}()
+
+	finishBegin := func(result beginResult) error {
+		if result.err != nil {
+			fill.failBeginSet(result.err)
+			if fill.isPreempted() {
+				return nil
+			}
+			return result.err
+		}
+		topWriter := &coordinatedTopWriteSink{
+			WriteSink:     result.sink,
+			coord:         coord,
+			generation:    generation,
+			waitTimeout:   c.closeTimeout,
+			onInvalidated: func() error { return c.deleteTopStoreKey(key) },
+		}
+		if fill.attach(topWriter) {
+			fill.startLease(c.fillLeaseTimeout)
+		} else {
+			_ = fill.finishPreemptedAttach(topWriter)
+		}
+		return nil
+	}
+
+	select {
+	case result := <-beginDone:
+		if err := finishBegin(result); err != nil {
+			return nil, err
+		}
+	case <-fill.preemptedSignal():
+		go func() {
+			_ = finishBegin(<-beginDone)
+		}()
+	case <-fillCtx.Done():
+		_ = fill.Preempt()
+		go func() {
+			_ = finishBegin(<-beginDone)
+		}()
+		return nil, fillCtx.Err()
+	}
+	return fill, nil
 }
 
 func (s *coordinatedStagedTopWriteSink) Close() error {
@@ -576,6 +867,18 @@ func (s *coordinatedStagedTopWriteSink) Abort() error {
 	return s.err
 }
 
+func (s *coordinatedStagedTopWriteSink) detachForFillPreempt() func() error {
+	var cleanup func() error
+	s.once.Do(func() {
+		// Fill preemption invalidates the write before storage cleanup so a
+		// newer same-key writer is not held behind a stalled fill Write.
+		s.coord.unregisterReservation(s.generation)
+		s.err = ErrTopWriteInvalidated
+		cleanup = s.sink.Abort
+	})
+	return cleanup
+}
+
 func (s *coordinatedTopWriteSink) Close() error {
 	s.once.Do(func() {
 		defer s.coord.releaseWrite()
@@ -663,6 +966,20 @@ func (s *coordinatedTopWriteSink) Abort() error {
 		s.coord.unregisterReservation(s.generation)
 	})
 	return s.err
+}
+
+func (s *coordinatedTopWriteSink) detachForFillPreempt() func() error {
+	var cleanup func() error
+	s.once.Do(func() {
+		// The Store contract requires BeginSet data to remain unpublished until
+		// Close. Releasing the coordinator here preserves cache liveness while
+		// the abandoned sink is cleaned up after any active Write returns.
+		s.err = ErrTopWriteInvalidated
+		s.coord.unregisterReservation(s.generation)
+		s.coord.releaseWrite()
+		cleanup = s.WriteSink.Abort
+	})
+	return cleanup
 }
 
 func newConditionalGenerationWriteSink(sink WriteSink, coord *writeCoordinator, generation uint64, waitTimeout time.Duration, onInvalidated func() error) WriteSink {

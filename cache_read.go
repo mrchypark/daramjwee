@@ -20,7 +20,9 @@ func (c *DaramjweeCache) handleTopTierHit(requestCtx context.Context, key string
 	streamCloser := newSafeCloser(stream, callback)
 
 	if meta.IsNegative {
-		streamCloser.Close()
+		if err := streamCloser.Close(); err != nil {
+			return nil, err
+		}
 		return newGetResponse(GetStatusNotFound, nil, meta), nil
 	}
 
@@ -53,7 +55,7 @@ func (c *DaramjweeCache) topTierCloseCallback(requestCtx context.Context, key st
 }
 
 // handleLowerTierHit processes the logic when an object is found in a lower tier.
-func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, req GetRequest, fetcher Fetcher, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc, expectedGeneration uint64) (*GetResponse, error) {
+func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, req GetRequest, fetcher Fetcher, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc, expectedGeneration uint64, higherTiersClean bool) (*GetResponse, error) {
 	c.debugLog("msg", "lower tier hit, promoting to top tier", "key", key, "tier_index", tierIndex)
 
 	metaToPromote := cloneMetadata(meta)
@@ -63,23 +65,42 @@ func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context
 
 	isStale := c.isTierCachedStale(meta, tierIndex)
 	if c.isConditionalRequestSatisfied(req, meta) {
+		if !higherTiersClean {
+			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
+		}
 		return c.handleConditionalLowerTierHit(requestCtx, setupCtx, key, tierIndex, fetcher, src, meta, metaToPromote, cancel, isStale, expectedGeneration)
 	}
-	if isStale {
-		return c.handleStaleLowerTierHit(requestCtx, key, tierIndex, fetcher, src, meta, cancel, expectedGeneration), nil
-	}
 	if meta.IsNegative {
-		return c.promoteNegativeLowerTierHit(requestCtx, setupCtx, key, tierIndex, src, meta, metaToPromote, cancel, expectedGeneration), nil
+		if !higherTiersClean {
+			if err := src.Close(); err != nil {
+				cancel()
+				return nil, err
+			}
+			cancel()
+			return newGetResponse(GetStatusNotFound, nil, meta), nil
+		}
+		if isStale {
+			return c.handleStaleLowerTierHit(requestCtx, key, tierIndex, fetcher, src, meta, cancel, expectedGeneration)
+		}
+		return c.promoteNegativeLowerTierHit(requestCtx, setupCtx, key, tierIndex, src, meta, metaToPromote, cancel, expectedGeneration)
+	}
+	if isStale {
+		if !higherTiersClean {
+			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
+		}
+		return c.handleStaleLowerTierHit(requestCtx, key, tierIndex, fetcher, src, meta, cancel, expectedGeneration)
+	}
+	if !higherTiersClean {
+		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
 	}
 	return c.promotePositiveLowerTierHit(requestCtx, setupCtx, key, tierIndex, src, meta, metaToPromote, cancel, expectedGeneration), nil
 }
 
-func (c *DaramjweeCache) handleConditionalLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, fetcher Fetcher, src io.ReadCloser, meta, metaToPromote *Metadata, cancel context.CancelFunc, isStale bool, expectedGeneration uint64) (*GetResponse, error) {
-	if !isStale {
-		if err := c.promoteLowerTierHitToTop(requestCtx, setupCtx, key, tierIndex, src, metaToPromote, expectedGeneration); err != nil {
-			return c.handleConditionalLowerTierPromotionError(key, tierIndex, err, src, meta, cancel), nil
-		}
-	} else if err := src.Close(); err != nil {
+func (c *DaramjweeCache) handleConditionalLowerTierHit(requestCtx, _ context.Context, key string, tierIndex int, fetcher Fetcher, src io.ReadCloser, meta, _ *Metadata, cancel context.CancelFunc, isStale bool, expectedGeneration uint64) (*GetResponse, error) {
+	if !c.canServeConditionalLowerHit(key, expectedGeneration) {
+		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
+	}
+	if err := src.Close(); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -92,6 +113,18 @@ func (c *DaramjweeCache) handleConditionalLowerTierHit(requestCtx, setupCtx cont
 	}
 	cancel()
 	return newGetResponse(GetStatusNotModified, nil, meta), nil
+}
+
+func (c *DaramjweeCache) canServeConditionalLowerHit(key string, expectedGeneration uint64) bool {
+	return c.canAttemptExpectedTopWrite(key, expectedGeneration)
+}
+
+func (c *DaramjweeCache) canAttemptExpectedTopWrite(key string, expectedGeneration uint64) bool {
+	coord := c.topWrites.coordinatorIfPresent(key)
+	if coord == nil {
+		return expectedGeneration == 0
+	}
+	return coord.canAttemptExpectedTopWrite(expectedGeneration)
 }
 
 func (c *DaramjweeCache) handleConditionalLowerTierPromotionError(key string, tierIndex int, err error, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc) *GetResponse {
@@ -111,33 +144,42 @@ func (c *DaramjweeCache) handleConditionalLowerTierPromotionError(key string, ti
 	return newGetResponse(GetStatusNotModified, nil, meta)
 }
 
-func (c *DaramjweeCache) handleStaleLowerTierHit(requestCtx context.Context, key string, tierIndex int, fetcher Fetcher, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc, expectedGeneration uint64) *GetResponse {
+func (c *DaramjweeCache) handleStaleLowerTierHit(requestCtx context.Context, key string, tierIndex int, fetcher Fetcher, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc, expectedGeneration uint64) (*GetResponse, error) {
 	c.debugLog("msg", "lower tier is stale, serving stale and scheduling refresh", "key", key, "tier_index", tierIndex)
 	source := tierDestination{tierIndex: tierIndex, store: c.tiers[tierIndex]}
 	streamCloser := newSafeCloser(src, c.lowerTierRefreshOnCloseCallback(requestCtx, key, fetcher, cancel, meta, source, expectedGeneration))
 	if meta.IsNegative {
-		streamCloser.Close()
-		return newGetResponse(GetStatusNotFound, nil, meta)
+		if err := streamCloser.Close(); err != nil {
+			return nil, err
+		}
+		return newGetResponse(GetStatusNotFound, nil, meta), nil
 	}
-	return newGetResponse(GetStatusOK, streamCloser, meta)
+	return newGetResponse(GetStatusOK, streamCloser, meta), nil
 }
 
-func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, meta, metaToPromote *Metadata, cancel context.CancelFunc, expectedGeneration uint64) *GetResponse {
+func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, meta, metaToPromote *Metadata, cancel context.CancelFunc, expectedGeneration uint64) (*GetResponse, error) {
 	target := c.topWriteStore()
-	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, &expectedGeneration)
+	writer, err := c.setStreamToTopStoreBestEffortWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, &expectedGeneration)
 	if err != nil {
-		if errors.Is(err, ErrTopWriteInvalidated) {
-			_ = src.Close()
+		closeErr := src.Close()
+		if closeErr != nil {
 			cancel()
-			return newGetResponse(GetStatusNotFound, nil, meta)
+			return nil, errors.Join(err, closeErr)
+		}
+		if errors.Is(err, ErrTopWriteInvalidated) {
+			cancel()
+			return newGetResponse(GetStatusNotFound, nil, meta), nil
 		}
 		c.warnLog("msg", "failed to acquire top-tier sink for negative promotion", "key", key, "err", err)
-		_ = src.Close()
 		cancel()
-		return newGetResponse(GetStatusNotFound, nil, meta)
+		return newGetResponse(GetStatusNotFound, nil, meta), nil
 	}
 
-	_ = src.Close()
+	if closeErr := src.Close(); closeErr != nil {
+		abortErr := writer.Abort()
+		cancel()
+		return nil, errors.Join(closeErr, abortErr)
+	}
 	closeErr := writer.Close()
 	if closeErr == nil {
 		if destinations := c.regularFanoutDestinations(tierIndex); len(destinations) > 0 {
@@ -146,14 +188,18 @@ func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx contex
 	}
 	cancel()
 	if closeErr != nil {
-		c.warnLog("msg", "failed to publish negative entry to top tier", "key", key, "err", closeErr)
+		if errors.Is(closeErr, ErrTopWriteInvalidated) {
+			c.infoLog("msg", "skipping negative promotion because top-tier state changed", "key", key)
+		} else {
+			c.warnLog("msg", "failed to publish negative entry to top tier", "key", key, "err", closeErr)
+		}
 	}
-	return newGetResponse(GetStatusNotFound, nil, meta)
+	return newGetResponse(GetStatusNotFound, nil, meta), nil
 }
 
 func (c *DaramjweeCache) promotePositiveLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, meta, metaToPromote *Metadata, cancel context.CancelFunc, expectedGeneration uint64) *GetResponse {
 	target := c.topWriteStore()
-	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, &expectedGeneration)
+	writer, err := c.setStreamToTopStoreForFill(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, expectedGeneration)
 	if err != nil {
 		if errors.Is(err, ErrTopWriteInvalidated) {
 			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta)
@@ -169,7 +215,9 @@ func (c *DaramjweeCache) promotePositiveLowerTierHit(requestCtx, setupCtx contex
 			c.schedulePersistFromCurrentTop(requestCtx, key, destinations...)
 		}
 	}
-	return newGetResponse(GetStatusOK, streamThrough(src, writer, cancel, onPublish), meta)
+	return newGetResponse(GetStatusOK, streamThroughWithTrace(src, writer, cancel, onPublish, func(event string, keyvals ...any) {
+		c.diagnosticLog(event, key, expectedGeneration, keyvals...)
+	}), meta)
 }
 
 func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, metadata *Metadata, expectedGeneration uint64) error {
@@ -179,23 +227,25 @@ func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.C
 		if errors.Is(err, ErrTopWriteInvalidated) {
 			return lowerTierPromotionInvalidatedError{preserveBody: true}
 		}
-		if !errors.Is(err, ErrTopWriteInvalidated) {
-			_ = src.Close()
-		}
-		return err
+		closeErr := src.Close()
+		return errors.Join(err, closeErr)
 	}
 	if _, copyErr := io.Copy(writer, src); copyErr != nil {
 		abortErr := writer.Abort()
 		closeErr := src.Close()
 		return errors.Join(copyErr, abortErr, closeErr)
 	}
-	closeErr := writer.Close()
 	srcErr := src.Close()
-	if closeErr != nil || srcErr != nil {
+	if srcErr != nil {
+		abortErr := writer.Abort()
+		return errors.Join(srcErr, abortErr)
+	}
+	closeErr := writer.Close()
+	if closeErr != nil {
 		if errors.Is(closeErr, ErrTopWriteInvalidated) {
-			return errors.Join(lowerTierPromotionInvalidatedError{preserveBody: false}, closeErr, srcErr)
+			return errors.Join(lowerTierPromotionInvalidatedError{preserveBody: false}, closeErr)
 		}
-		return errors.Join(closeErr, srcErr)
+		return closeErr
 	}
 	if destinations := c.regularFanoutDestinations(tierIndex); len(destinations) > 0 {
 		c.schedulePersistFromCurrentTop(requestCtx, key, destinations...)
@@ -204,7 +254,7 @@ func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.C
 }
 
 // handleMiss processes the logic when an object is not found in any tier.
-func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration uint64) (*GetResponse, error) {
+func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration uint64, higherTiersClean bool) (*GetResponse, error) {
 	c.debugLog("msg", "full cache miss, fetching from origin", "key", key)
 
 	var oldMetadata *Metadata
@@ -214,7 +264,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 
 	result, err := c.fetchFromOrigin(c.fetchContextForFetcher(requestCtx, setupCtx, fetcher), fetcher, oldMetadata)
 	if err != nil {
-		return c.handleMissFetchError(requestCtx, setupCtx, key, req, cancel, fetcher, err, expectedGeneration)
+		return c.handleMissFetchError(requestCtx, setupCtx, key, req, cancel, fetcher, err, expectedGeneration, higherTiersClean)
 	}
 
 	if result.Metadata == nil {
@@ -222,14 +272,25 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 	}
 	result.Metadata.CachedAt = time.Now()
 
+	if !higherTiersClean {
+		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(result.Body, cancel), result.Metadata), nil
+	}
 	return c.publishMissResult(requestCtx, setupCtx, key, result, cancel, expectedGeneration), nil
 }
 
-func (c *DaramjweeCache) handleMissFetchError(requestCtx, setupCtx context.Context, key string, req GetRequest, cancel context.CancelFunc, fetcher Fetcher, fetchErr error, expectedGeneration uint64) (*GetResponse, error) {
+func (c *DaramjweeCache) handleMissFetchError(requestCtx, setupCtx context.Context, key string, req GetRequest, cancel context.CancelFunc, fetcher Fetcher, fetchErr error, expectedGeneration uint64, higherTiersClean bool) (*GetResponse, error) {
 	if errors.Is(fetchErr, ErrCacheableNotFound) {
+		if !higherTiersClean {
+			cancel()
+			return newGetResponse(GetStatusNotFound, nil, &Metadata{IsNegative: true, CachedAt: time.Now()}), nil
+		}
 		return c.handleNegativeCacheWithGeneration(requestCtx, setupCtx, key, cancel, &expectedGeneration)
 	}
 	if errors.Is(fetchErr, ErrNotModified) {
+		if !higherTiersClean {
+			cancel()
+			return nil, errors.New("daramjwee: origin returned not modified after unreadable cache tier")
+		}
 		return c.replayTopTierAfterNotModified(requestCtx, setupCtx, key, req, cancel)
 	}
 	return nil, fetchErr
@@ -242,12 +303,18 @@ func (c *DaramjweeCache) replayTopTierAfterNotModified(requestCtx, setupCtx cont
 		if errors.Is(err, ErrNilMetadata) {
 			return nil, err
 		}
-		c.warnLog("msg", "hot cache entry not found after 304 from origin", "key", key, "err", err)
+		if !errors.Is(err, ErrNotFound) {
+			cancel()
+			return nil, err
+		}
 		cancel()
-		return newGetResponse(GetStatusNotFound, nil, nil), nil
+		return nil, errors.New("daramjwee: origin returned not modified but cached body is unavailable")
 	}
 	if meta.IsNegative {
-		stream.Close()
+		if err := stream.Close(); err != nil {
+			cancel()
+			return nil, err
+		}
 		cancel()
 		return newGetResponse(GetStatusNotFound, nil, meta), nil
 	}
@@ -264,7 +331,7 @@ func (c *DaramjweeCache) replayTopTierAfterNotModified(requestCtx, setupCtx cont
 
 func (c *DaramjweeCache) publishMissResult(requestCtx, setupCtx context.Context, key string, result *FetchResult, cancel context.CancelFunc, expectedGeneration uint64) *GetResponse {
 	target := c.topWriteStore()
-	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, result.Metadata, &expectedGeneration)
+	writer, err := c.setStreamToTopStoreForFill(c.beginSetContextForStore(requestCtx, setupCtx, target), key, result.Metadata, expectedGeneration)
 	if err != nil {
 		if errors.Is(err, ErrTopWriteInvalidated) {
 			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(result.Body, cancel), result.Metadata)
@@ -273,8 +340,10 @@ func (c *DaramjweeCache) publishMissResult(requestCtx, setupCtx context.Context,
 		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(result.Body, cancel), result.Metadata)
 	}
 
-	return newGetResponse(GetStatusOK, streamThrough(result.Body, writer, cancel, func() {
+	return newGetResponse(GetStatusOK, streamThroughWithTrace(result.Body, writer, cancel, func() {
 		c.schedulePersistFromCurrentTop(requestCtx, key, c.persistDestinationsAfterTop()...)
+	}, func(event string, keyvals ...any) {
+		c.diagnosticLog(event, key, expectedGeneration, keyvals...)
 	}), result.Metadata)
 }
 

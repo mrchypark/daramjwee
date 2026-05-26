@@ -2,7 +2,7 @@ package daramjwee
 
 import (
 	"context"
-	"io"
+	"errors"
 )
 
 func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {
@@ -61,16 +61,21 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 			c.infoLog("msg", "starting background set", "key", key, "dest_tier", destTierIndex)
 			srcStream, meta, err := c.getStreamFromStore(persistCtx, srcStore, key)
 			if err != nil {
-				c.errorLog("msg", "failed to get stream from top store for background set", "key", key, "err", err)
+				if errors.Is(err, ErrNotFound) {
+					c.infoLog("msg", "skipping background set because top-tier entry is gone", "key", key, "dest_tier", destTierIndex)
+				} else {
+					c.errorLog("msg", "failed to get stream from top store for background set", "key", key, "err", err)
+				}
 				return
 			}
-			defer srcStream.Close()
-
 			unlockFanout := c.fanoutWrites.lock(destTierIndex, key)
 			defer unlockFanout()
 
 			destWriter, err := c.setStreamToStore(persistCtx, dest, key, meta)
 			if err != nil {
+				if closeErr := srcStream.Close(); closeErr != nil {
+					c.errorLog("msg", "failed to close source stream after destination writer failure", "key", key, "dest_tier", destTierIndex, "err", closeErr)
+				}
 				c.errorLog("msg", "failed to get writer for destination store", "key", key, "dest_tier", destTierIndex, "err", err)
 				return
 			}
@@ -80,16 +85,12 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 				return c.deleteFromStore(cleanupCtx, dest, key)
 			})
 
-			_, copyErr := io.Copy(destWriter, srcStream)
-			var closeErr error
-			if copyErr != nil {
-				closeErr = destWriter.Abort()
-			} else {
-				closeErr = destWriter.Close()
-			}
-
-			if copyErr != nil || closeErr != nil {
-				c.errorLog("msg", "failed background set", "key", key, "dest_tier", destTierIndex, "copyErr", copyErr, "closeErr", closeErr)
+			if persistErr := copyCloseSourceThenCommit(destWriter, srcStream); persistErr != nil {
+				if errors.Is(persistErr, ErrTopWriteInvalidated) {
+					c.infoLog("msg", "skipping background set because top-tier state changed", "key", key, "dest_tier", destTierIndex)
+				} else {
+					c.errorLog("msg", "failed background set", "key", key, "dest_tier", destTierIndex, "err", persistErr)
+				}
 				return
 			}
 			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
