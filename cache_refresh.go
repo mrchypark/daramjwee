@@ -55,10 +55,18 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 				c.debugLog("msg", "background refresh: object not modified", "key", key)
 				if fallbackSource != nil {
 					if promoteErr := c.promoteRefreshFallbackToTop(refreshCtx, key, *fallbackSource, fallbackMetadata, expectedGeneration); promoteErr != nil {
-						c.warnLog("msg", "failed to promote fallback entry after not-modified refresh", "key", key, "source_tier", fallbackSource.tierIndex, "err", promoteErr)
+						if errors.Is(promoteErr, ErrTopWriteInvalidated) {
+							c.infoLog("msg", "skipping fallback promotion because top-tier state changed", "key", key, "source_tier", fallbackSource.tierIndex)
+						} else {
+							c.warnLog("msg", "failed to promote fallback entry after not-modified refresh", "key", key, "source_tier", fallbackSource.tierIndex, "err", promoteErr)
+						}
 					}
 				} else if refreshErr := c.refreshTopEntryCachedAt(refreshCtx, key, oldMetadata, expectedGeneration); refreshErr != nil {
-					c.warnLog("msg", "failed to refresh top-tier metadata after not-modified refresh", "key", key, "err", refreshErr)
+					if errors.Is(refreshErr, ErrTopWriteInvalidated) {
+						c.infoLog("msg", "skipping top-tier metadata refresh because top-tier state changed", "key", key)
+					} else {
+						c.warnLog("msg", "failed to refresh top-tier metadata after not-modified refresh", "key", key, "err", refreshErr)
+					}
 				}
 			} else {
 				c.errorLog("msg", "background fetch failed", "key", key, "err", err)
@@ -85,7 +93,11 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		}
 
 		if publishErr := copyCloseSourceThenCommit(writer, result.Body); publishErr != nil {
-			c.errorLog("msg", "failed background set", "key", key, "err", publishErr)
+			if errors.Is(publishErr, ErrTopWriteInvalidated) {
+				c.infoLog("msg", "skipping background refresh publish because top-tier state changed", "key", key)
+			} else {
+				c.errorLog("msg", "failed background set", "key", key, "err", publishErr)
+			}
 		} else {
 			c.infoLog("msg", "background set successful", "key", key)
 			c.schedulePersistFromCurrentTop(refreshCtx, key, c.persistDestinationsAfterTop()...)
@@ -269,7 +281,11 @@ func (c *DaramjweeCache) handleNegativeCacheWithGeneration(requestCtx, setupCtx 
 		c.warnLog("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
 	} else {
 		if closeErr := writer.Close(); closeErr != nil {
-			c.warnLog("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
+			if errors.Is(closeErr, ErrTopWriteInvalidated) {
+				c.infoLog("msg", "skipping negative cache publish because top-tier state changed", "key", key)
+			} else {
+				c.warnLog("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
+			}
 		} else {
 			c.schedulePersistFromCurrentTop(requestCtx, key, c.persistDestinationsAfterTop()...)
 		}

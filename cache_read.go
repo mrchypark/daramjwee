@@ -188,7 +188,11 @@ func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx contex
 	}
 	cancel()
 	if closeErr != nil {
-		c.warnLog("msg", "failed to publish negative entry to top tier", "key", key, "err", closeErr)
+		if errors.Is(closeErr, ErrTopWriteInvalidated) {
+			c.infoLog("msg", "skipping negative promotion because top-tier state changed", "key", key)
+		} else {
+			c.warnLog("msg", "failed to publish negative entry to top tier", "key", key, "err", closeErr)
+		}
 	}
 	return newGetResponse(GetStatusNotFound, nil, meta), nil
 }

@@ -1,6 +1,9 @@
 package daramjwee
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {
 	if len(c.tiers) <= 1 {
@@ -58,7 +61,11 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 			c.infoLog("msg", "starting background set", "key", key, "dest_tier", destTierIndex)
 			srcStream, meta, err := c.getStreamFromStore(persistCtx, srcStore, key)
 			if err != nil {
-				c.errorLog("msg", "failed to get stream from top store for background set", "key", key, "err", err)
+				if errors.Is(err, ErrNotFound) {
+					c.infoLog("msg", "skipping background set because top-tier entry is gone", "key", key, "dest_tier", destTierIndex)
+				} else {
+					c.errorLog("msg", "failed to get stream from top store for background set", "key", key, "err", err)
+				}
 				return
 			}
 			unlockFanout := c.fanoutWrites.lock(destTierIndex, key)
@@ -79,7 +86,11 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 			})
 
 			if persistErr := copyCloseSourceThenCommit(destWriter, srcStream); persistErr != nil {
-				c.errorLog("msg", "failed background set", "key", key, "dest_tier", destTierIndex, "err", persistErr)
+				if errors.Is(persistErr, ErrTopWriteInvalidated) {
+					c.infoLog("msg", "skipping background set because top-tier state changed", "key", key, "dest_tier", destTierIndex)
+				} else {
+					c.errorLog("msg", "failed background set", "key", key, "dest_tier", destTierIndex, "err", persistErr)
+				}
 				return
 			}
 			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
