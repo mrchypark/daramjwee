@@ -144,8 +144,11 @@ func (s *topFillSink) failBeginSet(err error) {
 	}
 	s.done = true
 	s.stopTimerLocked()
-	s.unregisterLocked()
+	cancelBegin := s.unregisterLocked()
 	s.mu.Unlock()
+	if cancelBegin != nil {
+		cancelBegin()
+	}
 	if s.release != nil {
 		s.release()
 	}
@@ -237,16 +240,22 @@ func (s *topFillSink) Close() error {
 	}
 	s.done = true
 	s.stopTimerLocked()
-	s.unregisterLocked()
+	cancelBegin := s.unregisterLocked()
 	if s.sink == nil {
 		err := s.err
 		s.mu.Unlock()
+		if cancelBegin != nil {
+			cancelBegin()
+		}
 		return err
 	}
 	sink := s.sink
 	s.mu.Unlock()
 
 	err := sink.Close()
+	if cancelBegin != nil {
+		cancelBegin()
+	}
 	s.mu.Lock()
 	s.err = err
 	s.mu.Unlock()
@@ -286,16 +295,22 @@ func (s *topFillSink) Abort() error {
 	}
 	s.done = true
 	s.stopTimerLocked()
-	s.unregisterLocked()
+	cancelBegin := s.unregisterLocked()
 	if s.sink == nil {
 		err := s.err
 		s.mu.Unlock()
+		if cancelBegin != nil {
+			cancelBegin()
+		}
 		return err
 	}
 	sink := s.sink
 	s.mu.Unlock()
 
 	err := sink.Abort()
+	if cancelBegin != nil {
+		cancelBegin()
+	}
 	s.mu.Lock()
 	s.err = err
 	s.mu.Unlock()
@@ -312,9 +327,8 @@ func (s *topFillSink) Preempt() error {
 	s.preempted = true
 	s.preemptOnce.Do(func() { close(s.preemptCh) })
 	s.stopTimerLocked()
-	s.unregisterLocked()
+	cancelBegin := s.unregisterLocked()
 	if s.sink == nil {
-		cancelBegin := s.cancelBegin
 		err := s.err
 		s.mu.Unlock()
 		if cancelBegin != nil {
@@ -324,7 +338,6 @@ func (s *topFillSink) Preempt() error {
 	}
 	s.done = true
 	sink := s.sink
-	cancelBegin := s.cancelBegin
 	s.mu.Unlock()
 
 	if cancelBegin != nil {
@@ -394,11 +407,14 @@ func (s *topFillSink) stopTimerLocked() {
 	}
 }
 
-func (s *topFillSink) unregisterLocked() {
+func (s *topFillSink) unregisterLocked() func() {
 	if s.registered {
 		s.registered = false
 		s.coord.unregisterActiveFill(s)
 	}
+	cancelBegin := s.cancelBegin
+	s.cancelBegin = nil
+	return cancelBegin
 }
 
 func (r *fillReadCloser) Read(p []byte) (int, error) {

@@ -469,6 +469,54 @@ func TestTopFillSinkCloseDoesNotPublishDuringBlockedWrite(t *testing.T) {
 	}
 }
 
+func TestTopFillSinkTerminalMethodsCancelBeginContext(t *testing.T) {
+	t.Run("close cancels after sink close", func(t *testing.T) {
+		var cancelCalled bool
+		sink := &cancelCheckingWriteSink{
+			checkNotCanceled: func() {
+				require.False(t, cancelCalled)
+			},
+		}
+		fill := newPendingTopFillSink(&writeCoordinator{}, nil, func() { cancelCalled = true })
+		require.True(t, fill.attach(sink))
+
+		require.NoError(t, fill.Close())
+		require.True(t, cancelCalled)
+		require.True(t, sink.closed)
+	})
+
+	t.Run("abort cancels after sink abort", func(t *testing.T) {
+		var cancelCalled bool
+		sink := &cancelCheckingWriteSink{
+			checkNotCanceled: func() {
+				require.False(t, cancelCalled)
+			},
+		}
+		fill := newPendingTopFillSink(&writeCoordinator{}, nil, func() { cancelCalled = true })
+		require.True(t, fill.attach(sink))
+
+		require.NoError(t, fill.Abort())
+		require.True(t, cancelCalled)
+		require.True(t, sink.aborted)
+	})
+
+	t.Run("setup failure cancels", func(t *testing.T) {
+		var cancelCalled bool
+		fill := newPendingTopFillSink(&writeCoordinator{}, nil, func() { cancelCalled = true })
+
+		fill.failBeginSet(errors.New("begin failed"))
+		require.True(t, cancelCalled)
+	})
+
+	t.Run("preempt cancels", func(t *testing.T) {
+		var cancelCalled bool
+		fill := newPendingTopFillSink(&writeCoordinator{}, nil, func() { cancelCalled = true })
+
+		require.NoError(t, fill.Preempt())
+		require.True(t, cancelCalled)
+	})
+}
+
 type recordingWriteSink struct {
 	buf        bytes.Buffer
 	closeErr   error
@@ -625,6 +673,32 @@ func (s *blockingWriteSink) Abort() error {
 	s.abortOnce.Do(func() {
 		close(s.abortStarted)
 	})
+	return nil
+}
+
+type cancelCheckingWriteSink struct {
+	checkNotCanceled func()
+	closed           bool
+	aborted          bool
+}
+
+func (s *cancelCheckingWriteSink) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (s *cancelCheckingWriteSink) Close() error {
+	if s.checkNotCanceled != nil {
+		s.checkNotCanceled()
+	}
+	s.closed = true
+	return nil
+}
+
+func (s *cancelCheckingWriteSink) Abort() error {
+	if s.checkNotCanceled != nil {
+		s.checkNotCanceled()
+	}
+	s.aborted = true
 	return nil
 }
 
