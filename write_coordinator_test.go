@@ -356,6 +356,62 @@ func TestLegacyFillContextCancelPreemptsPendingBeginSet(t *testing.T) {
 	}
 }
 
+func TestLegacyFillPreemptCancelsPendingBeginSet(t *testing.T) {
+	store := &contextBlockingFirstBeginSetStore{
+		beginStarted: make(chan struct{}),
+		releaseBegin: make(chan struct{}),
+	}
+	cache := &DaramjweeCache{
+		tiers:            []Store{store},
+		opTimeout:        time.Second,
+		closeTimeout:     time.Second,
+		fillLeaseTimeout: time.Hour,
+	}
+
+	fillDone := make(chan error, 1)
+	go func() {
+		writer, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
+		if writer != nil {
+			_ = writer.Abort()
+		}
+		fillDone <- err
+	}()
+
+	select {
+	case <-store.beginStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fill BeginSet did not start")
+	}
+
+	setDone := make(chan error, 1)
+	go func() {
+		writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "user"})
+		if err == nil {
+			err = writer.Abort()
+		}
+		setDone <- err
+	}()
+
+	select {
+	case err := <-setDone:
+		if err != nil {
+			t.Fatalf("same-key Set should proceed after preempting pending BeginSet, got %v", err)
+		}
+	case <-time.After(time.Second):
+		close(store.releaseBegin)
+		t.Fatal("same-key Set stayed blocked behind preempted BeginSet")
+	}
+
+	select {
+	case err := <-fillDone:
+		if err != nil {
+			t.Fatalf("preempted fill should return without setup error, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("preempted fill setup did not return")
+	}
+}
+
 func TestStaleStagedCloseAbortCleanupDoesNotBlockNewerCommit(t *testing.T) {
 	store := &blockingFirstAbortStagingStore{
 		abortStarted: make(chan struct{}),
@@ -1197,6 +1253,42 @@ func (s *blockingFirstBeginSetStore) Delete(ctx context.Context, key string) err
 }
 
 func (s *blockingFirstBeginSetStore) Stat(ctx context.Context, key string) (*Metadata, error) {
+	return nil, ErrNotFound
+}
+
+type contextBlockingFirstBeginSetStore struct {
+	mu           sync.Mutex
+	calls        int
+	beginStarted chan struct{}
+	releaseBegin chan struct{}
+}
+
+func (s *contextBlockingFirstBeginSetStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
+}
+
+func (s *contextBlockingFirstBeginSetStore) BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error) {
+	s.mu.Lock()
+	s.calls++
+	first := s.calls == 1
+	s.mu.Unlock()
+	if !first {
+		return &stubWriteSink{}, nil
+	}
+	close(s.beginStarted)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.releaseBegin:
+		return &stubWriteSink{}, nil
+	}
+}
+
+func (s *contextBlockingFirstBeginSetStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (s *contextBlockingFirstBeginSetStore) Stat(ctx context.Context, key string) (*Metadata, error) {
 	return nil, ErrNotFound
 }
 

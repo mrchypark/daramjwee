@@ -32,6 +32,7 @@ type writeCoordinator struct {
 	activeDeletes       int
 	activeDeletesDone   chan struct{}
 	activeFill          *topFillSink
+	fillPreemptions     int
 }
 
 type coordinatedTopWriteSink struct {
@@ -259,7 +260,7 @@ func (c *writeCoordinator) reserveBestEffort(ctx context.Context, expected *uint
 	c.init()
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	if c.activeFill != nil || c.activeDeletes > 0 {
+	if c.activeFill != nil || c.activeDeletes > 0 || c.fillPreemptions > 0 {
 		return 0, ErrTopWriteInvalidated
 	}
 	if err := ctx.Err(); err != nil {
@@ -279,7 +280,7 @@ func (c *writeCoordinator) reserveWithFill(ctx context.Context, expected uint64,
 	c.init()
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	if c.activeFill != nil || c.activeDeletes > 0 {
+	if c.activeFill != nil || c.activeDeletes > 0 || c.fillPreemptions > 0 {
 		return 0, ErrTopWriteInvalidated
 	}
 	if err := ctx.Err(); err != nil {
@@ -523,6 +524,29 @@ func (c *writeCoordinator) preemptActiveFill() {
 	}
 }
 
+func (c *writeCoordinator) preemptActiveFillForWrite() func() {
+	c.init()
+	c.stateMu.Lock()
+	fill := c.activeFill
+	if fill != nil {
+		c.fillPreemptions++
+	}
+	c.stateMu.Unlock()
+	if fill != nil {
+		_ = fill.Preempt()
+	}
+	return func() {
+		if fill == nil {
+			return
+		}
+		c.stateMu.Lock()
+		if c.fillPreemptions > 0 {
+			c.fillPreemptions--
+		}
+		c.stateMu.Unlock()
+	}
+}
+
 func (c *writeCoordinator) rollbackAndUnlock(generation uint64) {
 	c.unregisterReservation(generation)
 	c.releaseWrite()
@@ -574,7 +598,8 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 	store := c.topWriteStore()
 	coord := c.topWrites.coordinator(key)
 	if expectedGeneration == nil {
-		coord.preemptActiveFill()
+		unblockFills := coord.preemptActiveFillForWrite()
+		defer unblockFills()
 	}
 	if staging, ok := store.(StagingStore); ok {
 		generation, err := coord.reserve(ctx, expectedGeneration)
@@ -697,7 +722,7 @@ func (c *DaramjweeCache) setStreamToTopStoreForFill(ctx context.Context, key str
 	fillCtx, cancelFill := context.WithCancel(ctx)
 	fill := newPendingTopFillSink(coord, func() {
 		coord.rollbackAndUnlock(generation)
-	}, nil)
+	}, cancelFill)
 	generation, err := coord.beginWithFill(fillCtx, expectedGeneration, fill)
 	if err != nil {
 		cancelFill()
@@ -716,6 +741,9 @@ func (c *DaramjweeCache) setStreamToTopStoreForFill(ctx context.Context, key str
 	finishBegin := func(result beginResult) error {
 		if result.err != nil {
 			fill.failBeginSet(result.err)
+			if fill.isPreempted() {
+				return nil
+			}
 			return result.err
 		}
 		topWriter := &coordinatedTopWriteSink{

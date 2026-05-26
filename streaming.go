@@ -146,6 +146,12 @@ func (s *topFillSink) failBeginSet(err error) {
 	}
 }
 
+func (s *topFillSink) isPreempted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.preempted
+}
+
 func (s *topFillSink) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -213,6 +219,10 @@ func (s *topFillSink) Close() error {
 func (s *topFillSink) Abort() error {
 	s.mu.Lock()
 	if s.done {
+		if s.preempted {
+			s.mu.Unlock()
+			return nil
+		}
 		err := s.err
 		s.mu.Unlock()
 		return err

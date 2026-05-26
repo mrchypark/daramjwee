@@ -362,12 +362,24 @@ func TestCache_SameKeySetPreemptsMissFillBeforeStoreBeginSetReturns(t *testing.T
 
 	select {
 	case <-hot.secondBeginSetStarted:
-		t.Fatal("same-key Set entered a second BeginSet before the abandoned fill's BeginSet returned")
+		select {
+		case <-hot.firstBeginSetReturned:
+		default:
+			t.Fatal("same-key Set entered a second BeginSet before the abandoned fill's BeginSet returned")
+		}
 	case err := <-setDone:
-		t.Fatalf("same-key Set completed before the abandoned fill's BeginSet returned: %v", err)
+		select {
+		case <-hot.firstBeginSetReturned:
+		default:
+			t.Fatalf("same-key Set completed before the abandoned fill's BeginSet returned: %v", err)
+		}
 	case <-time.After(50 * time.Millisecond):
 	}
-	assert.Equal(t, int32(1), hot.beginSetCalls.Load(), "same-key BeginSet calls must remain serialized")
+	select {
+	case <-hot.firstBeginSetReturned:
+	default:
+		assert.Equal(t, int32(1), hot.beginSetCalls.Load(), "same-key BeginSet calls must remain serialized")
+	}
 
 	hot.releaseFirstBeginSet()
 	select {
@@ -1800,6 +1812,7 @@ func (s *blockingColdStore) Stat(ctx context.Context, key string) (*daramjwee.Me
 type firstBeginSetBlockingStore struct {
 	mockStore             *mockStore
 	firstBeginSetStarted  chan struct{}
+	firstBeginSetReturned chan struct{}
 	secondBeginSetStarted chan struct{}
 	releaseFirst          chan struct{}
 	beginSetCalls         atomic.Int32
@@ -1809,6 +1822,7 @@ func newFirstBeginSetBlockingStore() *firstBeginSetBlockingStore {
 	return &firstBeginSetBlockingStore{
 		mockStore:             newMockStore(),
 		firstBeginSetStarted:  make(chan struct{}),
+		firstBeginSetReturned: make(chan struct{}),
 		secondBeginSetStarted: make(chan struct{}),
 		releaseFirst:          make(chan struct{}),
 	}
@@ -1822,6 +1836,7 @@ func (s *firstBeginSetBlockingStore) BeginSet(ctx context.Context, key string, m
 	switch s.beginSetCalls.Add(1) {
 	case 1:
 		close(s.firstBeginSetStarted)
+		defer close(s.firstBeginSetReturned)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -1865,6 +1880,7 @@ func (s *firstBeginSetBlockingErrorStore) BeginSet(ctx context.Context, key stri
 	switch s.beginSetCalls.Add(1) {
 	case 1:
 		close(s.firstBeginSetStarted)
+		defer close(s.firstBeginSetReturned)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
