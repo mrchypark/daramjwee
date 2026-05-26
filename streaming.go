@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 )
 
 var streamCopyBufferPool = sync.Pool{
@@ -37,13 +38,27 @@ type fillReadCloser struct {
 	sink      WriteSink
 	onPublish func()
 	cancel    func()
+	trace     func(event string, keyvals ...any)
 
-	mu       sync.Mutex
-	sawEOF   bool
-	readErr  error
-	sinkErr  error
-	closeErr error
-	closed   bool
+	mu        sync.Mutex
+	sawEOF    bool
+	readErr   error
+	sinkErr   error
+	closeErr  error
+	closed    bool
+	closeDone chan struct{}
+}
+
+type topFillSink struct {
+	sink  *coordinatedTopWriteSink
+	coord *writeCoordinator
+	timer *time.Timer
+
+	mu         sync.Mutex
+	done       bool
+	preempted  bool
+	registered bool
+	err        error
 }
 
 type streamTeeWriter struct {
@@ -65,42 +80,275 @@ func (w *streamTeeWriter) Write(p []byte) (int, error) {
 }
 
 func streamThrough(src io.ReadCloser, sink WriteSink, cancel func(), onPublish func()) io.ReadCloser {
-	return newStreamingReadCloser(src, sink, cancel, onPublish)
+	return newStreamingReadCloser(src, sink, cancel, onPublish, nil)
 }
 
-func newStreamingReadCloser(src io.ReadCloser, sink WriteSink, cancel func(), onPublish func()) io.ReadCloser {
+func streamThroughWithTrace(src io.ReadCloser, sink WriteSink, cancel func(), onPublish func(), trace func(event string, keyvals ...any)) io.ReadCloser {
+	return newStreamingReadCloser(src, sink, cancel, onPublish, trace)
+}
+
+func newStreamingReadCloser(src io.ReadCloser, sink WriteSink, cancel func(), onPublish func(), trace func(event string, keyvals ...any)) io.ReadCloser {
 	return &fillReadCloser{
 		src:       src,
 		sink:      sink,
 		cancel:    cancel,
 		onPublish: onPublish,
+		trace:     trace,
+	}
+}
+
+func newPendingTopFillSink(coord *writeCoordinator) *topFillSink {
+	return &topFillSink{coord: coord}
+}
+
+func (s *topFillSink) startLease(timeout time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.preempted {
+		return
+	}
+	if timeout > 0 {
+		s.timer = time.AfterFunc(timeout, func() {
+			_ = s.Preempt()
+		})
+	}
+}
+
+func (s *topFillSink) attach(sink *coordinatedTopWriteSink) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.preempted {
+		return false
+	}
+	s.sink = sink
+	return true
+}
+
+func (s *topFillSink) failBeginSet(err error) {
+	s.mu.Lock()
+	if s.err != nil {
+		s.err = errors.Join(s.err, err)
+	} else {
+		s.err = err
+	}
+	s.done = true
+	s.stopTimerLocked()
+	s.unregisterLocked()
+	s.mu.Unlock()
+	s.coord.writeMu.Unlock()
+}
+
+func (s *topFillSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.preempted {
+		return len(p), nil
+	}
+	if s.sink == nil {
+		return len(p), nil
+	}
+	n, err := writeAllCount(s.sink, p)
+	if err != nil {
+		s.err = err
+		return n, err
+	}
+	return len(p), nil
+}
+
+func (s *topFillSink) Close() error {
+	s.mu.Lock()
+	if s.done {
+		if s.preempted {
+			s.mu.Unlock()
+			return nil
+		}
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	if s.preempted {
+		s.done = true
+		s.mu.Unlock()
+		return nil
+	}
+	s.done = true
+	s.stopTimerLocked()
+	s.unregisterLocked()
+	if s.sink == nil {
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	sink := s.sink
+	s.mu.Unlock()
+
+	err := sink.Close()
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
+	return err
+}
+
+func (s *topFillSink) Abort() error {
+	s.mu.Lock()
+	if s.done {
+		if s.preempted {
+			s.mu.Unlock()
+			return nil
+		}
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	if s.preempted {
+		s.done = true
+		s.mu.Unlock()
+		return nil
+	}
+	s.done = true
+	s.stopTimerLocked()
+	s.unregisterLocked()
+	if s.sink == nil {
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	sink := s.sink
+	s.mu.Unlock()
+
+	err := sink.Abort()
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
+	return err
+}
+
+func (s *topFillSink) Preempt() error {
+	s.mu.Lock()
+	if s.done {
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	s.preempted = true
+	s.stopTimerLocked()
+	s.unregisterLocked()
+	if s.sink == nil {
+		err := s.err
+		s.mu.Unlock()
+		return err
+	}
+	s.done = true
+	sink := s.sink
+	s.mu.Unlock()
+
+	err := sink.Abort()
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
+	return err
+}
+
+func (s *topFillSink) finishPreemptedAttach(sink *coordinatedTopWriteSink) error {
+	err := sink.Abort()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done {
+		return s.err
+	}
+	s.done = true
+	s.err = errors.Join(s.err, err)
+	return s.err
+}
+
+func (s *topFillSink) Preempted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.preempted
+}
+
+func (s *topFillSink) stopTimerLocked() {
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+}
+
+func (s *topFillSink) unregisterLocked() {
+	if s.registered {
+		s.registered = false
+		s.coord.unregisterActiveFill(s)
 	}
 }
 
 func (r *fillReadCloser) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	if r.closed {
+		closeDone := r.closeDone
+		if closeDone != nil {
+			r.mu.Unlock()
+			<-closeDone
+			r.mu.Lock()
+		}
+		err := r.readAfterClosedErrorLocked()
+		r.mu.Unlock()
+		return 0, err
+	}
+	r.mu.Unlock()
+
 	n, err := r.src.Read(p)
 	if n > 0 {
 		if writeErr := writeAll(r.sink, p[:n]); writeErr != nil {
 			r.mu.Lock()
 			r.sinkErr = writeErr
+			var readErr error
+			if err != nil && !errors.Is(err, io.EOF) {
+				r.readErr = err
+				readErr = err
+				r.traceEvent("stream_through_read_error", "err", err)
+			}
 			r.mu.Unlock()
-			return n, writeErr
+			closeErr := r.Close()
+			return n, errors.Join(readErr, writeErr, closeErr)
 		}
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if errors.Is(err, io.EOF) {
 		r.sawEOF = true
+		r.traceEvent("stream_through_read_eof")
+		r.mu.Unlock()
+		if reportErr := autoFinalizeError(r.Close()); reportErr != nil {
+			return n, reportErr
+		}
 		return n, err
 	}
 	if err != nil {
 		r.readErr = err
+		r.traceEvent("stream_through_read_error", "err", err)
+		r.mu.Unlock()
+		closeErr := r.Close()
+		return n, errors.Join(err, closeErr)
 	}
+	r.mu.Unlock()
 	return n, err
 }
 
 func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
+	r.mu.Lock()
+	if r.closed {
+		closeDone := r.closeDone
+		if closeDone != nil {
+			r.mu.Unlock()
+			<-closeDone
+			r.mu.Lock()
+		}
+		err := r.readAfterClosedErrorLocked()
+		r.mu.Unlock()
+		return 0, err
+	}
+	r.mu.Unlock()
+
 	tee := &streamTeeWriter{dst: dst, sink: r.sink}
 
 	var (
@@ -120,7 +368,11 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 				nw, writeErr := tee.Write(buf[:nr])
 				written += int64(nw)
 				if writeErr != nil {
-					err = writeErr
+					if readErr != nil && !errors.Is(readErr, io.EOF) {
+						err = errors.Join(readErr, writeErr)
+					} else {
+						err = writeErr
+					}
 					break
 				}
 			}
@@ -134,50 +386,150 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 			}
 		}
 	}
+	if err == nil && tee.sinkErr != nil {
+		err = tee.sinkErr
+	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if err == nil {
 		r.sawEOF = true
-		return written, nil
+		r.traceEvent("stream_through_write_to_eof", "bytes", written)
+		r.mu.Unlock()
+		return written, autoFinalizeError(r.Close())
 	}
 	if tee.sinkErr != nil {
 		r.sinkErr = tee.sinkErr
+		r.traceEvent("stream_through_write_to_sink_error", "bytes", written, "err", tee.sinkErr)
+		if !errors.Is(err, tee.sinkErr) {
+			r.readErr = err
+		}
 	} else {
 		r.readErr = err
+		r.traceEvent("stream_through_write_to_read_error", "bytes", written, "err", err)
 	}
-	return written, err
+	r.mu.Unlock()
+	closeErr := r.Close()
+	return written, errors.Join(err, closeErr)
 }
 
 func (r *fillReadCloser) Close() error {
 	r.mu.Lock()
 	if r.closed {
+		closeDone := r.closeDone
+		if closeDone == nil {
+			err := r.closeErr
+			r.mu.Unlock()
+			return err
+		}
+		r.mu.Unlock()
+		<-closeDone
+		r.mu.Lock()
 		err := r.closeErr
 		r.mu.Unlock()
 		return err
 	}
 	r.closed = true
+	closeDone := make(chan struct{})
+	r.closeDone = closeDone
 	publish := r.sawEOF && r.readErr == nil && r.sinkErr == nil
+	r.traceEvent("stream_through_close_start", "publish", publish, "saw_eof", r.sawEOF, "read_err", r.readErr, "sink_err", r.sinkErr)
 	r.mu.Unlock()
 
 	var err error
 	if publish {
-		err = r.sink.Close()
-		if err == nil && r.onPublish != nil {
-			r.onPublish()
+		srcErr := r.src.Close()
+		if srcErr != nil {
+			r.traceEvent("stream_through_sink_abort_start")
+			abortErr := r.sink.Abort()
+			r.traceEvent("stream_through_sink_abort_done", "err", abortErr)
+			err = errors.Join(abortErr, srcErr)
+		} else {
+			r.traceEvent("stream_through_sink_close_start")
+			err = r.sink.Close()
+			r.traceEvent("stream_through_sink_close_done", "err", err)
+			if err == nil && r.onPublish != nil && !sinkPreempted(r.sink) {
+				r.traceEvent("stream_through_on_publish_start")
+				r.onPublish()
+				r.traceEvent("stream_through_on_publish_done")
+			}
 		}
 	} else {
+		r.traceEvent("stream_through_sink_abort_start")
 		err = r.sink.Abort()
+		r.traceEvent("stream_through_sink_abort_done", "err", err)
+		err = errors.Join(err, r.src.Close())
 	}
-	err = errors.Join(err, r.src.Close())
 	if r.cancel != nil {
 		r.cancel()
 	}
 
 	r.mu.Lock()
 	r.closeErr = err
+	close(closeDone)
 	r.mu.Unlock()
+	r.traceEvent("stream_through_close_done", "err", err)
 	return err
+}
+
+func (r *fillReadCloser) readAfterClosedErrorLocked() error {
+	if r.sawEOF && r.readErr == nil {
+		return io.EOF
+	}
+	if r.closeErr != nil {
+		return r.closeErr
+	}
+	if r.readErr != nil {
+		return r.readErr
+	}
+	return io.ErrClosedPipe
+}
+
+func sinkPreempted(sink WriteSink) bool {
+	preempted, ok := sink.(interface{ Preempted() bool })
+	return ok && preempted.Preempted()
+}
+
+func (r *fillReadCloser) traceEvent(event string, keyvals ...any) {
+	if r.trace == nil {
+		return
+	}
+	r.trace(event, keyvals...)
+}
+
+func autoFinalizeError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrTopWriteInvalidated) {
+		return withoutError(err, ErrTopWriteInvalidated)
+	}
+	return err
+}
+
+func withoutError(err, target error) error {
+	if err == nil {
+		return nil
+	}
+	switch unwrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		remaining := make([]error, 0, len(unwrapped.Unwrap()))
+		for _, child := range unwrapped.Unwrap() {
+			if childErr := withoutError(child, target); childErr != nil {
+				remaining = append(remaining, childErr)
+			}
+		}
+		return errors.Join(remaining...)
+	case interface{ Unwrap() error }:
+		if childErr := withoutError(unwrapped.Unwrap(), target); childErr != nil {
+			return childErr
+		}
+		return nil
+	default:
+		if errors.Is(err, target) {
+			return nil
+		}
+		return err
+	}
 }
 
 type cancelOnCloseReadCloser struct {

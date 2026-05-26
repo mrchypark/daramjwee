@@ -184,6 +184,7 @@ func TestNew_OptionValidation(t *testing.T) {
 				WithWorkerQueue(100),
 				WithWorkerTimeout(5 * time.Second),
 				WithOpTimeout(10 * time.Second),
+				WithFillLeaseTimeout(30 * time.Second),
 				WithCloseTimeout(20 * time.Second),
 				WithFreshness(time.Minute, 5*time.Minute),
 				WithTierFreshness(1, 2*time.Minute, 3*time.Minute),
@@ -261,6 +262,15 @@ func TestNew_OptionValidation(t *testing.T) {
 			},
 			expectErr:   true,
 			expectedMsg: "close timeout must be positive",
+		},
+		{
+			name: "failure with negative fill lease timeout",
+			options: []Option{
+				WithTiers(regularA),
+				WithFillLeaseTimeout(-time.Second),
+			},
+			expectErr:   true,
+			expectedMsg: "fill lease timeout cannot be negative",
 		},
 	}
 
@@ -353,6 +363,107 @@ func TestGroupNewCache_RejectsStandaloneWorkerOptions(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.msg)
 		})
 	}
+}
+
+func TestNewGroup_NewCacheReservesNameDuringConstruction(t *testing.T) {
+	group, err := NewGroup(nil, WithGroupWorkers(1))
+	require.NoError(t, err)
+	defer group.Close()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	blockConstruction := func(cfg *Config) error {
+		close(started)
+		<-release
+		return nil
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		cache, err := group.NewCache("reserved", WithTiers(&optionsTestMockStore{id: 1}), blockConstruction)
+		if err == nil {
+			cache.Close()
+		}
+		firstDone <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first NewCache did not reach the blocking option")
+	}
+
+	_, err = group.NewCache("reserved", WithTiers(&optionsTestMockStore{id: 2}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate cache name")
+
+	close(release)
+	select {
+	case err := <-firstDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("first NewCache did not complete after release")
+	}
+}
+
+func TestNewGroup_CloseWaitsForInFlightCacheConstruction(t *testing.T) {
+	group, err := NewGroup(nil, WithGroupWorkers(1))
+	require.NoError(t, err)
+	typedGroup := group.(*cacheGroup)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	blockConstruction := func(cfg *Config) error {
+		close(started)
+		<-release
+		return nil
+	}
+
+	newCacheDone := make(chan error, 1)
+	go func() {
+		cache, err := group.NewCache("closing-reserved", WithTiers(&optionsTestMockStore{id: 1}), blockConstruction)
+		if err == nil {
+			cache.Close()
+		}
+		newCacheDone <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("NewCache did not reach the blocking option")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		group.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		t.Fatal("group Close returned while NewCache construction was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case err := <-newCacheDone:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cache group is closed")
+	case <-time.After(time.Second):
+		t.Fatal("NewCache did not unwind after construction was released")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("group Close did not complete after in-flight construction unwound")
+	}
+
+	typedGroup.mu.Lock()
+	assert.Empty(t, typedGroup.caches)
+	typedGroup.mu.Unlock()
 }
 
 func TestNewGroup_CloseClosesCreatedCaches(t *testing.T) {

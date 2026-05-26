@@ -56,6 +56,7 @@ func FuzzScheduleRefreshBackgroundStateMachine(f *testing.F) {
 			case 2:
 				require.NoError(t, cache.ScheduleRefresh(ctx, key, cacheableNotFoundFetcher{}))
 				hotState[key] = entryExpectation{present: true, negative: true}
+				coldState[key] = entryExpectation{present: true, negative: true}
 				eventuallyExpectStoreState(t, hot, key, hotState[key])
 				eventuallyExpectStoreState(t, cold, key, coldState[key])
 			case 3:

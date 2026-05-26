@@ -22,6 +22,7 @@ type mockStore struct {
 	err            error
 	deleteErr      error
 	writeCompleted chan string
+	writeAborted   chan string
 	forceSetError  bool // forceSetError, if true, makes BeginSet return an error.
 }
 
@@ -31,6 +32,7 @@ func newMockStore() *mockStore {
 		data:           make(map[string][]byte),
 		meta:           make(map[string]*daramjwee.Metadata),
 		writeCompleted: make(chan string, 100),
+		writeAborted:   make(chan string, 100),
 	}
 }
 
@@ -85,8 +87,14 @@ func (s *mockStore) BeginSet(ctx context.Context, key string, metadata *daramjwe
 			}
 			return nil
 		},
-		onAbort: func() error { return nil },
-		buf:     &buf,
+		onAbort: func() error {
+			select {
+			case s.writeAborted <- key:
+			default:
+			}
+			return nil
+		},
+		buf: &buf,
 	}, nil
 }
 

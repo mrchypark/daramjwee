@@ -201,6 +201,8 @@ type FetchUsesContext interface {
 // Implementations used by Store.BeginSet must not call back into Cache methods
 // from Close or Abort because cache tiers may coordinate commit ordering while
 // those terminal methods run.
+// Write must return promptly when the underlying storage rejects or stalls a
+// staged write; cache-level fill preemption cannot interrupt a blocked Write.
 type WriteSink interface {
 	io.WriteCloser
 	Abort() error
@@ -214,6 +216,8 @@ type Store interface {
 	// BeginSet returns a sink that stages data into the store.
 	// The currently readable value for key must remain unchanged until the
 	// returned sink is successfully closed or aborted.
+	// Implementations should honor ctx during setup; cache-level fill leases
+	// start only after BeginSet returns and cannot interrupt a blocked BeginSet.
 	BeginSet(ctx context.Context, key string, metadata *Metadata) (WriteSink, error)
 	// Delete removes the last committed object from the store.
 	// It must not wait for an uncommitted BeginSet sink on the same key to
@@ -281,7 +285,7 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		logger = log.NewNopLogger()
 	}
 
-	cfg, err := buildCacheConfig(cacheConstructionStandalone, nil, opts...)
+	cfg, fillLeaseTimeout, err := buildCacheConfig(cacheConstructionStandalone, nil, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -293,26 +297,32 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 
 	runtime := newStandaloneRuntime(manager)
 	cacheID := "standalone"
-	return newCacheFromConfig(logger, runtime, cacheID, cfg)
+	return newCacheFromConfig(logger, runtime, cacheID, cfg, fillLeaseTimeout)
 }
 
-func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ...Option) (Config, error) {
+func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ...Option) (Config, time.Duration, error) {
 	cfg := Config{
 		OpTimeout:         30 * time.Second,
 		PositiveFreshness: 0,
 		NegativeFreshness: 0,
 	}
+	settings := settingsForConfig(&cfg)
+	defer optionSettings.Delete(&cfg)
 
 	for _, opt := range opts {
 		if err := opt(&cfg); err != nil {
-			return Config{}, err
+			return Config{}, 0, err
 		}
+	}
+	fillLeaseTimeout := time.Duration(0)
+	if settings.fillLeaseTimeout != nil {
+		fillLeaseTimeout = *settings.fillLeaseTimeout
 	}
 
 	switch mode {
 	case cacheConstructionStandalone:
 		if cfg.Weight > 0 || cfg.QueueLimit > 0 {
-			return Config{}, &ConfigError{"group-attached cache option cannot be used with New"}
+			return Config{}, 0, &ConfigError{"group-attached cache option cannot be used with New"}
 		}
 		if cfg.WorkerStrategy == "" {
 			cfg.WorkerStrategy = "pool"
@@ -332,16 +342,16 @@ func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ..
 	case cacheConstructionGroup:
 		if groupCfg != nil {
 			if cfg.WorkerStrategy != "" {
-				return Config{}, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
+				return Config{}, 0, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
 			}
 			if cfg.Workers != 0 {
-				return Config{}, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
+				return Config{}, 0, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
 			}
 			if cfg.WorkerQueue != 0 {
-				return Config{}, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
+				return Config{}, 0, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
 			}
 			if cfg.WorkerTimeout != 0 {
-				return Config{}, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
+				return Config{}, 0, &ConfigError{"standalone worker option cannot be used with CacheGroup.NewCache"}
 			}
 			if cfg.Workers == 0 {
 				cfg.Workers = groupCfg.Workers
@@ -365,34 +375,34 @@ func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ..
 	}
 
 	if len(cfg.Tiers) == 0 {
-		return Config{}, &ConfigError{"at least one tier is required"}
+		return Config{}, 0, &ConfigError{"at least one tier is required"}
 	}
 
 	seen := make([]Store, 0, len(cfg.Tiers))
 	for idx, tier := range cfg.Tiers {
 		if isNilStore(tier) {
-			return Config{}, &ConfigError{"tier cannot be nil"}
+			return Config{}, 0, &ConfigError{"tier cannot be nil"}
 		}
 		if containsSameStore(seen, tier) {
-			return Config{}, &ConfigError{"duplicate tier store instance"}
+			return Config{}, 0, &ConfigError{"duplicate tier store instance"}
 		}
 		if validator, ok := tier.(TierValidator); ok {
 			if err := validator.ValidateTier(idx); err != nil {
-				return Config{}, &ConfigError{fmt.Sprintf("tier %d %s", idx, err.Error())}
+				return Config{}, 0, &ConfigError{fmt.Sprintf("tier %d %s", idx, err.Error())}
 			}
 		}
 		seen = append(seen, tier)
 	}
 	for idx := range cfg.TierFreshnessOverrides {
 		if idx < 0 || idx >= len(cfg.Tiers) {
-			return Config{}, &ConfigError{fmt.Sprintf("tier freshness override index %d is out of range", idx)}
+			return Config{}, 0, &ConfigError{fmt.Sprintf("tier freshness override index %d is out of range", idx)}
 		}
 	}
 
-	return cfg, nil
+	return cfg, fillLeaseTimeout, nil
 }
 
-func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID string, cfg Config) (Cache, error) {
+func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID string, cfg Config, fillLeaseTimeout time.Duration) (Cache, error) {
 	cache := &DaramjweeCache{
 		logger:                 logger,
 		runtime:                runtime,
@@ -402,6 +412,7 @@ func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID st
 		runtimeQueueLimit:      cfg.QueueLimit,
 		opTimeout:              cfg.OpTimeout,
 		closeTimeout:           cfg.CloseTimeout,
+		fillLeaseTimeout:       fillLeaseTimeout,
 		positiveFreshness:      cfg.PositiveFreshness,
 		negativeFreshness:      cfg.NegativeFreshness,
 		tierFreshnessOverrides: cloneTierFreshnessOverrides(cfg.TierFreshnessOverrides),

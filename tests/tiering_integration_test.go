@@ -313,7 +313,7 @@ func TestCache_ConditionalHitAcceptsHTTPIfNoneMatchForms(t *testing.T) {
 	}
 }
 
-func TestCache_LowerTierConditionalHitPromotesFreshEntryToTop(t *testing.T) {
+func TestCache_LowerTierConditionalHitSkipsTopPromotion(t *testing.T) {
 	top := newMockStore()
 	lower := newMockStore()
 	cachedAt := time.Now()
@@ -337,15 +337,8 @@ func TestCache_LowerTierConditionalHitPromotesFreshEntryToTop(t *testing.T) {
 	require.Equal(t, daramjwee.GetStatusNotModified, resp.Status)
 	require.Nil(t, resp.Body)
 
-	reader, meta, err := top.GetStream(context.Background(), "conditional-lower-key")
-	require.NoError(t, err)
-	defer reader.Close()
-
-	body, err := io.ReadAll(reader)
-	require.NoError(t, err)
-	assert.Equal(t, "cached-value", string(body))
-	assert.Equal(t, "cache-v1", meta.CacheTag)
-	assert.Equal(t, cachedAt.UnixNano(), meta.CachedAt.UnixNano())
+	_, _, err = top.GetStream(context.Background(), "conditional-lower-key")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
 func TestCache_LowerTierNegativeStaleHitNotModifiedPromotesNegativeToTop(t *testing.T) {

@@ -57,6 +57,185 @@ func TestSetStreamToStoreWithTopGenerationRestoresGenerationOnBeginSetFailure(t 
 	}
 }
 
+func TestTopFillPreemptDoesNotDeadlockWithCloseWaitingOnDelete(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.stateChanged = sync.NewCond(&coord.stateMu)
+	coord.writeMu.Lock()
+	coord.stateMu.Lock()
+	coord.activeDeletes = 1
+	coord.stateMu.Unlock()
+
+	fill := newPendingTopFillSink(coord)
+	topWriter := &coordinatedTopWriteSink{
+		WriteSink:  &stubWriteSink{},
+		coord:      coord,
+		key:        "key",
+		generation: 0,
+	}
+	if !fill.attach(topWriter) {
+		t.Fatal("expected fill attach to succeed")
+	}
+	coord.stateMu.Lock()
+	fill.registered = true
+	coord.activeFill = fill
+	coord.stateMu.Unlock()
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- fill.Close()
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	preemptDone := make(chan error, 1)
+	go func() {
+		preemptDone <- fill.Preempt()
+	}()
+
+	select {
+	case err := <-preemptDone:
+		if err != nil {
+			t.Fatalf("preempt returned unexpected error: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("preempt blocked on topFillSink.mu while close waited on active delete")
+	}
+
+	coord.finishDelete(true)
+	select {
+	case err := <-closeDone:
+		if !errors.Is(err, ErrTopWriteInvalidated) {
+			t.Fatalf("expected invalidated close after delete, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("fill close did not resume after delete finished")
+	}
+}
+
+func TestDeleteWaitsForConcurrentPublisherCleanupBeforeReturning(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.stateChanged = sync.NewCond(&coord.stateMu)
+	coord.writeMu.Lock()
+	publishSink := newBlockingCloseSink()
+	cleanupDone := make(chan struct{})
+	topWriter := &coordinatedTopWriteSink{
+		WriteSink:  publishSink,
+		coord:      coord,
+		key:        "key",
+		generation: 0,
+		onInvalidated: func() error {
+			close(cleanupDone)
+			return nil
+		},
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- topWriter.Close()
+	}()
+
+	select {
+	case <-publishSink.closeStarted:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("writer close did not enter underlying publish")
+	}
+
+	deleteDone := make(chan struct{})
+	go func() {
+		if err := coord.beginDelete(context.Background()); err != nil {
+			t.Errorf("begin delete: %v", err)
+			return
+		}
+		coord.finishDelete(true)
+		close(deleteDone)
+	}()
+
+	select {
+	case <-deleteDone:
+		t.Fatal("delete returned while a concurrent publisher was still visible")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(publishSink.releaseClose)
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("invalidated publisher did not run cleanup")
+	}
+	select {
+	case <-deleteDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("delete did not return after publisher cleanup completed")
+	}
+	select {
+	case err := <-closeDone:
+		if !errors.Is(err, ErrTopWriteInvalidated) {
+			t.Fatalf("expected invalidated close, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("writer close did not return")
+	}
+}
+
+func TestDeleteWaitsForConditionalPublisherCleanupBeforeReturning(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.stateChanged = sync.NewCond(&coord.stateMu)
+	publishSink := newBlockingCloseSink()
+	cleanupDone := make(chan struct{})
+	sink := newConditionalGenerationWriteSink(publishSink, coord, 0, func() error {
+		close(cleanupDone)
+		return nil
+	})
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- sink.Close()
+	}()
+
+	select {
+	case <-publishSink.closeStarted:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("conditional writer close did not enter underlying publish")
+	}
+
+	deleteDone := make(chan struct{})
+	go func() {
+		if err := coord.beginDelete(context.Background()); err != nil {
+			t.Errorf("begin delete: %v", err)
+			return
+		}
+		coord.finishDelete(true)
+		close(deleteDone)
+	}()
+
+	select {
+	case <-deleteDone:
+		t.Fatal("delete returned while a concurrent conditional publisher was still visible")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(publishSink.releaseClose)
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("invalidated conditional publisher did not run cleanup")
+	}
+	select {
+	case <-deleteDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("delete did not return after conditional publisher cleanup completed")
+	}
+	select {
+	case err := <-closeDone:
+		if !errors.Is(err, ErrTopWriteInvalidated) {
+			t.Fatalf("expected invalidated close, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("conditional writer close did not return")
+	}
+}
+
 func TestCurrentTopWriteGenerationDoesNotCreateCoordinatorForMissingKey(t *testing.T) {
 	cache := &DaramjweeCache{}
 
@@ -77,7 +256,9 @@ func TestSetStreamToTopStoreWithGenerationHonorsCanceledContextWhileDeleteInProg
 	}
 
 	coord := cache.topWrites.coordinator("key")
-	coord.beginDelete()
+	if err := coord.beginDelete(context.Background()); err != nil {
+		t.Fatalf("begin delete: %v", err)
+	}
 	defer coord.finishDelete(false)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -280,6 +461,82 @@ func TestFanoutWriteManagerOrdersStaleCleanupBeforeNewerWrite(t *testing.T) {
 	}
 }
 
+func TestCoordinatedTopWriteSinkInvalidatedAfterPublishRunsCleanupWithoutStateMu(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.stateChanged = sync.NewCond(&coord.stateMu)
+	coord.committedGeneration = 1
+	coord.writeMu.Lock()
+
+	sink := &coordinatedTopWriteSink{
+		WriteSink: &testWriteSink{
+			closeFn: func() error {
+				coord.stateMu.Lock()
+				coord.committedGeneration = 2
+				coord.stateChanged.Broadcast()
+				coord.stateMu.Unlock()
+				return nil
+			},
+		},
+		coord:      coord,
+		generation: 1,
+		onInvalidated: func() error {
+			if got := coord.current(); got != 2 {
+				t.Errorf("expected cleanup to observe generation 2, got %d", got)
+			}
+			return nil
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sink.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrTopWriteInvalidated) {
+			t.Fatalf("expected invalidated error, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("cleanup blocked while stateMu was held")
+	}
+}
+
+func TestConditionalGenerationWriteSinkInvalidatedAfterPublishRunsCleanupWithoutStateMu(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.stateChanged = sync.NewCond(&coord.stateMu)
+	coord.committedGeneration = 1
+
+	sink := newConditionalGenerationWriteSink(&testWriteSink{
+		closeFn: func() error {
+			coord.stateMu.Lock()
+			coord.committedGeneration = 2
+			coord.stateChanged.Broadcast()
+			coord.stateMu.Unlock()
+			return nil
+		},
+	}, coord, 1, func() error {
+		if got := coord.current(); got != 2 {
+			t.Errorf("expected cleanup to observe generation 2, got %d", got)
+		}
+		return nil
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sink.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrTopWriteInvalidated) {
+			t.Fatalf("expected invalidated error, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("cleanup blocked while stateMu was held")
+	}
+}
+
 type destructiveReservationStore struct {
 	beginSetCalls int
 	data          []byte
@@ -333,6 +590,31 @@ type stubWriteSink struct{}
 func (s *stubWriteSink) Write(p []byte) (int, error) { return len(p), nil }
 func (s *stubWriteSink) Close() error                { return nil }
 func (s *stubWriteSink) Abort() error                { return nil }
+
+type blockingCloseSink struct {
+	closeStarted chan struct{}
+	releaseClose chan struct{}
+	once         sync.Once
+}
+
+func newBlockingCloseSink() *blockingCloseSink {
+	return &blockingCloseSink{
+		closeStarted: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+}
+
+func (s *blockingCloseSink) Write(p []byte) (int, error) { return len(p), nil }
+
+func (s *blockingCloseSink) Close() error {
+	s.once.Do(func() {
+		close(s.closeStarted)
+	})
+	<-s.releaseClose
+	return nil
+}
+
+func (s *blockingCloseSink) Abort() error { return nil }
 
 type testWriteSink struct {
 	closeFn func() error

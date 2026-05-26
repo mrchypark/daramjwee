@@ -65,33 +65,27 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 			}
 			return
 		}
-		defer result.Body.Close()
-
 		if result.Metadata == nil {
 			result.Metadata = &Metadata{}
 		}
 		result.Metadata.CachedAt = time.Now()
 
-		writer, err := c.setStreamToTopStoreWithGeneration(refreshCtx, key, result.Metadata, &expectedGeneration)
+		writer, err := c.setStreamToTopStoreBestEffortWithGeneration(refreshCtx, key, result.Metadata, &expectedGeneration)
 		if err != nil {
+			closeErr := result.Body.Close()
 			if errors.Is(err, ErrTopWriteInvalidated) {
+				if closeErr != nil {
+					c.warnLog("msg", "failed to close skipped refresh body", "key", key, "err", closeErr)
+				}
 				c.infoLog("msg", "skipping background refresh publish because top-tier state changed", "key", key)
 				return
 			}
-			c.errorLog("msg", "failed to get cache writer for refresh", "key", key, "err", err)
+			c.errorLog("msg", "failed to get cache writer for refresh", "key", key, "err", errors.Join(err, closeErr))
 			return
 		}
 
-		_, copyErr := io.Copy(writer, result.Body)
-		var closeErr error
-		if copyErr != nil {
-			closeErr = writer.Abort()
-		} else {
-			closeErr = writer.Close()
-		}
-
-		if copyErr != nil || closeErr != nil {
-			c.errorLog("msg", "failed background set", "key", key, "copyErr", copyErr, "closeErr", closeErr)
+		if publishErr := copyCloseSourceThenCommit(writer, result.Body); publishErr != nil {
+			c.errorLog("msg", "failed background set", "key", key, "err", publishErr)
 		} else {
 			c.infoLog("msg", "background set successful", "key", key)
 			c.schedulePersistFromCurrentTop(refreshCtx, key, c.persistDestinationsAfterTop()...)
@@ -140,7 +134,14 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 	metaToPromote.CachedAt = time.Now()
 
 	if metaToPromote.IsNegative {
-		writer, err := c.setStreamToTopStoreWithGeneration(ctx, key, metaToPromote, &expectedGeneration)
+		sourceMeta, err := c.statFromStore(ctx, source.store, key)
+		if err != nil {
+			return err
+		}
+		if !sameCacheEntry(sourceMeta, fallbackMetadata) {
+			return nil
+		}
+		writer, err := c.setStreamToTopStoreBestEffortWithGeneration(ctx, key, metaToPromote, &expectedGeneration)
 		if err != nil {
 			if errors.Is(err, ErrTopWriteInvalidated) {
 				return nil
@@ -156,25 +157,24 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 		return nil
 	}
 
-	srcStream, _, err := c.getStreamFromStore(ctx, source.store, key)
+	srcStream, sourceMeta, err := c.getStreamFromStore(ctx, source.store, key)
 	if err != nil {
 		return err
 	}
-	defer srcStream.Close()
+	if !sameCacheEntry(sourceMeta, fallbackMetadata) {
+		return srcStream.Close()
+	}
 
-	writer, err := c.setStreamToTopStoreWithGeneration(ctx, key, metaToPromote, &expectedGeneration)
+	writer, err := c.setStreamToTopStoreBestEffortWithGeneration(ctx, key, metaToPromote, &expectedGeneration)
 	if err != nil {
+		closeErr := srcStream.Close()
 		if errors.Is(err, ErrTopWriteInvalidated) {
-			return nil
+			return closeErr
 		}
-		return err
+		return errors.Join(err, closeErr)
 	}
 
-	if _, copyErr := io.Copy(writer, srcStream); copyErr != nil {
-		abortErr := writer.Abort()
-		return errors.Join(copyErr, abortErr)
-	}
-	if err := writer.Close(); err != nil {
+	if err := copyCloseSourceThenCommit(writer, srcStream); err != nil {
 		return err
 	}
 	if destinations := c.regularFanoutDestinations(source.tierIndex); len(destinations) > 0 {
@@ -212,7 +212,7 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 	metaToRefresh.CachedAt = time.Now()
 
 	if metaToRefresh.IsNegative {
-		writer, err := c.setStreamToTopStoreWithGeneration(ctx, key, &metaToRefresh, &expectedGeneration)
+		writer, err := c.setStreamToTopStoreBestEffortWithGeneration(ctx, key, &metaToRefresh, &expectedGeneration)
 		if err != nil {
 			if errors.Is(err, ErrTopWriteInvalidated) {
 				return nil
@@ -235,7 +235,7 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 		return closeErr
 	}
 
-	writer, err := c.setStreamToTopStoreWithGeneration(ctx, key, &metaToRefresh, &expectedGeneration)
+	writer, err := c.setStreamToTopStoreBestEffortWithGeneration(ctx, key, &metaToRefresh, &expectedGeneration)
 	if err != nil {
 		if errors.Is(err, ErrTopWriteInvalidated) {
 			return nil
@@ -258,7 +258,7 @@ func (c *DaramjweeCache) handleNegativeCacheWithGeneration(requestCtx, setupCtx 
 		CachedAt:   time.Now(),
 	}
 
-	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, c.topWriteStore()), key, meta, expectedGeneration)
+	writer, err := c.setStreamToTopStoreBestEffortWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, c.topWriteStore()), key, meta, expectedGeneration)
 	if err != nil {
 		if errors.Is(err, ErrTopWriteInvalidated) {
 			if cancel != nil {
@@ -270,10 +270,31 @@ func (c *DaramjweeCache) handleNegativeCacheWithGeneration(requestCtx, setupCtx 
 	} else {
 		if closeErr := writer.Close(); closeErr != nil {
 			c.warnLog("msg", "failed to close writer for negative cache entry", "key", key, "err", closeErr)
+		} else {
+			c.schedulePersistFromCurrentTop(requestCtx, key, c.persistDestinationsAfterTop()...)
 		}
 	}
 	if cancel != nil {
 		cancel()
 	}
 	return newGetResponse(GetStatusNotFound, nil, meta), nil
+}
+
+func copyCloseSourceThenCommit(writer WriteSink, src io.ReadCloser) error {
+	_, copyErr := io.Copy(writer, src)
+	sourceCloseErr := src.Close()
+	if copyErr != nil || sourceCloseErr != nil {
+		abortErr := writer.Abort()
+		return errors.Join(copyErr, sourceCloseErr, abortErr)
+	}
+	return writer.Close()
+}
+
+func sameCacheEntry(current, expected *Metadata) bool {
+	if current == nil || expected == nil {
+		return current == expected
+	}
+	return current.CacheTag == expected.CacheTag &&
+		current.IsNegative == expected.IsNegative &&
+		current.CachedAt.Equal(expected.CachedAt)
 }

@@ -1,9 +1,6 @@
 package daramjwee
 
-import (
-	"context"
-	"io"
-)
+import "context"
 
 func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {
 	if len(c.tiers) <= 1 {
@@ -64,13 +61,14 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 				c.errorLog("msg", "failed to get stream from top store for background set", "key", key, "err", err)
 				return
 			}
-			defer srcStream.Close()
-
 			unlockFanout := c.fanoutWrites.lock(destTierIndex, key)
 			defer unlockFanout()
 
 			destWriter, err := c.setStreamToStore(persistCtx, dest, key, meta)
 			if err != nil {
+				if closeErr := srcStream.Close(); closeErr != nil {
+					c.errorLog("msg", "failed to close source stream after destination writer failure", "key", key, "dest_tier", destTierIndex, "err", closeErr)
+				}
 				c.errorLog("msg", "failed to get writer for destination store", "key", key, "dest_tier", destTierIndex, "err", err)
 				return
 			}
@@ -80,16 +78,8 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 				return c.deleteFromStore(cleanupCtx, dest, key)
 			})
 
-			_, copyErr := io.Copy(destWriter, srcStream)
-			var closeErr error
-			if copyErr != nil {
-				closeErr = destWriter.Abort()
-			} else {
-				closeErr = destWriter.Close()
-			}
-
-			if copyErr != nil || closeErr != nil {
-				c.errorLog("msg", "failed background set", "key", key, "dest_tier", destTierIndex, "copyErr", copyErr, "closeErr", closeErr)
+			if persistErr := copyCloseSourceThenCommit(destWriter, srcStream); persistErr != nil {
+				c.errorLog("msg", "failed background set", "key", key, "dest_tier", destTierIndex, "err", persistErr)
 				return
 			}
 			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
