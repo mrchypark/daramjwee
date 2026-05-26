@@ -2,6 +2,7 @@ package daramjwee
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 )
@@ -169,7 +170,17 @@ func (c *DaramjweeCache) statFromStore(ctx context.Context, store Store, key str
 }
 
 func (c *DaramjweeCache) fetchFromOrigin(ctx context.Context, fetcher Fetcher, oldMetadata *Metadata) (*FetchResult, error) {
-	return fetcher.Fetch(ctx, oldMetadata)
+	result, err := fetcher.Fetch(ctx, oldMetadata)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, errors.New("daramjwee: fetcher returned nil result")
+	}
+	if result.Body == nil {
+		return nil, errors.New("daramjwee: fetcher returned nil body")
+	}
+	return result, nil
 }
 
 func hasRealStore(store Store) bool {

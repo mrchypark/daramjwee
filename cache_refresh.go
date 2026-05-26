@@ -46,7 +46,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 			oldMetadata = &copied
 		}
 
-		result, err := fetcher.Fetch(refreshCtx, oldMetadata)
+		result, err := c.fetchFromOrigin(refreshCtx, fetcher, oldMetadata)
 		if err != nil {
 			if errors.Is(err, ErrCacheableNotFound) {
 				c.debugLog("msg", "re-caching as negative entry during background refresh", "key", key)

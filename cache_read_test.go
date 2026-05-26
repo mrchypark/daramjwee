@@ -1,6 +1,7 @@
 package daramjwee
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -30,6 +31,34 @@ func TestHandleConditionalLowerTierPromotionError_CancelsOnGenericPromotionFailu
 	require.Equal(t, "cache-v1", resp.Metadata.CacheTag)
 }
 
+func TestFetchFromOriginRejectsNilResult(t *testing.T) {
+	cache := &DaramjweeCache{}
+
+	_, err := cache.fetchFromOrigin(context.Background(), nilResultFetcher{}, nil)
+
+	require.ErrorContains(t, err, "fetcher returned nil result")
+}
+
+func TestFetchFromOriginRejectsNilBody(t *testing.T) {
+	cache := &DaramjweeCache{}
+
+	_, err := cache.fetchFromOrigin(context.Background(), nilBodyFetcher{}, nil)
+
+	require.ErrorContains(t, err, "fetcher returned nil body")
+}
+
 type noopReader struct{}
 
 func (noopReader) Read(p []byte) (int, error) { return 0, io.EOF }
+
+type nilResultFetcher struct{}
+
+func (nilResultFetcher) Fetch(context.Context, *Metadata) (*FetchResult, error) {
+	return nil, nil
+}
+
+type nilBodyFetcher struct{}
+
+func (nilBodyFetcher) Fetch(context.Context, *Metadata) (*FetchResult, error) {
+	return &FetchResult{Metadata: &Metadata{}}, nil
+}
