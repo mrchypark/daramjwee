@@ -31,6 +31,59 @@ func TestHandleConditionalLowerTierPromotionError_CancelsOnGenericPromotionFailu
 	require.Equal(t, "cache-v1", resp.Metadata.CacheTag)
 }
 
+func TestPromoteNegativeLowerTierHitJoinsWriterSetupAndSourceCloseErrors(t *testing.T) {
+	writerSetupErr := errors.New("writer setup failed")
+	sourceCloseErr := errors.New("source close failed")
+	cache := &DaramjweeCache{
+		tiers:  []Store{&cacheReadFailingBeginSetStore{err: writerSetupErr}},
+		logger: log.NewNopLogger(),
+	}
+	src := &closeErrorReadCloser{err: sourceCloseErr}
+	canceled := false
+
+	resp, err := cache.promoteNegativeLowerTierHit(
+		context.Background(),
+		context.Background(),
+		"key",
+		1,
+		src,
+		&Metadata{IsNegative: true},
+		&Metadata{IsNegative: true},
+		func() { canceled = true },
+		0,
+	)
+
+	require.Nil(t, resp)
+	require.ErrorIs(t, err, writerSetupErr)
+	require.ErrorIs(t, err, sourceCloseErr)
+	require.True(t, canceled)
+	require.True(t, src.closed)
+}
+
+func TestPromoteLowerTierHitToTopJoinsWriterSetupAndSourceCloseErrors(t *testing.T) {
+	writerSetupErr := errors.New("writer setup failed")
+	sourceCloseErr := errors.New("source close failed")
+	cache := &DaramjweeCache{
+		tiers:  []Store{&cacheReadFailingBeginSetStore{err: writerSetupErr}},
+		logger: log.NewNopLogger(),
+	}
+	src := &closeErrorReadCloser{err: sourceCloseErr}
+
+	err := cache.promoteLowerTierHitToTop(
+		context.Background(),
+		context.Background(),
+		"key",
+		1,
+		src,
+		&Metadata{},
+		0,
+	)
+
+	require.ErrorIs(t, err, writerSetupErr)
+	require.ErrorIs(t, err, sourceCloseErr)
+	require.True(t, src.closed)
+}
+
 func TestFetchFromOriginRejectsNilResult(t *testing.T) {
 	cache := &DaramjweeCache{}
 
@@ -50,6 +103,38 @@ func TestFetchFromOriginRejectsNilBody(t *testing.T) {
 type noopReader struct{}
 
 func (noopReader) Read(p []byte) (int, error) { return 0, io.EOF }
+
+type cacheReadFailingBeginSetStore struct {
+	err error
+}
+
+func (s *cacheReadFailingBeginSetStore) GetStream(context.Context, string) (io.ReadCloser, *Metadata, error) {
+	return nil, nil, ErrNotFound
+}
+
+func (s *cacheReadFailingBeginSetStore) BeginSet(context.Context, string, *Metadata) (WriteSink, error) {
+	return nil, s.err
+}
+
+func (s *cacheReadFailingBeginSetStore) Delete(context.Context, string) error {
+	return nil
+}
+
+func (s *cacheReadFailingBeginSetStore) Stat(context.Context, string) (*Metadata, error) {
+	return nil, ErrNotFound
+}
+
+type closeErrorReadCloser struct {
+	err    error
+	closed bool
+}
+
+func (r *closeErrorReadCloser) Read(p []byte) (int, error) { return 0, io.EOF }
+
+func (r *closeErrorReadCloser) Close() error {
+	r.closed = true
+	return r.err
+}
 
 type nilResultFetcher struct{}
 

@@ -164,7 +164,7 @@ func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx contex
 		closeErr := src.Close()
 		if closeErr != nil {
 			cancel()
-			return nil, closeErr
+			return nil, errors.Join(err, closeErr)
 		}
 		if errors.Is(err, ErrTopWriteInvalidated) {
 			cancel()
@@ -223,10 +223,8 @@ func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.C
 		if errors.Is(err, ErrTopWriteInvalidated) {
 			return lowerTierPromotionInvalidatedError{preserveBody: true}
 		}
-		if !errors.Is(err, ErrTopWriteInvalidated) {
-			_ = src.Close()
-		}
-		return err
+		closeErr := src.Close()
+		return errors.Join(err, closeErr)
 	}
 	if _, copyErr := io.Copy(writer, src); copyErr != nil {
 		abortErr := writer.Abort()
@@ -239,11 +237,11 @@ func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.C
 		return errors.Join(srcErr, abortErr)
 	}
 	closeErr := writer.Close()
-	if closeErr != nil || srcErr != nil {
+	if closeErr != nil {
 		if errors.Is(closeErr, ErrTopWriteInvalidated) {
-			return errors.Join(lowerTierPromotionInvalidatedError{preserveBody: false}, closeErr, srcErr)
+			return errors.Join(lowerTierPromotionInvalidatedError{preserveBody: false}, closeErr)
 		}
-		return errors.Join(closeErr, srcErr)
+		return closeErr
 	}
 	if destinations := c.regularFanoutDestinations(tierIndex); len(destinations) > 0 {
 		c.schedulePersistFromCurrentTop(requestCtx, key, destinations...)
