@@ -150,6 +150,48 @@ func TestPromoteRefreshFallbackToTopPreservesNegativeInvalidation(t *testing.T) 
 	require.ErrorIs(t, err, ErrTopWriteInvalidated)
 }
 
+func TestPromoteRefreshFallbackToTopSkipsMissingNegativeSource(t *testing.T) {
+	meta := &Metadata{CacheTag: "v1", IsNegative: true}
+	cache := &DaramjweeCache{
+		tiers: []Store{
+			&cacheReadFailingBeginSetStore{err: errors.New("unexpected BeginSet")},
+			&cacheReadSourceStore{metadata: meta, statErr: ErrNotFound},
+		},
+		logger: log.NewNopLogger(),
+	}
+
+	err := cache.promoteRefreshFallbackToTop(
+		context.Background(),
+		"key",
+		tierDestination{tierIndex: 1, store: cache.tiers[1]},
+		meta,
+		0,
+	)
+
+	require.NoError(t, err)
+}
+
+func TestPromoteRefreshFallbackToTopSkipsMissingSourceStream(t *testing.T) {
+	meta := &Metadata{CacheTag: "v1"}
+	cache := &DaramjweeCache{
+		tiers: []Store{
+			&cacheReadFailingBeginSetStore{err: errors.New("unexpected BeginSet")},
+			&cacheReadSourceStore{metadata: meta, getErr: ErrNotFound},
+		},
+		logger: log.NewNopLogger(),
+	}
+
+	err := cache.promoteRefreshFallbackToTop(
+		context.Background(),
+		"key",
+		tierDestination{tierIndex: 1, store: cache.tiers[1]},
+		meta,
+		0,
+	)
+
+	require.NoError(t, err)
+}
+
 func TestFetchFromOriginRejectsNilResult(t *testing.T) {
 	cache := &DaramjweeCache{}
 
@@ -206,9 +248,14 @@ type cacheReadSourceStore struct {
 	metadata *Metadata
 	body     []byte
 	closeErr error
+	getErr   error
+	statErr  error
 }
 
 func (s *cacheReadSourceStore) GetStream(context.Context, string) (io.ReadCloser, *Metadata, error) {
+	if s.getErr != nil {
+		return nil, nil, s.getErr
+	}
 	if s.closeErr != nil {
 		return &closeErrorReadCloser{err: s.closeErr}, cloneMetadata(s.metadata), nil
 	}
@@ -224,6 +271,9 @@ func (s *cacheReadSourceStore) Delete(context.Context, string) error {
 }
 
 func (s *cacheReadSourceStore) Stat(context.Context, string) (*Metadata, error) {
+	if s.statErr != nil {
+		return nil, s.statErr
+	}
 	return cloneMetadata(s.metadata), nil
 }
 

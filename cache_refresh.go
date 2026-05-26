@@ -148,6 +148,9 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 	if metaToPromote.IsNegative {
 		sourceMeta, err := c.statFromStore(ctx, source.store, key)
 		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
 			return err
 		}
 		if !sameCacheEntry(sourceMeta, fallbackMetadata) {
@@ -168,6 +171,9 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 
 	srcStream, sourceMeta, err := c.getStreamFromStore(ctx, source.store, key)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
 		return err
 	}
 	if !sameCacheEntry(sourceMeta, fallbackMetadata) {
