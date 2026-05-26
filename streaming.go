@@ -452,8 +452,8 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 	if tee.sinkErr != nil {
 		r.sinkErr = tee.sinkErr
 		r.traceEvent("stream_through_write_to_sink_error", "bytes", written, "err", tee.sinkErr)
-		if !errors.Is(err, tee.sinkErr) {
-			r.readErr = err
+		if readErr := withoutError(err, tee.sinkErr); readErr != nil {
+			r.readErr = readErr
 		}
 	} else {
 		r.readErr = err
@@ -527,11 +527,11 @@ func (r *fillReadCloser) readAfterClosedErrorLocked() error {
 	if r.sawEOF && r.readErr == nil {
 		return io.EOF
 	}
+	if r.readErr != nil {
+		return errors.Join(r.readErr, r.closeErr)
+	}
 	if r.closeErr != nil {
 		return r.closeErr
-	}
-	if r.readErr != nil {
-		return r.readErr
 	}
 	return io.ErrClosedPipe
 }

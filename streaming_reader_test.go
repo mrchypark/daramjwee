@@ -209,6 +209,26 @@ func TestStreamThrough_CopyWriterToJoinsSourceAndSinkErrors(t *testing.T) {
 	require.ErrorIs(t, err, sinkErr)
 	assert.EqualValues(t, 0, n)
 	assert.True(t, sink.aborted)
+
+	_, err = stream.Read(make([]byte, 1))
+	require.ErrorIs(t, err, readErr)
+}
+
+func TestStreamThrough_CopyFallbackJoinsSourceAndSinkErrors(t *testing.T) {
+	readErr := errors.New("source read failed")
+	sinkErr := errors.New("sink write failed")
+	src := &singleReadErrorCloser{data: []byte("hello"), err: readErr}
+	sink := &recordingWriteSink{writeErr: sinkErr}
+	stream := streamThrough(src, sink, nil, nil)
+
+	n, err := io.Copy(io.Discard, stream)
+	require.ErrorIs(t, err, readErr)
+	require.ErrorIs(t, err, sinkErr)
+	assert.EqualValues(t, 5, n)
+	assert.True(t, sink.aborted)
+
+	_, err = stream.Read(make([]byte, 1))
+	require.ErrorIs(t, err, readErr)
 }
 
 func TestStreamThrough_ConcurrentCloseWaitsAndReturnsFinalError(t *testing.T) {
