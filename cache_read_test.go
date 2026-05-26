@@ -1,6 +1,7 @@
 package daramjwee
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -84,6 +85,71 @@ func TestPromoteLowerTierHitToTopJoinsWriterSetupAndSourceCloseErrors(t *testing
 	require.True(t, src.closed)
 }
 
+func TestPromoteRefreshFallbackToTopPreservesInvalidationOnSourceCloseSuccess(t *testing.T) {
+	meta := &Metadata{CacheTag: "v1"}
+	cache := &DaramjweeCache{
+		tiers: []Store{
+			&cacheReadFailingBeginSetStore{err: ErrTopWriteInvalidated},
+			&cacheReadSourceStore{metadata: meta, body: []byte("value")},
+		},
+		logger: log.NewNopLogger(),
+	}
+
+	err := cache.promoteRefreshFallbackToTop(
+		context.Background(),
+		"key",
+		tierDestination{tierIndex: 1, store: cache.tiers[1]},
+		meta,
+		0,
+	)
+
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
+func TestPromoteRefreshFallbackToTopJoinsInvalidationAndSourceCloseError(t *testing.T) {
+	sourceCloseErr := errors.New("source close failed")
+	meta := &Metadata{CacheTag: "v1"}
+	cache := &DaramjweeCache{
+		tiers: []Store{
+			&cacheReadFailingBeginSetStore{err: ErrTopWriteInvalidated},
+			&cacheReadSourceStore{metadata: meta, body: []byte("value"), closeErr: sourceCloseErr},
+		},
+		logger: log.NewNopLogger(),
+	}
+
+	err := cache.promoteRefreshFallbackToTop(
+		context.Background(),
+		"key",
+		tierDestination{tierIndex: 1, store: cache.tiers[1]},
+		meta,
+		0,
+	)
+
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+	require.ErrorIs(t, err, sourceCloseErr)
+}
+
+func TestPromoteRefreshFallbackToTopPreservesNegativeInvalidation(t *testing.T) {
+	meta := &Metadata{CacheTag: "v1", IsNegative: true}
+	cache := &DaramjweeCache{
+		tiers: []Store{
+			&cacheReadFailingBeginSetStore{err: ErrTopWriteInvalidated},
+			&cacheReadSourceStore{metadata: meta},
+		},
+		logger: log.NewNopLogger(),
+	}
+
+	err := cache.promoteRefreshFallbackToTop(
+		context.Background(),
+		"key",
+		tierDestination{tierIndex: 1, store: cache.tiers[1]},
+		meta,
+		0,
+	)
+
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
 func TestFetchFromOriginRejectsNilResult(t *testing.T) {
 	cache := &DaramjweeCache{}
 
@@ -134,6 +200,31 @@ func (r *closeErrorReadCloser) Read(p []byte) (int, error) { return 0, io.EOF }
 func (r *closeErrorReadCloser) Close() error {
 	r.closed = true
 	return r.err
+}
+
+type cacheReadSourceStore struct {
+	metadata *Metadata
+	body     []byte
+	closeErr error
+}
+
+func (s *cacheReadSourceStore) GetStream(context.Context, string) (io.ReadCloser, *Metadata, error) {
+	if s.closeErr != nil {
+		return &closeErrorReadCloser{err: s.closeErr}, cloneMetadata(s.metadata), nil
+	}
+	return io.NopCloser(bytes.NewReader(s.body)), cloneMetadata(s.metadata), nil
+}
+
+func (s *cacheReadSourceStore) BeginSet(context.Context, string, *Metadata) (WriteSink, error) {
+	return nil, errors.New("unexpected BeginSet")
+}
+
+func (s *cacheReadSourceStore) Delete(context.Context, string) error {
+	return nil
+}
+
+func (s *cacheReadSourceStore) Stat(context.Context, string) (*Metadata, error) {
+	return cloneMetadata(s.metadata), nil
 }
 
 type nilResultFetcher struct{}

@@ -155,9 +155,6 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 		}
 		writer, err := c.setStreamToTopStoreBestEffortWithGeneration(ctx, key, metaToPromote, &expectedGeneration)
 		if err != nil {
-			if errors.Is(err, ErrTopWriteInvalidated) {
-				return nil
-			}
 			return err
 		}
 		if err := writer.Close(); err != nil {
@@ -180,9 +177,6 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 	writer, err := c.setStreamToTopStoreBestEffortWithGeneration(ctx, key, metaToPromote, &expectedGeneration)
 	if err != nil {
 		closeErr := srcStream.Close()
-		if errors.Is(err, ErrTopWriteInvalidated) {
-			return closeErr
-		}
 		return errors.Join(err, closeErr)
 	}
 
