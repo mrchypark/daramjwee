@@ -558,6 +558,8 @@ func autoFinalizeError(err error) error {
 	return err
 }
 
+// withoutError recursively unwraps err and removes target from joined errors.
+// Custom wrapper context around target may be discarded when only child errors remain.
 func withoutError(err, target error) error {
 	if err == nil {
 		return nil
