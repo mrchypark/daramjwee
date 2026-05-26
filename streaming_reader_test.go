@@ -3,6 +3,7 @@ package daramjwee
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -118,6 +119,26 @@ func TestStreamThrough_AutoCloseReportsInvalidationCleanupError(t *testing.T) {
 	require.ErrorIs(t, err, cleanupErr)
 	require.ErrorIs(t, stream.Close(), cleanupErr)
 	require.ErrorIs(t, stream.Close(), ErrTopWriteInvalidated)
+}
+
+func TestStreamThrough_AutoClosePreservesInvalidationCleanupContext(t *testing.T) {
+	cleanupErr := errors.New("cleanup failed")
+	metadataErr := errors.New("metadata cleanup failed")
+	wrappedCleanupErr := fmt.Errorf("cleanup context: %w", errors.Join(cleanupErr, metadataErr))
+	sink := &recordingWriteSink{closeErr: errors.Join(ErrTopWriteInvalidated, wrappedCleanupErr)}
+	stream := streamThrough(io.NopCloser(bytes.NewReader([]byte("hello"))), sink, nil, nil)
+
+	_, err := io.ReadAll(stream)
+	require.ErrorIs(t, err, cleanupErr)
+	require.ErrorIs(t, err, metadataErr)
+	require.NotErrorIs(t, err, ErrTopWriteInvalidated)
+	require.ErrorContains(t, err, "cleanup context")
+
+	closeErr := stream.Close()
+	require.ErrorIs(t, closeErr, cleanupErr)
+	require.ErrorIs(t, closeErr, metadataErr)
+	require.ErrorIs(t, closeErr, ErrTopWriteInvalidated)
+	require.ErrorContains(t, closeErr, "cleanup context")
 }
 
 func TestStreamThrough_CopyUsesSourceWriterTo(t *testing.T) {

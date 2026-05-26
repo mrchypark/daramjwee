@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1494,6 +1495,48 @@ func TestCache_PartialMissReadCloseDoesNotPublishToHot(t *testing.T) {
 
 	_, _, err = hot.GetStream(context.Background(), "partial-miss-key")
 	assert.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func TestCache_PartialMissStreamDoesNotBlockSameKeySet(t *testing.T) {
+	hot := memstore.New(0, nil)
+	source := newBlockingReadCloser([]byte("origin"), []byte("-value"))
+	fetcher := &blockingSourceFetcher{source: source, metadata: &daramjwee.Metadata{CacheTag: "origin-v1"}}
+
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(hot), daramjwee.WithOpTimeout(2*time.Second))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	resp, err := cache.Get(context.Background(), "same-key", daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	buf := make([]byte, len("origin"))
+	n, err := resp.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, len("origin"), n)
+	require.Equal(t, "origin", string(buf[:n]))
+
+	setCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	sink, err := cache.Set(setCtx, "same-key", &daramjwee.Metadata{CacheTag: "user-v2"})
+	require.NoError(t, err)
+	_, err = sink.Write([]byte("user-value"))
+	require.NoError(t, err)
+	require.NoError(t, sink.Close())
+
+	source.Release()
+	rest, err := io.ReadAll(resp)
+	require.NoError(t, err)
+	require.Equal(t, "-value", string(rest))
+	require.ErrorIs(t, resp.Close(), daramjwee.ErrTopWriteInvalidated)
+
+	reader, meta, err := hot.GetStream(context.Background(), "same-key")
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, "user-value", string(body))
+	require.Equal(t, "user-v2", meta.CacheTag)
 }
 
 func TestCache_PartialColdHitReadCloseDoesNotPublishToHot(t *testing.T) {

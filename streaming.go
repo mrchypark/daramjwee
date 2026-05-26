@@ -50,15 +50,21 @@ type fillReadCloser struct {
 }
 
 type topFillSink struct {
-	sink  *coordinatedTopWriteSink
-	coord *writeCoordinator
-	timer *time.Timer
+	sink        WriteSink
+	coord       *writeCoordinator
+	timer       *time.Timer
+	release     func()
+	cancelBegin func()
+	preemptCh   chan struct{}
+	preemptOnce sync.Once
 
-	mu         sync.Mutex
-	done       bool
-	preempted  bool
-	registered bool
-	err        error
+	mu                   sync.Mutex
+	done                 bool
+	preempted            bool
+	registered           bool
+	reportPreemptOnClose bool
+	wrote                bool
+	err                  error
 }
 
 type streamTeeWriter struct {
@@ -97,8 +103,8 @@ func newStreamingReadCloser(src io.ReadCloser, sink WriteSink, cancel func(), on
 	}
 }
 
-func newPendingTopFillSink(coord *writeCoordinator) *topFillSink {
-	return &topFillSink{coord: coord}
+func newPendingTopFillSink(coord *writeCoordinator, release func(), cancelBegin func()) *topFillSink {
+	return &topFillSink{coord: coord, release: release, cancelBegin: cancelBegin, preemptCh: make(chan struct{})}
 }
 
 func (s *topFillSink) startLease(timeout time.Duration) {
@@ -114,7 +120,7 @@ func (s *topFillSink) startLease(timeout time.Duration) {
 	}
 }
 
-func (s *topFillSink) attach(sink *coordinatedTopWriteSink) bool {
+func (s *topFillSink) attach(sink WriteSink) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.done || s.preempted {
@@ -135,7 +141,9 @@ func (s *topFillSink) failBeginSet(err error) {
 	s.stopTimerLocked()
 	s.unregisterLocked()
 	s.mu.Unlock()
-	s.coord.writeMu.Unlock()
+	if s.release != nil {
+		s.release()
+	}
 }
 
 func (s *topFillSink) Write(p []byte) (int, error) {
@@ -148,6 +156,9 @@ func (s *topFillSink) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	n, err := writeAllCount(s.sink, p)
+	if n > 0 {
+		s.wrote = true
+	}
 	if err != nil {
 		s.err = err
 		return n, err
@@ -159,6 +170,10 @@ func (s *topFillSink) Close() error {
 	s.mu.Lock()
 	if s.done {
 		if s.preempted {
+			if s.reportPreemptOnClose && s.wrote {
+				s.mu.Unlock()
+				return ErrTopWriteInvalidated
+			}
 			s.mu.Unlock()
 			return nil
 		}
@@ -168,6 +183,12 @@ func (s *topFillSink) Close() error {
 	}
 	if s.preempted {
 		s.done = true
+		if s.reportPreemptOnClose && s.wrote {
+			s.err = errors.Join(s.err, ErrTopWriteInvalidated)
+			err := s.err
+			s.mu.Unlock()
+			return err
+		}
 		s.mu.Unlock()
 		return nil
 	}
@@ -192,10 +213,6 @@ func (s *topFillSink) Close() error {
 func (s *topFillSink) Abort() error {
 	s.mu.Lock()
 	if s.done {
-		if s.preempted {
-			s.mu.Unlock()
-			return nil
-		}
 		err := s.err
 		s.mu.Unlock()
 		return err
@@ -231,25 +248,46 @@ func (s *topFillSink) Preempt() error {
 		return err
 	}
 	s.preempted = true
+	s.preemptOnce.Do(func() { close(s.preemptCh) })
 	s.stopTimerLocked()
 	s.unregisterLocked()
 	if s.sink == nil {
+		cancelBegin := s.cancelBegin
 		err := s.err
 		s.mu.Unlock()
+		if cancelBegin != nil {
+			cancelBegin()
+		}
 		return err
 	}
 	s.done = true
 	sink := s.sink
 	s.mu.Unlock()
 
+	if _, ok := sink.(*coordinatedStagedTopWriteSink); ok {
+		go func() {
+			_ = s.abortPreemptedSink(sink)
+		}()
+		return nil
+	}
+	return s.abortPreemptedSink(sink)
+}
+
+func (s *topFillSink) abortPreemptedSink(sink WriteSink) error {
 	err := sink.Abort()
 	s.mu.Lock()
-	s.err = err
+	if err != nil {
+		s.err = errors.Join(s.err, err)
+	}
 	s.mu.Unlock()
 	return err
 }
 
-func (s *topFillSink) finishPreemptedAttach(sink *coordinatedTopWriteSink) error {
+func (s *topFillSink) preemptedSignal() <-chan struct{} {
+	return s.preemptCh
+}
+
+func (s *topFillSink) finishPreemptedAttach(sink WriteSink) error {
 	err := sink.Abort()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -509,6 +547,9 @@ func autoFinalizeError(err error) error {
 func withoutError(err, target error) error {
 	if err == nil {
 		return nil
+	}
+	if !errors.Is(err, target) {
+		return err
 	}
 	switch unwrapped := err.(type) {
 	case interface{ Unwrap() []error }:

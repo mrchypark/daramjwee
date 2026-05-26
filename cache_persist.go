@@ -72,7 +72,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 				c.errorLog("msg", "failed to get writer for destination store", "key", key, "dest_tier", destTierIndex, "err", err)
 				return
 			}
-			destWriter = newConditionalGenerationWriteSink(destWriter, c.topWrites.coordinator(key), expectedGeneration, func() error {
+			destWriter = newConditionalGenerationWriteSink(destWriter, c.topWrites.coordinator(key), expectedGeneration, c.closeTimeout, func() error {
 				cleanupCtx, cancel := c.newCtxWithTimeout(valueCtx)
 				defer cancel()
 				return c.deleteFromStore(cleanupCtx, dest, key)

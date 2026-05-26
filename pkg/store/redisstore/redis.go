@@ -87,6 +87,9 @@ func (rs *RedisStore) getMetadata(ctx context.Context, key string) (*daramjwee.M
 
 // GetStream retrieves an object and its metadata as a stream from Redis.
 func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
@@ -127,9 +130,20 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 
 // BeginSet returns a sink that streams data into Redis.
 func (rs *RedisStore) BeginSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.WriteSink, error) {
+	return rs.beginSet(ctx, key, metadata, "begin set")
+}
+
+func (rs *RedisStore) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	return rs.beginSet(ctx, key, metadata, "begin staged set")
+}
+
+func (rs *RedisStore) beginSet(ctx context.Context, key string, metadata *daramjwee.Metadata, operation string) (*redisStoreWriter, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("redisstore: %s: %w", operation, ctx.Err())
 	default:
 	}
 
@@ -145,6 +159,9 @@ func (rs *RedisStore) BeginSet(ctx context.Context, key string, metadata *daramj
 
 // Delete removes an object and its metadata from Redis.
 func (rs *RedisStore) Delete(ctx context.Context, key string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -155,6 +172,9 @@ func (rs *RedisStore) Delete(ctx context.Context, key string) error {
 
 // Stat retrieves metadata for an object without its data from Redis.
 func (rs *RedisStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -193,24 +213,37 @@ func (w *redisStoreWriter) Write(p []byte) (n int, err error) {
 
 // Close commits the metadata to Redis.
 func (w *redisStoreWriter) Close() error {
+	return w.Commit(w.ctx)
+}
+
+func (w *redisStoreWriter) Commit(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !w.markDone() {
 		return nil
 	}
 	select {
+	case <-ctx.Done():
+		_ = w.rs.client.Del(context.Background(), w.tempKey).Err()
+		return fmt.Errorf("redisstore: commit: %w", ctx.Err())
 	case <-w.ctx.Done():
 		_ = w.rs.client.Del(context.Background(), w.tempKey).Err()
-		return w.ctx.Err()
+		return fmt.Errorf("redisstore: commit: %w", w.ctx.Err())
 	default:
 	}
 
 	metaBytes, err := json.Marshal(w.metadata)
 	if err != nil {
 		level.Error(w.rs.logger).Log("msg", "failed to marshal metadata", "key", w.key, "err", err)
-		return err
+		if delErr := w.rs.client.Del(context.Background(), w.tempKey).Err(); delErr != nil {
+			level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
+		}
+		return fmt.Errorf("redisstore: marshal metadata: %w", err)
 	}
 
 	_, err = w.rs.client.Eval(
-		w.ctx,
+		ctx,
 		commitLuaScript,
 		[]string{w.rs.DataKey(w.key), w.rs.MetaKey(w.key), w.tempKey},
 		metaBytes,
@@ -218,10 +251,10 @@ func (w *redisStoreWriter) Close() error {
 	if err != nil {
 		level.Error(w.rs.logger).Log("msg", "failed to commit data and metadata", "key", w.key, "err", err)
 		// Attempt to clean up the temporary key
-		if delErr := w.rs.client.Del(w.ctx, w.tempKey).Err(); delErr != nil {
+		if delErr := w.rs.client.Del(context.Background(), w.tempKey).Err(); delErr != nil {
 			level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
 		}
-		return err
+		return fmt.Errorf("redisstore: commit: %w", err)
 	}
 
 	return nil
