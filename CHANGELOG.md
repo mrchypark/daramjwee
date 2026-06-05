@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### ⚠️ Breaking Changes & API Updates
+
+*   **The experimental SQLite store package is not part of the current public surface**: `pkg/store/sqlitestore` is not included in this release line.
+
+### 🧰 Migration Notes
+
+*   If you tested `github.com/mrchypark/daramjwee/pkg/store/sqlitestore` from a branch or non-canonical tag snapshot, remove that import before upgrading on this release line.
+
 ## v0.8.0
 
 ### ⚠️ Breaking Changes & API Updates
