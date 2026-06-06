@@ -1,6 +1,7 @@
 package segment
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -60,19 +61,22 @@ func (w *Writer) Seal() (string, int64, error) {
 
 func (w *Writer) Abort() error {
 	closeErr := w.file.Close()
-	removeErr := os.Remove(w.activePath)
-	if os.IsNotExist(removeErr) {
-		removeErr = nil
+	removeErr := errors.Join(removeAndSync(w.activePath), removeAndSync(w.sealedPath))
+	if errors.Is(closeErr, os.ErrClosed) {
+		return removeErr
 	}
-	if removeErr == nil {
-		if err := syncDir(filepath.Dir(w.activePath)); err != nil {
-			removeErr = err
-		}
+	return errors.Join(closeErr, removeErr)
+}
+
+func removeAndSync(path string) error {
+	err := os.Remove(path)
+	if err == nil {
+		return syncDir(filepath.Dir(path))
 	}
-	if closeErr != nil {
-		return closeErr
+	if os.IsNotExist(err) {
+		return nil
 	}
-	return removeErr
+	return err
 }
 
 func syncDir(dir string) error {

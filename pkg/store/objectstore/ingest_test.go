@@ -2,6 +2,7 @@ package objectstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -833,4 +834,111 @@ func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 	segments, globErr := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
 	require.NoError(t, globErr)
 	require.Empty(t, segments)
+}
+
+func TestStore_CommitSealFailureCleansStagingSegment(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	sealErr := errors.New("seal failed")
+	store.openSegmentWriter = func(root, shard, segmentID string) (segmentWriter, error) {
+		return newFailingSealSegmentWriter(root, shard, segmentID, sealErr, nil)
+	}
+
+	writer, err := store.BeginSet(ctx, "seal-failure", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+
+	err = writer.Close()
+	require.ErrorIs(t, err, sealErr)
+	require.ErrorContains(t, err, "objectstore: commit: seal segment")
+
+	activeSegments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "active", "*", "*.seg"))
+	require.NoError(t, err)
+	require.Empty(t, activeSegments)
+	sealedSegments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
+	require.NoError(t, err)
+	require.Empty(t, sealedSegments)
+}
+
+func TestStore_CommitSealFailureReturnsCleanupError(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	sealErr := errors.New("seal failed")
+	cleanupErr := errors.New("cleanup failed")
+	store.openSegmentWriter = func(root, shard, segmentID string) (segmentWriter, error) {
+		return newFailingSealSegmentWriter(root, shard, segmentID, sealErr, cleanupErr)
+	}
+
+	writer, err := store.BeginSet(ctx, "seal-cleanup-failure", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+
+	err = writer.Close()
+	require.ErrorIs(t, err, sealErr)
+	require.ErrorIs(t, err, cleanupErr)
+	require.ErrorContains(t, err, "objectstore: commit: seal segment")
+}
+
+type failingSealSegmentWriter struct {
+	activePath string
+	sealedPath string
+	sealErr    error
+	cleanupErr error
+}
+
+func newFailingSealSegmentWriter(root, shard, segmentID string, sealErr, cleanupErr error) (*failingSealSegmentWriter, error) {
+	activeDir := filepath.Join(root, "ingest", "active", shard)
+	sealedDir := filepath.Join(root, "ingest", "sealed", shard)
+	if err := os.MkdirAll(activeDir, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(sealedDir, 0o755); err != nil {
+		return nil, err
+	}
+	activePath := filepath.Join(activeDir, segmentID+".seg")
+	if err := os.WriteFile(activePath, nil, 0o644); err != nil {
+		return nil, err
+	}
+	return &failingSealSegmentWriter{
+		activePath: activePath,
+		sealedPath: filepath.Join(sealedDir, segmentID+".seg"),
+		sealErr:    sealErr,
+		cleanupErr: cleanupErr,
+	}, nil
+}
+
+func (w *failingSealSegmentWriter) Write(p []byte) (int, error) {
+	file, err := os.OpenFile(w.activePath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	return file.Write(p)
+}
+
+func (w *failingSealSegmentWriter) Seal() (string, int64, error) {
+	if err := os.Rename(w.activePath, w.sealedPath); err != nil {
+		return "", 0, err
+	}
+	return "", 0, w.sealErr
+}
+
+func (w *failingSealSegmentWriter) Abort() error {
+	return errors.Join(removeLocalSegment(w.activePath), removeLocalSegment(w.sealedPath), w.cleanupErr)
 }

@@ -2,6 +2,7 @@ package objectstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -53,17 +54,15 @@ func (w *writer) Commit(ctx context.Context) error {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
-		_ = w.segment.Abort()
-		return fmt.Errorf("objectstore: commit: %w", err)
+		return fmt.Errorf("objectstore: commit: %w", w.abortWith(err))
 	}
 	if err := w.ctx.Err(); err != nil {
-		_ = w.segment.Abort()
-		return fmt.Errorf("objectstore: commit: %w", err)
+		return fmt.Errorf("objectstore: commit: %w", w.abortWith(err))
 	}
 
 	sealedPath, size, err := w.segment.Seal()
 	if err != nil {
-		return err
+		return fmt.Errorf("objectstore: commit: seal segment: %w", w.abortWith(err))
 	}
 	metadata := daramjwee.Metadata{}
 	if w.metadata != nil {
@@ -93,6 +92,13 @@ func (w *writer) Abort() error {
 		return nil
 	}
 	return w.segment.Abort()
+}
+
+func (w *writer) abortWith(err error) error {
+	if abortErr := w.segment.Abort(); abortErr != nil {
+		return errors.Join(err, abortErr)
+	}
+	return err
 }
 
 func (w *writer) markDone() bool {

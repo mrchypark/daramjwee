@@ -5,10 +5,15 @@
 It fits into the same ordered-tier API as the other backends:
 
 ```go
+tier0, err := filestore.New("/var/lib/daramjwee/tier0", log.With(logger, "tier", "0"))
+if err != nil {
+    return err
+}
+
 cache, err := daramjwee.New(
     logger,
     daramjwee.WithTiers(
-        filestore.New("/var/lib/daramjwee/tier0", log.With(logger, "tier", "0")),
+        tier0,
         objectstore.New(
             bucket,
             log.With(logger, "tier", "1"),
@@ -38,7 +43,7 @@ That means these two setups behave differently:
 - `WithTiers(objectstore.New(...))`
   - Remote cache can be served directly.
   - Local disk is used as spool/catalog workspace.
-- `WithTiers(filestore.New(...), objectstore.New(...))`
+- `WithTiers(fileTier, objectstore.New(...))`
   - First request after a cold start can be a remote `objectstore` hit.
   - That request repopulates `FileStore`, so later requests can hit local disk in tier 0.
 

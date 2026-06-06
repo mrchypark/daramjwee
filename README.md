@@ -305,10 +305,15 @@ The most important design point is that `objectstore.WithDir(...)` is **not** a 
 Typical ordered-tier layout:
 
 ```go
+tier0, err := filestore.New("/var/lib/daramjwee/tier0", log.With(logger, "tier", "0"))
+if err != nil {
+    return err
+}
+
 cache, err := daramjwee.New(
     logger,
     daramjwee.WithTiers(
-        filestore.New("/var/lib/daramjwee/tier0", log.With(logger, "tier", "0")),
+        tier0,
         objectstore.New(
             bucket,
             log.With(logger, "tier", "1"),
