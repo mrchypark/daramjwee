@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.9.1
 
 ### ⚠️ Breaking Changes & API Updates
 
@@ -9,6 +9,20 @@
 ### 🧰 Migration Notes
 
 *   If you tested `github.com/mrchypark/daramjwee/pkg/store/sqlitestore` from a branch or non-canonical tag snapshot, remove that import before upgrading on this release line.
+
+### 🐛 Bug Fixes & Refinements
+
+*   **Objectstore seal-failure cleanup is stricter**: failed segment commits now abort active and sealed staging paths, preserve seal and cleanup errors with commit context, sync successfully removed segment directories independently, and avoid redundant directory syncs when a staged file is already absent.
+*   **Segment cleanup regressions are pinned by focused tests**: added coverage for sealed staging cleanup, joined cleanup errors, root-safe Unix permission behavior, and Windows test compilation safety.
+
+### 📚 Documentation & Examples
+
+*   **Objectstore tier examples now handle local tier initialization errors**: README examples assign and check `filestore.New(...)` before passing the tier into `WithTiers(...)`.
+
+### ✅ Verification
+
+*   `go test ./...`
+*   `GOOS=windows go test -c ./pkg/store/objectstore/internal/segment`
 
 ## v0.8.0
 
