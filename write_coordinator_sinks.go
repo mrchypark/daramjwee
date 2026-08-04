@@ -1,6 +1,7 @@
 package daramjwee
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -20,66 +21,20 @@ type coordinatedTopWriteSink struct {
 
 func (s *coordinatedTopWriteSink) Close() error {
 	s.once.Do(func() {
-		defer s.coord.releaseWrite()
-		waitCtx, cancelWait := newCoordinatorWaitContext(s.waitTimeout)
-		defer cancelWait()
-
-		if err := s.coord.waitForNoActiveDeletes(waitCtx); err != nil {
-			s.coord.unregisterReservation(s.generation)
-			abortErr := s.WriteSink.Abort()
-			s.err = err
-			if abortErr != nil {
-				s.err = errors.Join(s.err, abortErr)
-			}
-			return
-		}
-
-		s.coord.stateMu.Lock()
-		if s.coord.committedGeneration > s.generation {
-			s.coord.removeReservationLocked(s.generation)
-			s.coord.stateMu.Unlock()
-			abortErr := s.WriteSink.Abort()
-			s.err = ErrTopWriteInvalidated
-			if abortErr != nil {
-				s.err = errors.Join(s.err, abortErr)
-			}
-			return
-		}
-		s.coord.stateMu.Unlock()
-
-		closeErr := s.WriteSink.Close()
-
-		if closeErr != nil {
-			s.coord.stateMu.Lock()
-			s.coord.removeReservationLocked(s.generation)
-			s.coord.stateMu.Unlock()
-			s.err = closeErr
-			return
-		}
-
-		s.coord.stateMu.Lock()
-		if s.coord.committedGeneration < s.generation {
-			s.coord.committedGeneration = s.generation
-		}
-		s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration)
-		s.coord.stateMu.Unlock()
-
-		postCloseWaitCtx, cancelPostCloseWait := newCoordinatorWaitContext(s.waitTimeout)
-		defer cancelPostCloseWait()
-		_ = s.coord.waitForNoActiveDeletes(postCloseWaitCtx)
-
-		s.coord.stateMu.Lock()
-		if s.coord.committedGeneration > s.generation {
-			s.coord.stateMu.Unlock()
-			s.err = ErrTopWriteInvalidated
-			if s.onInvalidated != nil {
-				if cleanupErr := s.onInvalidated(); cleanupErr != nil {
-					s.err = errors.Join(s.err, cleanupErr)
-				}
-			}
-			return
-		}
-		s.coord.stateMu.Unlock()
+		err := closeCore(context.Background(), closeCoreParams{
+			generation:     s.generation,
+			coord:          s.coord,
+			waitTimeout:    s.waitTimeout,
+			onInvalidated:  s.onInvalidated,
+			advanceGen:     true,
+		}, func(ctx context.Context) error {
+			return s.WriteSink.Close()
+		}, func() error {
+			return s.WriteSink.Abort()
+		}, func() {
+			s.coord.releaseWrite()
+		})
+		s.err = err
 	})
 	return s.err
 }
@@ -237,54 +192,18 @@ func newConditionalGenerationWriteSink(sink WriteSink, coord *writeCoordinator, 
 
 func (s *conditionalGenerationWriteSink) Close() error {
 	s.once.Do(func() {
-		waitCtx, cancelWait := newCoordinatorWaitContext(s.waitTimeout)
-		defer cancelWait()
-
-		if err := s.coord.waitForNoActiveDeletes(waitCtx); err != nil {
-			abortErr := s.WriteSink.Abort()
-			s.err = err
-			if abortErr != nil {
-				s.err = errors.Join(s.err, abortErr)
-			}
-			return
-		}
-
-		s.coord.stateMu.Lock()
-		if s.coord.committedGeneration > s.generation {
-			s.coord.stateMu.Unlock()
-			abortErr := s.WriteSink.Abort()
-			s.err = ErrTopWriteInvalidated
-			if abortErr != nil {
-				s.err = errors.Join(s.err, abortErr)
-			}
-			return
-		}
-		s.coord.stateMu.Unlock()
-
-		closeErr := s.WriteSink.Close()
-
-		if closeErr != nil {
-			s.err = closeErr
-			return
-		}
-
-		postCloseWaitCtx, cancelPostCloseWait := newCoordinatorWaitContext(s.waitTimeout)
-		defer cancelPostCloseWait()
-		_ = s.coord.waitForNoActiveDeletes(postCloseWaitCtx)
-
-		s.coord.stateMu.Lock()
-		if s.coord.committedGeneration > s.generation {
-			s.coord.stateMu.Unlock()
-			s.err = ErrTopWriteInvalidated
-			if s.onInvalidated != nil {
-				if cleanupErr := s.onInvalidated(); cleanupErr != nil {
-					s.err = errors.Join(s.err, cleanupErr)
-				}
-			}
-			return
-		}
-		s.err = nil
-		s.coord.stateMu.Unlock()
+		err := closeCore(context.Background(), closeCoreParams{
+			generation:     s.generation,
+			coord:          s.coord,
+			waitTimeout:    s.waitTimeout,
+			onInvalidated:  s.onInvalidated,
+			advanceGen:     false, // conditional sinks never advance generation
+		}, func(ctx context.Context) error {
+			return s.WriteSink.Close()
+		}, func() error {
+			return s.WriteSink.Abort()
+		}, nil) // conditional sinks don't hold a lease
+		s.err = err
 	})
 	return s.err
 }

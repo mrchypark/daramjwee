@@ -79,25 +79,9 @@ func (c *DaramjweeCache) handleLowerTierHit(p lowerTierHitParams) (*GetResponse,
 	}
 
 	isStale := c.isTierCachedStale(p.meta, p.tierIndex)
+	decision := c.decideLowerTierHit(p, p.meta, isStale)
 
-	// When higher tiers are dirty, serve from this tier without promotion.
-	if !p.higherTiersClean {
-		return c.serveLowerTierWithoutPromotion(p, isStale)
-	}
-
-	if c.isConditionalRequestSatisfied(p.req, p.meta) {
-		return c.handleConditionalLowerTierHit(p.requestCtx, p.setupCtx, p.key, p.tierIndex, p.fetcher, p.src, p.meta, metaToPromote, p.cancel, isStale, p.expectedGeneration)
-	}
-	if p.meta.IsNegative {
-		if isStale {
-			return c.handleStaleLowerTierHit(p.requestCtx, p.key, p.tierIndex, p.fetcher, p.src, p.meta, p.cancel, p.expectedGeneration)
-		}
-		return c.promoteNegativeLowerTierHit(p.requestCtx, p.setupCtx, p.key, p.tierIndex, p.src, p.meta, metaToPromote, p.cancel, p.expectedGeneration)
-	}
-	if isStale {
-		return c.handleStaleLowerTierHit(p.requestCtx, p.key, p.tierIndex, p.fetcher, p.src, p.meta, p.cancel, p.expectedGeneration)
-	}
-	return c.promotePositiveLowerTierHit(p.requestCtx, p.setupCtx, p.key, p.tierIndex, p.src, p.meta, metaToPromote, p.cancel, p.expectedGeneration), nil
+	return c.executeLowerTierDecision(p, decision, metaToPromote, isStale)
 }
 
 // serveLowerTierWithoutPromotion serves data from a lower tier when higher tiers
