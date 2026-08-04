@@ -13,6 +13,10 @@ import (
 
 func (s *Store) Compact(ctx context.Context, olderThan time.Duration) (SweepStats, error) {
 	var stats SweepStats
+	if err := s.remoteState.acquire(ctx); err != nil {
+		return stats, err
+	}
+	defer s.remoteState.release()
 
 	reachable, err := s.collectReachableRemotePaths(ctx, &stats)
 	if err != nil {

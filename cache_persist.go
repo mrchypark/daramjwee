@@ -3,7 +3,20 @@ package daramjwee
 import (
 	"context"
 	"errors"
+
+	"github.com/mrchypark/daramjwee/internal/worker"
 )
+
+type backgroundRuntimeWithDropCleanup interface {
+	SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool
+}
+
+func submitBackgroundJob(runtime backgroundRuntime, cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
+	if dropAware, ok := runtime.(backgroundRuntimeWithDropCleanup); ok {
+		return dropAware.SubmitWithDropCleanup(cacheID, kind, job, onDrop)
+	}
+	return runtime.Submit(cacheID, kind, job)
+}
 
 func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {
 	if len(c.tiers) <= 1 {
@@ -34,10 +47,12 @@ func (c *DaramjweeCache) regularFanoutDestinations(sourceIndex int) []tierDestin
 }
 
 func (c *DaramjweeCache) schedulePersistFromCurrentTop(ctx context.Context, key string, destinations ...tierDestination) {
-	c.schedulePersistFromTop(ctx, key, c.currentTopWriteGeneration(key), destinations...)
+	expectedGeneration := c.currentTopWriteGeneration(key)
+	defer expectedGeneration.release()
+	c.schedulePersistFromTop(ctx, key, expectedGeneration, destinations...)
 }
 
-func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string, expectedGeneration uint64, destinations ...tierDestination) {
+func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string, expectedGeneration *topWriteGeneration, destinations ...tierDestination) {
 	srcStore := c.topWriteStore()
 	if !hasRealStore(srcStore) || len(destinations) == 0 {
 		return
@@ -56,7 +71,9 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 
 		destTierIndex := destination.tierIndex
 		dest := destStore
+		jobGeneration := expectedGeneration.retain()
 		job := func(jobCtx context.Context) {
+			defer jobGeneration.release()
 			persistCtx := overlayContextValues(jobCtx, valueCtx)
 			c.infoLog("msg", "starting background set", "key", key, "dest_tier", destTierIndex)
 			srcStream, meta, err := c.getStreamFromStore(persistCtx, srcStore, key)
@@ -79,11 +96,13 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 				c.errorLog("msg", "failed to get writer for destination store", "key", key, "dest_tier", destTierIndex, "err", err)
 				return
 			}
-			destWriter = newConditionalGenerationWriteSink(destWriter, c.topWrites.coordinator(key), expectedGeneration, c.config.closeTimeout, func() error {
+			jobGeneration.coord.retainReference()
+			destWriter = newConditionalGenerationWriteSink(destWriter, jobGeneration.coord, jobGeneration.generation, c.config.closeTimeout, func() error {
 				cleanupCtx, cancel := c.newCtxWithTimeout(valueCtx)
 				defer cancel()
 				return c.deleteFromStore(cleanupCtx, dest, key)
 			})
+			defer destWriter.Abort()
 
 			if persistErr := copyCloseSourceThenCommit(destWriter, srcStream); persistErr != nil {
 				if errors.Is(persistErr, ErrTopWriteInvalidated) {
@@ -96,7 +115,8 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
 		}
 
-		if !c.runtime.Submit(c.cacheID, JobKindPersist, job) {
+		if !submitBackgroundJob(c.runtime, c.cacheID, JobKindPersist, job, jobGeneration.release) {
+			jobGeneration.release()
 			c.warnLog("msg", "background set rejected", "key", key, "dest_tier", destTierIndex)
 		}
 	}

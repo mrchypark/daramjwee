@@ -11,6 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func testTopWriteGeneration(t *testing.T, cache *DaramjweeCache, key string) *topWriteGeneration {
+	t.Helper()
+	observed := cache.currentTopWriteGeneration(key)
+	t.Cleanup(observed.release)
+	return observed
+}
+
 func TestHandleConditionalLowerTierPromotionError_CancelsOnGenericPromotionFailure(t *testing.T) {
 	cache := &DaramjweeCache{
 		logger: log.NewNopLogger(),
@@ -51,7 +58,7 @@ func TestPromoteNegativeLowerTierHitJoinsWriterSetupAndSourceCloseErrors(t *test
 		&Metadata{IsNegative: true},
 		&Metadata{IsNegative: true},
 		func() { canceled = true },
-		0,
+		testTopWriteGeneration(t, cache, "key"),
 	)
 
 	require.Nil(t, resp)
@@ -77,7 +84,7 @@ func TestPromoteLowerTierHitToTopJoinsWriterSetupAndSourceCloseErrors(t *testing
 		1,
 		src,
 		&Metadata{},
-		0,
+		testTopWriteGeneration(t, cache, "key"),
 	)
 
 	require.ErrorIs(t, err, writerSetupErr)
@@ -100,7 +107,7 @@ func TestPromoteRefreshFallbackToTopPreservesInvalidationOnSourceCloseSuccess(t 
 		"key",
 		tierDestination{tierIndex: 1, store: cache.tiers[1]},
 		meta,
-		0,
+		testTopWriteGeneration(t, cache, "key"),
 	)
 
 	require.ErrorIs(t, err, ErrTopWriteInvalidated)
@@ -122,7 +129,7 @@ func TestPromoteRefreshFallbackToTopJoinsInvalidationAndSourceCloseError(t *test
 		"key",
 		tierDestination{tierIndex: 1, store: cache.tiers[1]},
 		meta,
-		0,
+		testTopWriteGeneration(t, cache, "key"),
 	)
 
 	require.ErrorIs(t, err, ErrTopWriteInvalidated)
@@ -144,7 +151,7 @@ func TestPromoteRefreshFallbackToTopPreservesNegativeInvalidation(t *testing.T) 
 		"key",
 		tierDestination{tierIndex: 1, store: cache.tiers[1]},
 		meta,
-		0,
+		testTopWriteGeneration(t, cache, "key"),
 	)
 
 	require.ErrorIs(t, err, ErrTopWriteInvalidated)
@@ -165,7 +172,7 @@ func TestPromoteRefreshFallbackToTopSkipsMissingNegativeSource(t *testing.T) {
 		"key",
 		tierDestination{tierIndex: 1, store: cache.tiers[1]},
 		meta,
-		0,
+		testTopWriteGeneration(t, cache, "key"),
 	)
 
 	require.NoError(t, err)
@@ -186,7 +193,7 @@ func TestPromoteRefreshFallbackToTopSkipsMissingSourceStream(t *testing.T) {
 		"key",
 		tierDestination{tierIndex: 1, store: cache.tiers[1]},
 		meta,
-		0,
+		testTopWriteGeneration(t, cache, "key"),
 	)
 
 	require.NoError(t, err)

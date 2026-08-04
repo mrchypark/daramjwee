@@ -48,37 +48,67 @@ type manifest struct {
 	Metadata daramjwee.Metadata `json:"metadata"`
 }
 
+type contextSemaphore chan struct{}
+
+func newContextSemaphore() contextSemaphore {
+	semaphore := make(contextSemaphore, 1)
+	semaphore <- struct{}{}
+	return semaphore
+}
+
+func (s contextSemaphore) acquire(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s:
+		return nil
+	}
+}
+
+func (s contextSemaphore) release() {
+	s <- struct{}{}
+}
+
 // Store is a first-party object storage backend.
 // It currently publishes immutable blob versions via internal manifest pointers.
 type Store struct {
-	bucket            objstore.Bucket
-	logger            log.Logger
-	dataDir           string
-	prefix            string
-	gcGrace           time.Duration
-	packThreshold     int64
-	pagedThreshold    int64
-	pageSize          int64
-	blockCache        *blockcache.Cache
-	pageCache         *pagecache.Cache
-	checkpointCache   *checkpointCache
-	catalog           *internalcatalog.Catalog
-	lockManager       *stripedlock.Manager
-	blockLoads        singleflight.Group
-	pageLoads         singleflight.Group
-	versionSeq        atomic.Uint64
-	generationSeq     atomic.Uint64
-	initErr           error
-	segmentRefsMu     sync.Mutex
-	segmentRefs       map[string]int
-	reclaimableSegs   map[string]struct{}
-	flushMu           sync.Mutex
-	flushRunMu        sync.Mutex
-	pendingShards     map[string]struct{}
-	flushTimer        *time.Timer
-	autoFlush         bool
-	now               func() time.Time
-	openSegmentWriter func(root, shard, segmentID string) (segmentWriter, error)
+	bucket             objstore.Bucket
+	logger             log.Logger
+	dataDir            string
+	prefix             string
+	gcGrace            time.Duration
+	packThreshold      int64
+	pagedThreshold     int64
+	pageSize           int64
+	blockCache         *blockcache.Cache
+	pageCache          *pagecache.Cache
+	checkpointCache    *checkpointCache
+	catalog            *internalcatalog.Catalog
+	lockManager        *stripedlock.Manager
+	blockLoads         singleflight.Group
+	pageLoads          singleflight.Group
+	versionSeq         atomic.Uint64
+	generationSeq      atomic.Uint64
+	initErr            error
+	segmentRefsMu      sync.Mutex
+	segmentRefs        map[string]int
+	reclaimableSegs    map[string]struct{}
+	flushMu            sync.Mutex
+	flushRun           contextSemaphore
+	remoteState        contextSemaphore
+	pendingShards      map[string]struct{}
+	flushScheduled     bool
+	flushRetryDelay    time.Duration
+	scheduleFlushAfter func(time.Duration, func())
+	autoFlush          bool
+	now                func() time.Time
+	openSegmentWriter  func(root, shard, segmentID string) (segmentWriter, error)
 }
 
 func (s *Store) GetStreamUsesContext() bool { return true }
@@ -132,8 +162,13 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		segmentRefs:     make(map[string]int),
 		reclaimableSegs: make(map[string]struct{}),
 		pendingShards:   make(map[string]struct{}),
+		flushRun:        newContextSemaphore(),
+		remoteState:     newContextSemaphore(),
 		autoFlush:       true,
 		now:             time.Now,
+		scheduleFlushAfter: func(delay time.Duration, run func()) {
+			time.AfterFunc(delay, run)
+		},
 		openSegmentWriter: func(root, shard, segmentID string) (segmentWriter, error) {
 			return segment.Open(root, shard, segmentID)
 		},
@@ -547,8 +582,6 @@ func (s *Store) OwnsObjectPath(name string) bool {
 	return false
 }
 
-
-
 type fileSectionReadCloser struct {
 	io.Reader
 	closeFn func() error
@@ -579,8 +612,6 @@ func objectTimestampFromPath(objectPath string) (time.Time, bool) {
 func blobTimestampFromPath(blobPath string) (time.Time, bool) {
 	return objectTimestampFromPath(blobPath)
 }
-
-
 
 func (s *Store) nextGeneration() uint64 {
 	return s.generationSeq.Add(1)

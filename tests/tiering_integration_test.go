@@ -3,6 +3,7 @@ package daramjwee_test
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -769,23 +770,36 @@ func TestCache_SingleTierStaleHitRefreshesOnlyTier(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
-func TestCache_SingleTierStaleNotModifiedRefreshesCachedAt(t *testing.T) {
+func TestCache_SingleTierStaleNotModifiedLeavesNonStagingEntryStale(t *testing.T) {
 	tier := newMockStore()
-	oldCachedAt := time.Now().Add(-time.Hour)
+	oldCachedAt := time.Date(2020, time.January, 2, 3, 4, 5, 6, time.UTC)
 	tier.setData("single-tier-stale-304", "old-value", &daramjwee.Metadata{
 		CacheTag: "old",
 		CachedAt: oldCachedAt,
 	})
-	fetcher := &mockFetcher{err: daramjwee.ErrNotModified}
-
-	cache, err := daramjwee.New(
-		nil,
+	fetcher := &notModifiedSignalFetcher{}
+	cacheID := t.Name()
+	logger := &refreshCompletionLogger{
+		cacheID:     cacheID,
+		completions: make(chan struct{}, 2),
+	}
+	group, err := daramjwee.NewGroup(logger, daramjwee.WithGroupWorkers(1))
+	require.NoError(t, err)
+	cache, err := group.NewCache(
+		cacheID,
 		daramjwee.WithTiers(tier),
 		daramjwee.WithFreshness(time.Second, 0),
 		daramjwee.WithOpTimeout(2*time.Second),
 	)
 	require.NoError(t, err)
-	defer cache.Close()
+	defer group.Close()
+	waitForRefresh := func(round string) {
+		select {
+		case <-logger.completions:
+		case <-time.After(time.Second):
+			t.Fatalf("%s stale revalidation did not finish", round)
+		}
+	}
 
 	stream, err := cache.Get(context.Background(), "single-tier-stale-304", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
@@ -794,15 +808,18 @@ func TestCache_SingleTierStaleNotModifiedRefreshesCachedAt(t *testing.T) {
 	require.NoError(t, stream.Close())
 	assert.Equal(t, "old-value", string(body))
 
-	require.Eventually(t, func() bool {
-		meta, err := tier.Stat(context.Background(), "single-tier-stale-304")
-		if err != nil {
-			return false
-		}
-		return meta.CacheTag == "old" && meta.CachedAt.After(oldCachedAt)
-	}, 2*time.Second, 10*time.Millisecond)
+	waitForRefresh("first")
+	meta, err := tier.Stat(context.Background(), "single-tier-stale-304")
+	require.NoError(t, err)
+	assert.Equal(t, "old", meta.CacheTag)
+	assert.False(t, meta.IsNegative)
+	assert.Equal(t, oldCachedAt, meta.CachedAt)
+	select {
+	case key := <-tier.writeCompleted:
+		t.Fatalf("unexpected top-tier write for %q", key)
+	default:
+	}
 
-	fetchCount := fetcher.getFetchCount()
 	stream, err = cache.Get(context.Background(), "single-tier-stale-304", daramjwee.GetRequest{}, fetcher)
 	require.NoError(t, err)
 	body, err = io.ReadAll(stream)
@@ -810,8 +827,58 @@ func TestCache_SingleTierStaleNotModifiedRefreshesCachedAt(t *testing.T) {
 	require.NoError(t, stream.Close())
 	assert.Equal(t, "old-value", string(body))
 
-	time.Sleep(150 * time.Millisecond)
-	assert.Equal(t, fetchCount, fetcher.getFetchCount())
+	waitForRefresh("second")
+	assert.Equal(t, int32(2), fetcher.fetchCount.Load())
+	meta, err = tier.Stat(context.Background(), "single-tier-stale-304")
+	require.NoError(t, err)
+	assert.Equal(t, "old", meta.CacheTag)
+	assert.False(t, meta.IsNegative)
+	assert.Equal(t, oldCachedAt, meta.CachedAt)
+	select {
+	case key := <-tier.writeCompleted:
+		t.Fatalf("unexpected top-tier write for %q", key)
+	default:
+	}
+}
+
+type notModifiedSignalFetcher struct {
+	fetchCount atomic.Int32
+}
+
+func (f *notModifiedSignalFetcher) Fetch(context.Context, *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	f.fetchCount.Add(1)
+	return nil, daramjwee.ErrNotModified
+}
+
+type refreshCompletionLogger struct {
+	cacheID     string
+	completions chan struct{}
+}
+
+func (l *refreshCompletionLogger) Log(keyvals ...interface{}) error {
+	var msg, cacheID, jobKind string
+	for i := 0; i+1 < len(keyvals); i += 2 {
+		key, ok := keyvals[i].(string)
+		if !ok {
+			continue
+		}
+		value, _ := keyvals[i+1].(string)
+		switch key {
+		case "msg":
+			msg = value
+		case "cache_id":
+			cacheID = value
+		case "job_kind":
+			jobKind = value
+		}
+	}
+	if msg == "finished background job" && cacheID == l.cacheID && jobKind == "refresh" {
+		select {
+		case l.completions <- struct{}{}:
+		default:
+		}
+	}
+	return nil
 }
 
 func TestCache_SingleTierFilestoreStaleNotModifiedRefreshesWithoutSelfDeadlock(t *testing.T) {

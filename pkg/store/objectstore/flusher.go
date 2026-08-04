@@ -16,7 +16,11 @@ import (
 	internalshard "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/shard"
 )
 
-const flushDebounce = 10 * time.Millisecond
+const (
+	flushDebounce = 10 * time.Millisecond
+	flushRetryMin = 20 * time.Millisecond
+	flushRetryMax = time.Second
+)
 
 type checkpoint struct {
 	UpdatedAt time.Time                  `json:"updated_at"`
@@ -47,15 +51,26 @@ func (s *Store) enqueueFlush(key string) {
 }
 
 func (s *Store) scheduleFlushLocked() {
-	if s.flushTimer != nil {
+	if s.flushScheduled {
 		return
 	}
-	s.flushTimer = time.AfterFunc(flushDebounce, func() {
-		if err := s.flushPending(context.Background()); err != nil {
+	delay := flushDebounce
+	if s.flushRetryDelay > delay {
+		delay = s.flushRetryDelay
+	}
+	s.flushScheduled = true
+	s.scheduleFlushAfter(delay, func() {
+		err := s.flushPending(context.Background())
+		if err != nil {
 			level.Warn(s.logger).Log("msg", "objectstore flush failed", "err", err)
 		}
 		s.flushMu.Lock()
-		s.flushTimer = nil
+		s.flushScheduled = false
+		if err != nil {
+			s.flushRetryDelay = nextFlushRetryDelay(s.flushRetryDelay)
+		} else {
+			s.flushRetryDelay = 0
+		}
 		if len(s.pendingShards) > 0 {
 			s.scheduleFlushLocked()
 		}
@@ -63,9 +78,21 @@ func (s *Store) scheduleFlushLocked() {
 	})
 }
 
+func nextFlushRetryDelay(current time.Duration) time.Duration {
+	if current < flushRetryMin {
+		return flushRetryMin
+	}
+	if current >= flushRetryMax/2 {
+		return flushRetryMax
+	}
+	return current * 2
+}
+
 func (s *Store) flushPending(ctx context.Context) error {
-	s.flushRunMu.Lock()
-	defer s.flushRunMu.Unlock()
+	if err := s.flushRun.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.flushRun.release()
 
 	for {
 		shards := s.takePendingShards()
@@ -119,6 +146,14 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 		return err
 	}
 	mergedEntries := mergeCheckpointEntries(baseEntries, currentEntries, shardID)
+
+	// Compaction must see the upload and its checkpoint/catalog publication as
+	// one transition, or it can sweep the newly uploaded object in between.
+	if err := s.remoteState.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.remoteState.release()
+
 	if len(records) == 0 {
 		return s.publishCheckpoint(ctx, shardID, mergedEntries)
 	}
@@ -185,24 +220,16 @@ func (s *Store) flushPackedRecords(
 	segmentID := s.nextVersion()
 	remotePath := internalshard.SegmentObjectPath(s.prefix, shardID, segmentID)
 
-	payload := bytes.NewBuffer(nil)
-	offsets := make(map[string]int64, len(records))
-	for _, record := range records {
-		offsets[record.key] = int64(payload.Len())
-		file, err := os.Open(record.entry.SegmentPath)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(payload, io.NewSectionReader(file, record.entry.Offset, record.entry.Length)); err != nil {
-			_ = file.Close()
-			return err
-		}
-		if err := file.Close(); err != nil {
-			return err
-		}
+	payload, offsets, err := newPackedRecordReader(records, nil)
+	if err != nil {
+		return err
 	}
-
-	if err := s.bucket.Upload(ctx, remotePath, bytes.NewReader(payload.Bytes())); err != nil {
+	releasePins, err := s.pinPackedSegments(records)
+	if err != nil {
+		return err
+	}
+	defer releasePins()
+	if err := s.uploadPackedBody(ctx, remotePath, payload); err != nil {
 		return err
 	}
 
@@ -225,6 +252,11 @@ func (s *Store) flushPackedRecords(
 		}
 	}
 	return nil
+}
+
+func (s *Store) uploadPackedBody(ctx context.Context, remotePath string, payload io.ReadCloser) error {
+	uploadErr := s.bucket.Upload(ctx, remotePath, payload)
+	return errors.Join(uploadErr, payload.Close())
 }
 
 func (s *Store) flushDirectRecord(

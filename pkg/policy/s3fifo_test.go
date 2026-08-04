@@ -143,6 +143,28 @@ func TestS3FIFO_EvictFromMainWithSecondChance(t *testing.T) {
 	}
 }
 
+func TestS3FIFO_EvictSingleMainEntryAfterSecondChance(t *testing.T) {
+	p := NewS3FIFO(100, 20).(*S3FIFO)
+
+	p.Add("key1", 10)
+	p.Touch("key1") // Promote to the main queue.
+	p.Touch("key1") // Give the main-queue entry its second chance.
+
+	evicted := p.Evict()
+	if len(evicted) != 1 || evicted[0] != "key1" {
+		t.Fatalf("Evict should return live key1, got %v", evicted)
+	}
+	if isInCache(p, "key1") {
+		t.Error("key1 should not be in cache after eviction")
+	}
+	if p.smallQueue.Len() != 0 || p.mainQueue.Len() != 0 || len(p.cache) != 0 {
+		t.Errorf("expected empty queues and cache, got small:%d main:%d cache:%d", p.smallQueue.Len(), p.mainQueue.Len(), len(p.cache))
+	}
+	if p.smallSize != 0 || p.mainSize != 0 {
+		t.Errorf("expected zero sizes, got small:%d main:%d", p.smallSize, p.mainSize)
+	}
+}
+
 // TestS3FIFO_Remove tests explicit removal of items.
 func TestS3FIFO_Remove(t *testing.T) {
 	p := NewS3FIFO(100, 50).(*S3FIFO)

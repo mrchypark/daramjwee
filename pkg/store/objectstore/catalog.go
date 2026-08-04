@@ -220,8 +220,34 @@ func removeLocalSegment(path string) error {
 	return nil
 }
 
+func sweepLocalSegmentFiles(root string, keep func(string) bool) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".seg" {
+			return nil
+		}
+		if keep != nil && keep(path) {
+			return nil
+		}
+		return removeLocalSegment(path)
+	})
+}
+
 func (s *Store) sweepOrphanedLocalSegments() error {
-	if s.catalog == nil || s.dataDir == "" {
+	if s.dataDir == "" {
+		return nil
+	}
+
+	activeRoot := filepath.Join(s.dataDir, "ingest", "active")
+	if err := sweepLocalSegmentFiles(activeRoot, nil); err != nil {
+		return err
+	}
+	if s.catalog == nil {
 		return nil
 	}
 
@@ -233,22 +259,10 @@ func (s *Store) sweepOrphanedLocalSegments() error {
 	}
 
 	sealedRoot := filepath.Join(s.dataDir, "ingest", "sealed")
-	return filepath.WalkDir(sealedRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if d.IsDir() || filepath.Ext(path) != ".seg" {
-			return nil
-		}
+	return sweepLocalSegmentFiles(sealedRoot, func(path string) bool {
 		if _, ok := referenced[path]; ok {
-			return nil
+			return true
 		}
-		if err := removeLocalSegment(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
+		return false
 	})
 }

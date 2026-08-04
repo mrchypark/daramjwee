@@ -765,6 +765,53 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	assert.Equal(t, "v1", meta.CacheTag)
 }
 
+func TestStore_ReopenSweepsAbandonedActiveSegments(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	bucket := objstore.NewInMemBucket()
+	store := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "live-key", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "live payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	activeDir := filepath.Join(dataDir, "ingest", "active", shardForKey("abandoned-key"))
+	require.NoError(t, os.MkdirAll(activeDir, 0o755))
+	abandonedPath := filepath.Join(activeDir, "abandoned.seg")
+	require.NoError(t, os.WriteFile(abandonedPath, []byte("partial"), 0o644))
+	unknownPath := filepath.Join(activeDir, "keep.txt")
+	require.NoError(t, os.WriteFile(unknownPath, []byte("unknown"), 0o644))
+
+	reopened := New(
+		bucket,
+		log.NewNopLogger(),
+		WithDir(dataDir),
+	)
+	reopened.autoFlush = false
+	require.NoError(t, reopened.ensureReady())
+
+	_, err = os.Stat(abandonedPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(unknownPath)
+	require.NoError(t, err)
+
+	stream, meta, err := reopened.GetStream(ctx, "live-key")
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "live payload", string(body))
+	assert.Equal(t, "v1", meta.CacheTag)
+}
+
 func TestStore_ReopenFailsWhenRecoveryCannotPersistCatalogRepair(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

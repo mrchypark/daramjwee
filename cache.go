@@ -41,14 +41,14 @@ type cacheConfig struct {
 
 // DaramjweeCache is a concrete implementation of the Cache interface.
 type DaramjweeCache struct {
-	tiers      []Store
-	logger     log.Logger
-	runtime    backgroundRuntime
-	cacheID    string
-	config     cacheConfig
-	closeHook  func()
-	isClosed   atomic.Bool
-	topWrites  topWriteManager
+	tiers        []Store
+	logger       log.Logger
+	runtime      backgroundRuntime
+	cacheID      string
+	config       cacheConfig
+	closeHook    func()
+	isClosed     atomic.Bool
+	topWrites    topWriteManager
 	fanoutWrites fanoutWriteManager
 }
 
@@ -65,6 +65,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 	}
 	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 	topGenerationAtStart := c.currentTopWriteGeneration(key)
+	defer topGenerationAtStart.release()
 	higherTiersClean := true
 
 	for i, tier := range c.tiers {
@@ -131,6 +132,7 @@ func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata
 	if metadata == nil {
 		metadata = &Metadata{}
 	}
+	metadata = cloneMetadata(metadata)
 	metadata.CachedAt = time.Now()
 
 	wc, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(ctx, setupCtx, target), key, metadata, nil)
@@ -153,11 +155,13 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	}
 	coord := c.topWrites.coordinator(key)
 	if err := coord.beginDelete(ctx); err != nil {
+		coord.releaseReference()
 		return err
 	}
 	topDeleteSucceeded := false
 	defer func() {
 		coord.finishDelete(topDeleteSucceeded)
+		coord.releaseReference()
 	}()
 	var firstErr error
 	top := c.topWriteStore()
