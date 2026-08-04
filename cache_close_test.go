@@ -38,10 +38,12 @@ func TestDaramjweeCache_Close_RemovesRuntimeStateAfterTimeout(t *testing.T) {
 	hookCalls := 0
 
 	cache := &DaramjweeCache{
-		logger:       log.NewNopLogger(),
-		runtime:      rt,
-		cacheID:      "cache-a",
-		closeTimeout: 250 * time.Millisecond,
+		logger:  log.NewNopLogger(),
+		runtime: rt,
+		cacheID: "cache-a",
+		config: cacheConfig{
+			closeTimeout: 250 * time.Millisecond,
+		},
 		closeHook: func() {
 			hookCalls++
 		},

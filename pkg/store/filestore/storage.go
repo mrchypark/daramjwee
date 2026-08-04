@@ -773,19 +773,26 @@ func (s *stagedFileWriteSink) abort() error {
 
 // initializeCurrentSize scans the base directory to calculate the current total size
 // and populate the fileSizes map for existing files.
+// It uses filepath.WalkDir for better performance than filepath.Walk.
 func (fs *FileStore) initializeCurrentSize() error {
-	return filepath.Walk(fs.baseDir, func(path string, info os.FileInfo, err error) error {
+	return filepath.WalkDir(fs.baseDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
 
 		// Skip temporary files
-		if strings.Contains(info.Name(), "daramjwee-tmp-") {
+		if strings.Contains(d.Name(), "daramjwee-tmp-") {
 			return nil
+		}
+
+		// Get file info for size (WalkDir doesn't provide it automatically)
+		info, err := d.Info()
+		if err != nil {
+			return err
 		}
 
 		// Convert file path back to key

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *testing.T) {
@@ -17,9 +19,11 @@ func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *te
 		meta: Metadata{CacheTag: "live"},
 	}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		tiers: []Store{store},
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 	cache.noteTopWriteGeneration("key")
 
@@ -39,9 +43,11 @@ func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *te
 func TestSetStreamToStoreWithTopGenerationRestoresGenerationOnBeginSetFailure(t *testing.T) {
 	store := &failingBeginSetStore{err: errors.New("boom")}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		tiers: []Store{store},
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	expectedGeneration := uint64(0)
@@ -80,8 +86,10 @@ func TestSetStreamToTopStoreDoesNotExposeStagedCommitBypass(t *testing.T) {
 	store := &stubStagingStore{}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	writer, err := cache.setStreamToTopStoreWithGeneration(context.Background(), "key", &Metadata{CacheTag: "v1"}, nil)
@@ -104,8 +112,10 @@ func TestLaterStagedBeginFailureDoesNotInvalidateOlderWriter(t *testing.T) {
 	}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	older, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "older"})
@@ -156,8 +166,10 @@ func TestLaterStagedAbortCleanupDoesNotInvalidateOlderWriter(t *testing.T) {
 	}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	older, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "older"})
@@ -209,8 +221,10 @@ func TestStagedFillPreemptDoesNotWaitForAbortCleanup(t *testing.T) {
 	}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	fill, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
@@ -256,8 +270,10 @@ func TestStagedFillDeletePreemptDoesNotWaitForAbortCleanup(t *testing.T) {
 	}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	fill, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
@@ -299,9 +315,11 @@ func TestLegacyFillContextCancelPreemptsPendingBeginSet(t *testing.T) {
 	}
 	cache := &DaramjweeCache{
 		tiers:            []Store{store},
-		opTimeout:        time.Second,
-		closeTimeout:     time.Second,
-		fillLeaseTimeout: time.Hour,
+		config: cacheConfig{
+			opTimeout:        time.Second,
+			closeTimeout:     time.Second,
+			fillLeaseTimeout: time.Hour,
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -363,9 +381,11 @@ func TestLegacyFillPreemptCancelsPendingBeginSet(t *testing.T) {
 	}
 	cache := &DaramjweeCache{
 		tiers:            []Store{store},
-		opTimeout:        time.Second,
-		closeTimeout:     time.Second,
-		fillLeaseTimeout: time.Hour,
+		config: cacheConfig{
+			opTimeout:        time.Second,
+			closeTimeout:     time.Second,
+			fillLeaseTimeout: time.Hour,
+		},
 	}
 
 	fillDone := make(chan error, 1)
@@ -419,8 +439,10 @@ func TestStaleStagedCloseAbortCleanupDoesNotBlockNewerCommit(t *testing.T) {
 	}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	older, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "older"})
@@ -477,8 +499,10 @@ func TestStagedCloseWaitingForDeleteTimesOutAndReleasesReservation(t *testing.T)
 	store := &stubStagingStore{}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: 25 * time.Millisecond,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: 25 * time.Millisecond,
+		},
 	}
 
 	writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
@@ -511,8 +535,10 @@ func TestLegacyTopWriteCloseWaitingForDeleteTimesOut(t *testing.T) {
 	store := &countingBeginSetStore{}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: 25 * time.Millisecond,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: 25 * time.Millisecond,
+		},
 	}
 
 	writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
@@ -582,8 +608,10 @@ func TestStagedCloseWaitingForCommitLeaseTimesOutAndReleasesReservation(t *testi
 	}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: 25 * time.Millisecond,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: 25 * time.Millisecond,
+		},
 	}
 
 	first, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
@@ -641,8 +669,10 @@ func TestCommittedStagedWritePrunesOlderAbandonedReservations(t *testing.T) {
 	store := &stubStagingStore{}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	abandoned, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
@@ -672,8 +702,10 @@ func TestStagedCloseAbortsUnderlyingSinkAfterCommitFailure(t *testing.T) {
 	store := &failingCommitStagingStore{commitErr: commitErr}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	writer, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
@@ -698,8 +730,10 @@ func TestFailedStagedCommitAbortCleanupDoesNotHoldCommitLease(t *testing.T) {
 	}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: 25 * time.Millisecond,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: 25 * time.Millisecond,
+		},
 	}
 
 	first, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "v1"})
@@ -762,8 +796,10 @@ func TestSetStreamToTopStoreWithGenerationHonorsCanceledContextWhileDeleteInProg
 	store := &failingBeginSetStore{}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	coord := cache.topWrites.coordinator("key")
@@ -843,8 +879,10 @@ func TestSetWithAbandonedTopWriteSinkReturnsWhenContextExpires(t *testing.T) {
 	store := &countingBeginSetStore{}
 	cache := &DaramjweeCache{
 		tiers:        []Store{store},
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 
 	first, err := cache.Set(context.Background(), "key", &Metadata{CacheTag: "first"})
@@ -1119,6 +1157,557 @@ func TestFanoutWriteManagerOrdersStaleCleanupBeforeNewerWrite(t *testing.T) {
 	if err := <-secondSinkDone; err != nil {
 		t.Fatalf("expected newer fanout write to succeed, got %v", err)
 	}
+}
+
+func TestWaitForNoActiveDeletesUnblocksAfterDeleteCompletes(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- coord.waitForNoActiveDeletes(context.Background())
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatal("waitForNoActiveDeletes returned before delete finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	coord.finishDelete(false)
+
+	select {
+	case err := <-waitDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("waitForNoActiveDeletes did not unblock after finishDelete")
+	}
+}
+
+func TestWaitForNoActiveDeletesRespectsContextCancellation(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	err := coord.waitForNoActiveDeletes(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	coord.finishDelete(false)
+}
+
+func TestWaitForNoActiveDeletesReturnsImmediatelyWhenNoDeletes(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	err := coord.waitForNoActiveDeletes(context.Background())
+	require.NoError(t, err)
+}
+
+func TestWaitForNoActiveDeletesHandlesSequentialDeletes(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	// First delete: activeDeletes goes 0→1.
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- coord.waitForNoActiveDeletes(context.Background())
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatal("waitForNoActiveDeletes returned with active delete in progress")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Finish first delete: activeDeletes goes 1→0, unblocks waiter.
+	coord.finishDelete(false)
+
+	select {
+	case err := <-waitDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("waitForNoActiveDeletes did not unblock after first delete finished")
+	}
+
+	// Second delete after the first completes.
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	waitDone2 := make(chan error, 1)
+	go func() {
+		waitDone2 <- coord.waitForNoActiveDeletes(context.Background())
+	}()
+
+	select {
+	case <-waitDone2:
+		t.Fatal("waitForNoActiveDeletes returned with second active delete")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	coord.finishDelete(false)
+
+	select {
+	case err := <-waitDone2:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("waitForNoActiveDeletes did not unblock after second delete finished")
+	}
+}
+
+func TestLockCommitWhenNoActiveDeletesAcquiresCommitLease(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	err := coord.lockCommitWhenNoActiveDeletes(context.Background())
+	require.NoError(t, err)
+	coord.releaseCommit()
+}
+
+func TestLockCommitWhenNoActiveDeletesRetriesAfterDeleteStartsAndFinishes(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	// Simulate the race: beginDelete holds the commit lease.
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- coord.lockCommitWhenNoActiveDeletes(context.Background())
+	}()
+
+	// lockCommitWhenNoActiveDeletes should be blocked: first on waitForNoActiveDeletes,
+	// then on acquireCommit after the delete finishes.
+	select {
+	case <-lockDone:
+		t.Fatal("lockCommitWhenNoActiveDeletes returned while delete was active")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Finish the delete: releases the commit lease and closes the deletes-done channel.
+	coord.finishDelete(false)
+
+	select {
+	case err := <-lockDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("lockCommitWhenNoActiveDeletes did not unblock after delete finished")
+	}
+}
+
+func TestLockCommitWhenNoActiveDeletesRespectsContextCancellation(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	// Hold the commit lease by starting a delete (which acquires it internally).
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	err := coord.lockCommitWhenNoActiveDeletes(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	coord.finishDelete(false)
+}
+
+func TestReserveBestEffortFailsWhenActiveFillIsSet(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	coord.stateMu.Lock()
+	coord.activeFill = &topFillSink{}
+	coord.stateMu.Unlock()
+
+	_, err := coord.reserveBestEffort(context.Background(), nil)
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
+func TestReserveBestEffortFailsWhenActiveDeletesGreaterThanZero(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	_, err := coord.reserveBestEffort(context.Background(), nil)
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+
+	coord.finishDelete(false)
+}
+
+func TestReserveBestEffortFailsWhenFillPreemptionsPositive(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	coord.stateMu.Lock()
+	coord.fillPreemptions = 1
+	coord.stateMu.Unlock()
+
+	_, err := coord.reserveBestEffort(context.Background(), nil)
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
+func TestReserveBestEffortSucceedsWhenIdle(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	gen, err := coord.reserveBestEffort(context.Background(), nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), gen)
+	coord.unregisterReservation(gen)
+}
+
+func TestReserveBestEffortFailsOnStaleExpectedGeneration(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	coord.stateMu.Lock()
+	coord.committedGeneration = 2
+	coord.stateMu.Unlock()
+
+	stale := uint64(1)
+	_, err := coord.reserveBestEffort(context.Background(), &stale)
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
+func TestReserveBestEffortFailsOnCancelledContext(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := coord.reserveBestEffort(ctx, nil)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestReserveWithFillRegistersFillOnCoordinator(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	fill := &topFillSink{}
+	gen, err := coord.reserveWithFill(context.Background(), 0, fill)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), gen)
+
+	coord.stateMu.Lock()
+	registered := coord.activeFill
+	coord.stateMu.Unlock()
+
+	require.Equal(t, fill, registered)
+	require.True(t, fill.registered)
+
+	coord.unregisterReservation(gen)
+	coord.unregisterActiveFill(fill)
+}
+
+func TestReserveWithFillFailsWhenActiveFillAlreadySet(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	coord.stateMu.Lock()
+	coord.activeFill = &topFillSink{}
+	coord.stateMu.Unlock()
+
+	_, err := coord.reserveWithFill(context.Background(), 0, &topFillSink{})
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
+func TestReserveWithFillFailsWhenActiveDeletesPositive(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	_, err := coord.reserveWithFill(context.Background(), 0, &topFillSink{})
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+
+	coord.finishDelete(false)
+}
+
+func TestReserveWithFillFailsWhenFillPreemptionsPositive(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	coord.stateMu.Lock()
+	coord.fillPreemptions = 1
+	coord.stateMu.Unlock()
+
+	_, err := coord.reserveWithFill(context.Background(), 0, &topFillSink{})
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
+func TestReserveWithFillNilFillDoesNotSetActiveFill(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	gen, err := coord.reserveWithFill(context.Background(), 0, nil)
+	require.NoError(t, err)
+
+	coord.stateMu.Lock()
+	activeFill := coord.activeFill
+	coord.stateMu.Unlock()
+
+	require.Nil(t, activeFill)
+	coord.unregisterReservation(gen)
+}
+
+func TestReserveWithFillFailsOnStaleExpectedGeneration(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	_, err := coord.reserveWithFill(context.Background(), 1, &topFillSink{})
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
+func TestBeginDeleteIncrementsActiveDeletesAndCreatesChannel(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	coord.stateMu.Lock()
+	require.Equal(t, 1, coord.activeDeletes)
+	doneCh := coord.activeDeletesDone
+	coord.stateMu.Unlock()
+	require.NotNil(t, doneCh)
+
+	coord.finishDelete(false)
+
+	coord.stateMu.Lock()
+	require.Equal(t, 0, coord.activeDeletes)
+	// The done channel should have been replaced and closed.
+	select {
+	case <-coord.activeDeletesDone:
+	default:
+		t.Fatal("activeDeletesDone channel should be closed when no deletes active")
+	}
+	coord.stateMu.Unlock()
+}
+
+func TestBeginDeleteBlocksCommitLeaseAndFinishDeleteReleasesIt(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	// A second beginDelete should block because the commit lease is held.
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- coord.beginDelete(context.Background())
+	}()
+
+	select {
+	case <-secondDone:
+		t.Fatal("second beginDelete should be blocked on commit lease")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Finish the first delete: decrements activeDeletes and releases commit lease.
+	coord.finishDelete(false)
+
+	select {
+	case err := <-secondDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("second beginDelete did not proceed after commit lease was released")
+	}
+	coord.finishDelete(false)
+
+	// After both deletes finish, commit lease should be available.
+	err := coord.acquireCommit(context.Background())
+	require.NoError(t, err)
+	coord.releaseCommit()
+}
+
+func TestFinishDeleteWithSuccessAdvancesCommittedGeneration(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	require.NoError(t, coord.beginDelete(context.Background()))
+	coord.finishDelete(true)
+
+	coord.stateMu.Lock()
+	gen := coord.committedGeneration
+	coord.stateMu.Unlock()
+	require.NotZero(t, gen, "committedGeneration should advance on successful delete")
+}
+
+func TestFinishDeleteWithoutSuccessDoesNotAdvanceGeneration(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	require.NoError(t, coord.beginDelete(context.Background()))
+	coord.finishDelete(false)
+
+	coord.stateMu.Lock()
+	gen := coord.committedGeneration
+	coord.stateMu.Unlock()
+	require.Zero(t, gen, "committedGeneration should remain zero on unsuccessful delete")
+}
+
+func TestBeginDeleteRespectsContextCancellation(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.initLease()
+
+	// Acquire the commit lease via a beginDelete so the next beginDelete blocks.
+	require.NoError(t, coord.beginDelete(context.Background()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	err := coord.beginDelete(ctx)
+	require.Error(t, err)
+
+	coord.finishDelete(false)
+}
+
+func TestFanoutWriteManagerAcquireReleaseRefCounting(t *testing.T) {
+	var manager fanoutWriteManager
+
+	unlock1 := manager.lock(0, "ref-key")
+	lockKey := fanoutLockKey{destTierIndex: 0, key: "ref-key"}
+
+	stored, ok := manager.locks.Load(lockKey)
+	require.True(t, ok)
+	lock := stored.(*fanoutWriteLock)
+	require.Equal(t, 1, lock.refs)
+
+	acquired2 := make(chan struct{})
+	goroutineDone := make(chan struct{})
+	go func() {
+		unlock2 := manager.lock(0, "ref-key")
+		close(acquired2)
+		<-goroutineDone
+		unlock2()
+	}()
+
+	// The second lock blocks on lock.mu because the first holds it.
+	select {
+	case <-acquired2:
+		t.Fatal("second lock should be blocked until first is released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Release the first lock; the second should proceed.
+	unlock1()
+
+	select {
+	case <-acquired2:
+	case <-time.After(time.Second):
+		t.Fatal("second lock did not acquire after first release")
+	}
+
+	// After the second lock is acquired, it's the only reference.
+	stored, _ = manager.locks.Load(lockKey)
+	lock = stored.(*fanoutWriteLock)
+	require.Equal(t, 1, lock.refs)
+
+	close(goroutineDone)
+
+	// Wait for the goroutine to fully complete, including release().
+	time.Sleep(50 * time.Millisecond)
+
+	// After the second lock releases, the entry should be cleaned up.
+	_, ok = manager.locks.Load(lockKey)
+	require.False(t, ok, "lock should be removed after all references released")
+}
+
+func TestFanoutWriteManagerDifferentKeysAreIndependent(t *testing.T) {
+	var manager fanoutWriteManager
+
+	unlockA := manager.lock(0, "key-a")
+	unlockB := manager.lock(0, "key-b")
+
+	_, okA := manager.locks.Load(fanoutLockKey{destTierIndex: 0, key: "key-a"})
+	_, okB := manager.locks.Load(fanoutLockKey{destTierIndex: 0, key: "key-b"})
+	require.True(t, okA)
+	require.True(t, okB)
+
+	unlockA()
+
+	_, okA = manager.locks.Load(fanoutLockKey{destTierIndex: 0, key: "key-a"})
+	_, okB = manager.locks.Load(fanoutLockKey{destTierIndex: 0, key: "key-b"})
+	require.False(t, okA, "key-a lock should be removed")
+	require.True(t, okB, "key-b lock should still exist")
+
+	unlockB()
+}
+
+func TestFanoutWriteManagerDifferentTiersAreIndependent(t *testing.T) {
+	var manager fanoutWriteManager
+
+	unlock0 := manager.lock(0, "same-key")
+	unlock1 := manager.lock(1, "same-key")
+
+	_, ok0 := manager.locks.Load(fanoutLockKey{destTierIndex: 0, key: "same-key"})
+	_, ok1 := manager.locks.Load(fanoutLockKey{destTierIndex: 1, key: "same-key"})
+	require.True(t, ok0)
+	require.True(t, ok1)
+
+	unlock0()
+
+	_, ok0 = manager.locks.Load(fanoutLockKey{destTierIndex: 0, key: "same-key"})
+	require.False(t, ok0)
+	_, ok1 = manager.locks.Load(fanoutLockKey{destTierIndex: 1, key: "same-key"})
+	require.True(t, ok1)
+
+	unlock1()
+}
+
+func TestWriteCoordinatorInitIdempotent(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+	ch1 := coord.activeDeletesDone
+	coord.init()
+	ch2 := coord.activeDeletesDone
+	require.Equal(t, ch1, ch2, "init should be idempotent via sync.Once")
+}
+
+func TestWriteCoordinatorReserveMonotonicGenerations(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	g1, err := coord.reserve(context.Background(), nil)
+	require.NoError(t, err)
+
+	g2, err := coord.reserve(context.Background(), nil)
+	require.NoError(t, err)
+
+	g3, err := coord.reserve(context.Background(), nil)
+	require.NoError(t, err)
+
+	require.Greater(t, g2, g1)
+	require.Greater(t, g3, g2)
+
+	coord.unregisterReservation(g1)
+	coord.unregisterReservation(g2)
+	coord.unregisterReservation(g3)
+}
+
+func TestWriteCoordinatorCanAttemptExpectedTopWrite(t *testing.T) {
+	coord := &writeCoordinator{}
+	coord.init()
+
+	require.True(t, coord.canAttemptExpectedTopWrite(0))
+
+	coord.stateMu.Lock()
+	coord.committedGeneration = 5
+	coord.stateMu.Unlock()
+
+	require.True(t, coord.canAttemptExpectedTopWrite(5))
+	require.False(t, coord.canAttemptExpectedTopWrite(4))
+
+	require.NoError(t, coord.beginDelete(context.Background()))
+	require.False(t, coord.canAttemptExpectedTopWrite(5))
+	coord.finishDelete(false)
+
+	require.True(t, coord.canAttemptExpectedTopWrite(5))
 }
 
 type destructiveReservationStore struct {

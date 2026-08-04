@@ -1,6 +1,7 @@
 package objectstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/internal/stripedlock"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/blockcache"
 	internalcatalog "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/catalog"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/pagecache"
@@ -27,7 +29,6 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/segment"
 	internalshard "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/shard"
 	"github.com/thanos-io/objstore"
-	"github.com/zeebo/xxh3"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -62,7 +63,7 @@ type Store struct {
 	pageCache         *pagecache.Cache
 	checkpointCache   *checkpointCache
 	catalog           *internalcatalog.Catalog
-	lockManager       *keyLockManager
+	lockManager       *stripedlock.Manager
 	blockLoads        singleflight.Group
 	pageLoads         singleflight.Group
 	versionSeq        atomic.Uint64
@@ -126,7 +127,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		blockCache:      blockcache.New(cfg.blockCacheBytes),
 		pageCache:       pagecache.New(cfg.pageCacheBytes),
 		catalog:         cat,
-		lockManager:     newKeyLockManager(2048),
+		lockManager:     stripedlock.New(2048),
 		initErr:         initErr,
 		segmentRefs:     make(map[string]int),
 		reclaimableSegs: make(map[string]struct{}),
@@ -194,7 +195,7 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 				cancel()
 				return nil
 			})
-			return reader, cloneMetadata(&m.Metadata), nil
+			return reader, daramjwee.CloneMetadata(&m.Metadata), nil
 		}
 
 		reader, manifestErr := s.bucket.Get(ctx, m.BlobPath)
@@ -204,13 +205,13 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 			}
 			return nil, nil, manifestErr
 		}
-		return reader, cloneMetadata(&m.Metadata), nil
+		return reader, daramjwee.CloneMetadata(&m.Metadata), nil
 	}
 	reader, err := s.openRemoteEntry(ctx, *entry)
 	if err != nil {
 		return nil, nil, err
 	}
-	return reader, cloneMetadata(&entry.Metadata), nil
+	return reader, daramjwee.CloneMetadata(&entry.Metadata), nil
 }
 
 func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Metadata, bool, error) {
@@ -230,7 +231,7 @@ func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Met
 
 		stream, err := s.openLocalEntry(entry)
 		if err == nil {
-			return stream, cloneMetadata(&entry.Metadata), true, nil
+			return stream, daramjwee.CloneMetadata(&entry.Metadata), true, nil
 		}
 		if !os.IsNotExist(err) {
 			return nil, nil, false, err
@@ -252,7 +253,7 @@ func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Met
 
 		recheckStream, recheckErr := s.openLocalEntry(recheckEntry)
 		if recheckErr == nil {
-			return recheckStream, cloneMetadata(&recheckEntry.Metadata), true, nil
+			return recheckStream, daramjwee.CloneMetadata(&recheckEntry.Metadata), true, nil
 		}
 		if os.IsNotExist(recheckErr) {
 			return nil, nil, false, nil
@@ -296,7 +297,7 @@ func (s *Store) beginSet(ctx context.Context, key string, metadata *daramjwee.Me
 		key:        key,
 		segment:    segmentWriter,
 		generation: generation,
-		metadata:   cloneMetadata(metadata),
+		metadata:   daramjwee.CloneMetadata(metadata),
 	}
 
 	return w, nil
@@ -346,7 +347,7 @@ func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, erro
 		}
 		return nil, err
 	} else if ok {
-		return cloneMetadata(&entry.Metadata), nil
+		return daramjwee.CloneMetadata(&entry.Metadata), nil
 	}
 
 	entry, err := s.loadRemoteEntry(ctx, key)
@@ -358,9 +359,9 @@ func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, erro
 		if manifestErr != nil {
 			return nil, manifestErr
 		}
-		return cloneMetadata(&m.Metadata), nil
+		return daramjwee.CloneMetadata(&m.Metadata), nil
 	}
-	return cloneMetadata(&entry.Metadata), nil
+	return daramjwee.CloneMetadata(&entry.Metadata), nil
 }
 
 func (s *Store) ensureReady() error {
@@ -412,11 +413,11 @@ func (s *Store) publishManifest(ctx context.Context, key, blobPath string, size 
 		m.Metadata = *metadata
 	}
 
-	bytes, err := json.Marshal(&m)
+	manifestBytes, err := json.Marshal(&m)
 	if err != nil {
 		return err
 	}
-	return s.bucket.Upload(ctx, s.manifestPath(key), strings.NewReader(string(bytes)))
+	return s.bucket.Upload(ctx, s.manifestPath(key), bytes.NewReader(manifestBytes))
 }
 
 func (s *Store) loadPage(ctx context.Context, m *manifest, pageIndex int64) ([]byte, error) {
@@ -546,13 +547,7 @@ func (s *Store) OwnsObjectPath(name string) bool {
 	return false
 }
 
-func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
-	if meta == nil {
-		return nil
-	}
-	cloned := *meta
-	return &cloned
-}
+
 
 type fileSectionReadCloser struct {
 	io.Reader
@@ -585,28 +580,7 @@ func blobTimestampFromPath(blobPath string) (time.Time, bool) {
 	return objectTimestampFromPath(blobPath)
 }
 
-type keyLockManager struct {
-	locks []sync.Mutex
-	slots uint64
-}
 
-func newKeyLockManager(slots int) *keyLockManager {
-	if slots <= 0 {
-		slots = 2048
-	}
-	return &keyLockManager{
-		locks: make([]sync.Mutex, slots),
-		slots: uint64(slots),
-	}
-}
-
-func (m *keyLockManager) Lock(key string) {
-	m.locks[xxh3.HashString(key)%m.slots].Lock()
-}
-
-func (m *keyLockManager) Unlock(key string) {
-	m.locks[xxh3.HashString(key)%m.slots].Unlock()
-}
 
 func (s *Store) nextGeneration() uint64 {
 	return s.generationSeq.Add(1)

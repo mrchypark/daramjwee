@@ -14,10 +14,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	chunkSize = 512 * 1024 // 512KB
-)
-
 const commitLuaScript = `
 if redis.call("EXISTS", KEYS[3]) == 0 then
   redis.call("SET", KEYS[3], "")
@@ -96,13 +92,32 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 	default:
 	}
 
-	meta, err := rs.getMetadata(ctx, key)
-	if err != nil {
+	// Pipeline the three metadata/data checks into a single round trip.
+	pipe := rs.client.Pipeline()
+	metaCmd := pipe.Get(ctx, rs.MetaKey(key))
+	existsCmd := pipe.Exists(ctx, rs.DataKey(key))
+	sizeCmd := pipe.StrLen(ctx, rs.DataKey(key))
+	if _, err := pipe.Exec(ctx); err != nil {
+		if err == redis.Nil {
+			return nil, nil, daramjwee.ErrNotFound
+		}
 		return nil, nil, err
 	}
 
-	// Check if the data key exists
-	exists, err := rs.client.Exists(ctx, rs.DataKey(key)).Result()
+	metaBytes, err := metaCmd.Bytes()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil, daramjwee.ErrNotFound
+		}
+		return nil, nil, err
+	}
+
+	var meta daramjwee.Metadata
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return nil, nil, err
+	}
+
+	exists, err := existsCmd.Result()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -111,8 +126,7 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 		return nil, nil, daramjwee.ErrNotFound
 	}
 
-	// Get the total size of the data
-	size, err := rs.client.StrLen(ctx, rs.DataKey(key)).Result()
+	size, err := sizeCmd.Result()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -125,7 +139,7 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 		offset: 0,
 	}
 
-	return reader, meta, nil
+	return reader, &meta, nil
 }
 
 // BeginSet returns a sink that streams data into Redis.

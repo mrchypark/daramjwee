@@ -1776,17 +1776,7 @@ func (f *contextBoundFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.
 	}, nil
 }
 
-type blockingSourceFetcher struct {
-	source   *blockingReadCloser
-	metadata *daramjwee.Metadata
-}
 
-func (f *blockingSourceFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-	return &daramjwee.FetchResult{
-		Body:     f.source,
-		Metadata: f.metadata,
-	}, nil
-}
 
 type blockingColdStore struct {
 	streamFactory func() io.ReadCloser
@@ -2086,21 +2076,7 @@ func (f *errFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata)
 	return nil, f.err
 }
 
-type closeTrackingReadCloser struct {
-	*bytes.Reader
-	once     sync.Once
-	onClose  func()
-	closeErr error
-}
 
-func (r *closeTrackingReadCloser) Close() error {
-	r.once.Do(func() {
-		if r.onClose != nil {
-			r.onClose()
-		}
-	})
-	return r.closeErr
-}
 
 type statOnlyThenReadableStore struct {
 	data     []byte
@@ -2196,47 +2172,7 @@ func (s *singleEntryCloseErrorStore) Stat(ctx context.Context, key string) (*dar
 	return &meta, nil
 }
 
-type blockingReadCloser struct {
-	first     []byte
-	second    []byte
-	releaseCh chan struct{}
-	stage     int
-}
 
-func newBlockingReadCloser(first, second []byte) *blockingReadCloser {
-	return &blockingReadCloser{
-		first:     bytes.Clone(first),
-		second:    bytes.Clone(second),
-		releaseCh: make(chan struct{}),
-	}
-}
-
-func (r *blockingReadCloser) Read(p []byte) (int, error) {
-	switch r.stage {
-	case 0:
-		r.stage = 1
-		return copy(p, r.first), nil
-	case 1:
-		<-r.releaseCh
-		r.stage = 2
-		return copy(p, r.second), nil
-	default:
-		return 0, io.EOF
-	}
-}
-
-func (r *blockingReadCloser) Close() error {
-	r.Release()
-	return nil
-}
-
-func (r *blockingReadCloser) Release() {
-	select {
-	case <-r.releaseCh:
-	default:
-		close(r.releaseCh)
-	}
-}
 
 var errPublishFailed = assert.AnError
 

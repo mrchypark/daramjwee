@@ -62,9 +62,9 @@ func (c *DaramjweeCache) isCachedStale(oldMeta *Metadata, positive, negative tim
 }
 
 func (c *DaramjweeCache) tierFreshness(index int) (time.Duration, time.Duration) {
-	override, ok := c.tierFreshnessOverrides[index]
+	override, ok := c.config.tierFreshnessOverrides[index]
 	if !ok {
-		return c.positiveFreshness, c.negativeFreshness
+		return c.config.positiveFreshness, c.config.negativeFreshness
 	}
 	return override.Positive, override.Negative
 }
@@ -79,7 +79,7 @@ func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, c.opTimeout)
+	return context.WithTimeout(ctx, c.config.opTimeout)
 }
 
 func usesContextAfterGetStream(store Store) bool {
@@ -118,12 +118,18 @@ func (c *DaramjweeCache) fetchContextForFetcher(requestCtx, setupCtx context.Con
 	return setupCtx
 }
 
-func cloneMetadata(meta *Metadata) *Metadata {
+// CloneMetadata returns a deep copy of the given Metadata.
+// It returns nil if meta is nil.
+func CloneMetadata(meta *Metadata) *Metadata {
 	if meta == nil {
 		return nil
 	}
 	cloned := *meta
 	return &cloned
+}
+
+func cloneMetadata(meta *Metadata) *Metadata {
+	return CloneMetadata(meta)
 }
 
 func newGetResponse(status GetStatus, body io.ReadCloser, meta *Metadata) *GetResponse {

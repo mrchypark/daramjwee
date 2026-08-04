@@ -87,7 +87,7 @@ func TestRedisStore_GetStream_Streaming(t *testing.T) {
 	ctx := context.Background()
 	key := "test-streaming-key"
 	// Create a large data slice to force multiple reads
-	largeData := []byte(strings.Repeat("a", chunkSize*2))
+	largeData := []byte(strings.Repeat("a", 1024*1024))
 	testMetadata := &daramjwee.Metadata{CacheTag: "v1"}
 
 	// 1. Set data

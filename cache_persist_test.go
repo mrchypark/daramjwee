@@ -139,12 +139,14 @@ func TestSchedulePersistFromTop_InvalidationCleanupUsesFreshContext(t *testing.T
 	require.NoError(t, err)
 
 	cache := &DaramjweeCache{
-		tiers:        []Store{src},
-		runtime:      newStandaloneRuntime(workerManager),
-		cacheID:      "persist-cleanup",
-		logger:       log.NewNopLogger(),
-		opTimeout:    time.Second,
-		closeTimeout: time.Second,
+		tiers:   []Store{src},
+		runtime: newStandaloneRuntime(workerManager),
+		cacheID: "persist-cleanup",
+		logger:  log.NewNopLogger(),
+		config: cacheConfig{
+			opTimeout:    time.Second,
+			closeTimeout: time.Second,
+		},
 	}
 	t.Cleanup(cache.Close)
 

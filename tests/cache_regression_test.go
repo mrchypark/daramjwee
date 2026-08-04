@@ -1018,13 +1018,6 @@ type controlledFetcher struct {
 	cacheTag string
 }
 
-type blockingSuccessFetcher struct {
-	started  chan struct{}
-	blocker  chan struct{}
-	content  string
-	cacheTag string
-}
-
 type notifyingSlowSetStore struct {
 	*mockStore
 	closeStarted chan struct{}
@@ -1072,22 +1065,7 @@ func (f blockingFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metad
 	}
 }
 
-func (f blockingSuccessFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-	select {
-	case f.started <- struct{}{}:
-	default:
-	}
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-f.blocker:
-		return &daramjwee.FetchResult{
-			Body:     io.NopCloser(strings.NewReader(f.content)),
-			Metadata: &daramjwee.Metadata{CacheTag: f.cacheTag},
-		}, nil
-	}
-}
 
 func (f *controlledFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	select {
@@ -1145,18 +1123,6 @@ type failingRefreshFetcher struct {
 }
 
 func (f *failingRefreshFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-	return &daramjwee.FetchResult{
-		Body:     f.body,
-		Metadata: f.meta,
-	}, nil
-}
-
-type readCloserRefreshFetcher struct {
-	body io.ReadCloser
-	meta *daramjwee.Metadata
-}
-
-func (f *readCloserRefreshFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	return &daramjwee.FetchResult{
 		Body:     f.body,
 		Metadata: f.meta,

@@ -63,7 +63,7 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 	reader := bytes.NewReader(e.value)
 	readCloser := io.NopCloser(reader)
 
-	return readCloser, cloneMetadata(e.metadata), nil
+	return readCloser, daramjwee.CloneMetadata(e.metadata), nil
 }
 
 // BeginSet returns a writer that streams data into an in-memory buffer.
@@ -129,7 +129,7 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 	// Access via Stat should also be considered a "touch".
 	ms.policy.Touch(key)
 
-	return cloneMetadata(e.metadata), nil
+	return daramjwee.CloneMetadata(e.metadata), nil
 }
 
 // memStoreSink is a helper type that satisfies the daramjwee.WriteSink interface.
@@ -175,9 +175,13 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 
 	finalData := bytes.Clone(w.buf.Bytes())
 	newItemSize := int64(len(finalData))
+	storedMeta := daramjwee.CloneMetadata(w.metadata)
+	if storedMeta == nil {
+		storedMeta = &daramjwee.Metadata{}
+	}
 	newEntry := entry{
 		value:    finalData,
-		metadata: cloneMetadata(w.metadata),
+		metadata: storedMeta,
 	}
 
 	ms := w.ms
@@ -252,10 +256,4 @@ func (w *memStoreSink) release() {
 	w.metadata = nil
 }
 
-func cloneMetadata(meta *daramjwee.Metadata) *daramjwee.Metadata {
-	if meta == nil {
-		return &daramjwee.Metadata{}
-	}
-	cloned := *meta
-	return &cloned
-}
+

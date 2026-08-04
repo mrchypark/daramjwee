@@ -28,14 +28,8 @@ func (e lowerTierPromotionInvalidatedError) Is(target error) bool {
 	return target == ErrTopWriteInvalidated
 }
 
-// DaramjweeCache is a concrete implementation of the Cache interface.
-type DaramjweeCache struct {
-	tiers                  []Store
-	logger                 log.Logger
-	runtime                backgroundRuntime
-	cacheID                string
-	runtimeWeight          int
-	runtimeQueueLimit      int
+// cacheConfig holds the immutable configuration for a DaramjweeCache instance.
+type cacheConfig struct {
 	opTimeout              time.Duration
 	closeTimeout           time.Duration
 	fillLeaseTimeout       time.Duration
@@ -43,10 +37,19 @@ type DaramjweeCache struct {
 	negativeFreshness      time.Duration
 	tierFreshnessOverrides map[int]TierFreshnessOverride
 	loggingDisabled        bool
-	isClosed               atomic.Bool
-	topWrites              topWriteManager
-	fanoutWrites           fanoutWriteManager
-	closeHook              func()
+}
+
+// DaramjweeCache is a concrete implementation of the Cache interface.
+type DaramjweeCache struct {
+	tiers      []Store
+	logger     log.Logger
+	runtime    backgroundRuntime
+	cacheID    string
+	config     cacheConfig
+	closeHook  func()
+	isClosed   atomic.Bool
+	topWrites  topWriteManager
+	fanoutWrites fanoutWriteManager
 }
 
 var _ Cache = (*DaramjweeCache)(nil)
@@ -75,7 +78,19 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 				}
 				return resp, nil
 			}
-			resp, respErr := c.handleLowerTierHit(ctx, setupCtx, key, i, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart, higherTiersClean)
+			resp, respErr := c.handleLowerTierHit(lowerTierHitParams{
+				requestCtx:         ctx,
+				setupCtx:           setupCtx,
+				key:                key,
+				tierIndex:          i,
+				req:                req,
+				fetcher:            fetcher,
+				src:                tierStream,
+				meta:               tierMeta,
+				cancel:             cancel,
+				expectedGeneration: topGenerationAtStart,
+				higherTiersClean:   higherTiersClean,
+			})
 			if respErr != nil {
 				cancel()
 				return nil, respErr
@@ -180,7 +195,7 @@ func (c *DaramjweeCache) Close() {
 
 	if c.runtime != nil {
 		c.infoLog("msg", "shutting down daramjwee cache")
-		if err := c.runtime.CloseCache(c.cacheID, c.closeTimeout); err != nil {
+		if err := c.runtime.CloseCache(c.cacheID, c.config.closeTimeout); err != nil {
 			c.errorLog("msg", "graceful shutdown failed", "err", err)
 		} else {
 			c.infoLog("msg", "daramjwee cache shutdown complete")

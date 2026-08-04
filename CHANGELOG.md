@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.9.2
+
+### 🧰 Internal Improvements
+
+*   **Deduplicated `cloneMetadata`**: extracted to root package as exported `CloneMetadata`, removing duplication across `memstore` and `objectstore`.
+*   **Shared striped lock manager**: extracted `internal/stripedlock` package, replacing duplicated implementations in `filestore` and `objectstore`.
+*   **Split `write_coordinator.go`**: moved 3 coordinated sink wrappers (`coordinatedTopWriteSink`, `coordinatedStagedTopWriteSink`, `conditionalGenerationWriteSink`) to `write_coordinator_sinks.go`, reducing the main file from 1054 to 770 lines.
+*   **Refactored `cache_read.go`**: introduced `lowerTierHitParams` struct to replace 9-parameter `handleLowerTierHit` and extracted `serveLowerTierWithoutPromotion` for cleaner branching.
+*   **Extracted `cacheConfig` struct**: moved configuration-related fields from `DaramjweeCache` into a dedicated `cacheConfig` type.
+
+### ⚡ Performance
+
+*   **RedisStore `GetStream` pipelining**: combined 3 serial Redis round trips (GET meta, EXISTS data, STRLEN data) into a single pipeline.
+*   **ObjectStore `publishManifest`**: replaced `strings.NewReader(string(bytes))` with `bytes.NewReader(bytes)` to avoid unnecessary allocation.
+*   **FileStore initialization**: switched from `filepath.Walk` to `filepath.WalkDir` for faster cold-start on large caches.
+
+### 🧹 Cleanup
+
+*   Removed dead `chunkSize` constant from `redisstore`.
+*   Added `.golangci.yml` with production-appropriate linter settings.
+*   Extracted shared test helpers to `tests/testutil_test.go`.
+
+### ✅ Verification
+
+*   `go test -short ./...`
+*   `go vet ./...`
+
 ## v0.9.1
 
 ### ⚠️ Breaking Changes & API Updates

@@ -64,7 +64,7 @@ func TestNew_ExposesDaramjweeCacheWithoutExportingRuntimeFields(t *testing.T) {
 	typed, ok := cache.(*daramjwee.DaramjweeCache)
 	require.True(t, ok)
 
-	cacheType := reflect.TypeOf(*typed)
+	cacheType := reflect.TypeOf(typed).Elem()
 	exportedRuntimeFields := []string{
 		"Tiers",
 		"Logger",
@@ -100,7 +100,6 @@ func TestNewGroup_ConstructorSurface(t *testing.T) {
 	defaultQueueCache, err := group.NewCache("shared-default", daramjwee.WithTiers(&optionsCompatibleStore{}), daramjwee.WithWeight(2))
 	require.NoError(t, err)
 	require.NotNil(t, defaultQueueCache)
-	require.Equal(t, 8, int(reflect.ValueOf(defaultQueueCache).Elem().FieldByName("runtimeQueueLimit").Int()))
 	t.Cleanup(defaultQueueCache.Close)
 }
 

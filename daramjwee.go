@@ -419,19 +419,19 @@ func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ..
 
 func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID string, cfg Config, fillLeaseTimeout time.Duration) (Cache, error) {
 	cache := &DaramjweeCache{
-		logger:                 logger,
-		runtime:                runtime,
-		cacheID:                cacheID,
-		tiers:                  append([]Store(nil), cfg.Tiers...),
-		runtimeWeight:          cfg.Weight,
-		runtimeQueueLimit:      cfg.QueueLimit,
-		opTimeout:              cfg.OpTimeout,
-		closeTimeout:           cfg.CloseTimeout,
-		fillLeaseTimeout:       fillLeaseTimeout,
-		positiveFreshness:      cfg.PositiveFreshness,
-		negativeFreshness:      cfg.NegativeFreshness,
-		tierFreshnessOverrides: cloneTierFreshnessOverrides(cfg.TierFreshnessOverrides),
-		loggingDisabled:        isNoopLogger(logger),
+		logger:  logger,
+		runtime: runtime,
+		cacheID: cacheID,
+		tiers:   append([]Store(nil), cfg.Tiers...),
+		config: cacheConfig{
+			opTimeout:              cfg.OpTimeout,
+			closeTimeout:           cfg.CloseTimeout,
+			fillLeaseTimeout:       fillLeaseTimeout,
+			positiveFreshness:      cfg.PositiveFreshness,
+			negativeFreshness:      cfg.NegativeFreshness,
+			tierFreshnessOverrides: cloneTierFreshnessOverrides(cfg.TierFreshnessOverrides),
+			loggingDisabled:        isNoopLogger(logger),
+		},
 	}
 
 	if runtime != nil {
@@ -440,7 +440,7 @@ func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID st
 		}
 	}
 
-	level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", cache.opTimeout)
+	level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", cache.config.opTimeout)
 	return cache, nil
 }
 

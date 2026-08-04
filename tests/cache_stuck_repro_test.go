@@ -539,21 +539,6 @@ func closeReproResponses(responses []*daramjwee.GetResponse) {
 	}
 }
 
-func writeCacheValue(cache daramjwee.Cache, key, value, tag string) error {
-	writer, err := cache.Set(context.Background(), key, &daramjwee.Metadata{CacheTag: tag})
-	if err != nil {
-		return err
-	}
-	if _, err := io.WriteString(writer, value); err != nil {
-		abortErr := writer.Abort()
-		if abortErr != nil {
-			return fmt.Errorf("write: %w; abort: %v", err, abortErr)
-		}
-		return err
-	}
-	return writer.Close()
-}
-
 type staticFetcher struct {
 	value    string
 	cacheTag string
@@ -581,19 +566,6 @@ func firstNotRefreshedKey(tb testing.TB, store daramjwee.Store, keyCount int) st
 		}
 	}
 	return ""
-}
-
-func readStoreValue(ctx context.Context, store daramjwee.Store, key string) (string, *daramjwee.Metadata, error) {
-	reader, meta, err := store.GetStream(ctx, key)
-	if err != nil {
-		return "", nil, err
-	}
-	defer reader.Close()
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		return "", nil, err
-	}
-	return string(body), meta, nil
 }
 
 type reproDiagnosticLogger struct {

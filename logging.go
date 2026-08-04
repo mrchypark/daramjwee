@@ -17,35 +17,35 @@ func isNoopLogger(logger log.Logger) bool {
 }
 
 func (c *DaramjweeCache) debugLog(keyvals ...any) {
-	if c.loggingDisabled || c.logger == nil {
+	if c.config.loggingDisabled || c.logger == nil {
 		return
 	}
 	_ = level.Debug(c.logger).Log(keyvals...)
 }
 
 func (c *DaramjweeCache) infoLog(keyvals ...any) {
-	if c.loggingDisabled || c.logger == nil {
+	if c.config.loggingDisabled || c.logger == nil {
 		return
 	}
 	_ = level.Info(c.logger).Log(keyvals...)
 }
 
 func (c *DaramjweeCache) warnLog(keyvals ...any) {
-	if c.loggingDisabled || c.logger == nil {
+	if c.config.loggingDisabled || c.logger == nil {
 		return
 	}
 	_ = level.Warn(c.logger).Log(keyvals...)
 }
 
 func (c *DaramjweeCache) errorLog(keyvals ...any) {
-	if c.loggingDisabled || c.logger == nil {
+	if c.config.loggingDisabled || c.logger == nil {
 		return
 	}
 	_ = level.Error(c.logger).Log(keyvals...)
 }
 
 func (c *DaramjweeCache) diagnosticLog(event, key string, generation uint64, keyvals ...any) {
-	if c.loggingDisabled || c.logger == nil || !cacheDiagnosticsEnabled() {
+	if c.config.loggingDisabled || c.logger == nil || !cacheDiagnosticsEnabled() {
 		return
 	}
 	diagnostic := []any{

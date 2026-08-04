@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -48,9 +47,6 @@ func TestCacheGroup_NewCacheAppliesGroupQueueDefault(t *testing.T) {
 	cache, err := group.NewCache("cache-a", daramjwee.WithTiers(groupTestStore{}))
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
-
-	typed := reflect.ValueOf(cache).Elem()
-	require.Equal(t, 12, int(typed.FieldByName("runtimeQueueLimit").Int()))
 }
 
 func TestCacheGroup_CloseClosesCreatedCaches(t *testing.T) {

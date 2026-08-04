@@ -54,46 +54,67 @@ func (c *DaramjweeCache) topTierCloseCallback(requestCtx context.Context, key st
 	return c.refreshOnCloseCallback(requestCtx, key, fetcher, cancel, meta, observedGeneration)
 }
 
-// handleLowerTierHit processes the logic when an object is found in a lower tier.
-func (c *DaramjweeCache) handleLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, req GetRequest, fetcher Fetcher, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc, expectedGeneration uint64, higherTiersClean bool) (*GetResponse, error) {
-	c.debugLog("msg", "lower tier hit, promoting to top tier", "key", key, "tier_index", tierIndex)
+// lowerTierHitParams groups the parameters for handleLowerTierHit.
+type lowerTierHitParams struct {
+	requestCtx         context.Context
+	setupCtx           context.Context
+	key                string
+	tierIndex          int
+	req                GetRequest
+	fetcher            Fetcher
+	src                io.ReadCloser
+	meta               *Metadata
+	cancel             context.CancelFunc
+	expectedGeneration uint64
+	higherTiersClean   bool
+}
 
-	metaToPromote := cloneMetadata(meta)
+// handleLowerTierHit processes the logic when an object is found in a lower tier.
+func (c *DaramjweeCache) handleLowerTierHit(p lowerTierHitParams) (*GetResponse, error) {
+	c.debugLog("msg", "lower tier hit, promoting to top tier", "key", p.key, "tier_index", p.tierIndex)
+
+	metaToPromote := cloneMetadata(p.meta)
 	if metaToPromote == nil {
 		metaToPromote = &Metadata{}
 	}
 
-	isStale := c.isTierCachedStale(meta, tierIndex)
-	if c.isConditionalRequestSatisfied(req, meta) {
-		if !higherTiersClean {
-			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
-		}
-		return c.handleConditionalLowerTierHit(requestCtx, setupCtx, key, tierIndex, fetcher, src, meta, metaToPromote, cancel, isStale, expectedGeneration)
+	isStale := c.isTierCachedStale(p.meta, p.tierIndex)
+
+	// When higher tiers are dirty, serve from this tier without promotion.
+	if !p.higherTiersClean {
+		return c.serveLowerTierWithoutPromotion(p, isStale)
 	}
-	if meta.IsNegative {
-		if !higherTiersClean {
-			if err := src.Close(); err != nil {
-				cancel()
-				return nil, err
-			}
-			cancel()
-			return newGetResponse(GetStatusNotFound, nil, meta), nil
-		}
+
+	if c.isConditionalRequestSatisfied(p.req, p.meta) {
+		return c.handleConditionalLowerTierHit(p.requestCtx, p.setupCtx, p.key, p.tierIndex, p.fetcher, p.src, p.meta, metaToPromote, p.cancel, isStale, p.expectedGeneration)
+	}
+	if p.meta.IsNegative {
 		if isStale {
-			return c.handleStaleLowerTierHit(requestCtx, key, tierIndex, fetcher, src, meta, cancel, expectedGeneration)
+			return c.handleStaleLowerTierHit(p.requestCtx, p.key, p.tierIndex, p.fetcher, p.src, p.meta, p.cancel, p.expectedGeneration)
 		}
-		return c.promoteNegativeLowerTierHit(requestCtx, setupCtx, key, tierIndex, src, meta, metaToPromote, cancel, expectedGeneration)
+		return c.promoteNegativeLowerTierHit(p.requestCtx, p.setupCtx, p.key, p.tierIndex, p.src, p.meta, metaToPromote, p.cancel, p.expectedGeneration)
 	}
 	if isStale {
-		if !higherTiersClean {
-			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
+		return c.handleStaleLowerTierHit(p.requestCtx, p.key, p.tierIndex, p.fetcher, p.src, p.meta, p.cancel, p.expectedGeneration)
+	}
+	return c.promotePositiveLowerTierHit(p.requestCtx, p.setupCtx, p.key, p.tierIndex, p.src, p.meta, metaToPromote, p.cancel, p.expectedGeneration), nil
+}
+
+// serveLowerTierWithoutPromotion serves data from a lower tier when higher tiers
+// are dirty and promotion is not safe.
+func (c *DaramjweeCache) serveLowerTierWithoutPromotion(p lowerTierHitParams, isStale bool) (*GetResponse, error) {
+	if c.isConditionalRequestSatisfied(p.req, p.meta) {
+		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(p.src, p.cancel), p.meta), nil
+	}
+	if p.meta.IsNegative {
+		if err := p.src.Close(); err != nil {
+			p.cancel()
+			return nil, err
 		}
-		return c.handleStaleLowerTierHit(requestCtx, key, tierIndex, fetcher, src, meta, cancel, expectedGeneration)
+		p.cancel()
+		return newGetResponse(GetStatusNotFound, nil, p.meta), nil
 	}
-	if !higherTiersClean {
-		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta), nil
-	}
-	return c.promotePositiveLowerTierHit(requestCtx, setupCtx, key, tierIndex, src, meta, metaToPromote, cancel, expectedGeneration), nil
+	return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(p.src, p.cancel), p.meta), nil
 }
 
 func (c *DaramjweeCache) handleConditionalLowerTierHit(requestCtx, _ context.Context, key string, tierIndex int, fetcher Fetcher, src io.ReadCloser, meta, _ *Metadata, cancel context.CancelFunc, isStale bool, expectedGeneration uint64) (*GetResponse, error) {

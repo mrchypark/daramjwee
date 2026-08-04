@@ -139,42 +139,7 @@ func FuzzLowerTierFanoutStateMachine(f *testing.F) {
 	})
 }
 
-type entryExpectation struct {
-	present  bool
-	negative bool
-	value    string
-	cacheTag string
-}
 
-func eventuallyExpectStoreState(t *testing.T, store *mockStore, key string, want entryExpectation) {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		got, err := currentMockStoreState(store, key)
-		return err == nil && got == want
-	}, 2*time.Second, 10*time.Millisecond, "store state for %q did not converge to %+v", key, want)
-}
-
-func currentMockStoreState(store *mockStore, key string) (entryExpectation, error) {
-	reader, meta, err := store.GetStream(context.Background(), key)
-	if err != nil {
-		if err == daramjwee.ErrNotFound {
-			return entryExpectation{}, nil
-		}
-		return entryExpectation{}, err
-	}
-	defer reader.Close()
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		return entryExpectation{}, err
-	}
-	got := entryExpectation{
-		present:  true,
-		negative: meta.IsNegative,
-		value:    string(body),
-		cacheTag: meta.CacheTag,
-	}
-	return got, nil
-}
 
 type cacheableNotFoundFetcher struct{}
 
