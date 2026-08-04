@@ -59,6 +59,10 @@ func (a *objstoreAdapter) BeginSet(ctx context.Context, key string, metadata *da
 	return a.modern.BeginSet(ctx, key, metadata)
 }
 
+func (a *objstoreAdapter) BeginStagedSet(ctx context.Context, key string, metadata *daramjwee.Metadata) (daramjwee.StagedWriteSink, error) {
+	return a.modern.BeginStagedSet(ctx, key, metadata)
+}
+
 func (a *objstoreAdapter) Delete(ctx context.Context, key string) error {
 	legacyExists, err := a.hasLegacyMetadataObject(ctx, key)
 	if err != nil {

@@ -158,7 +158,7 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 
 	// Initialize current size by scanning existing files
 	if err := fs.initializeCurrentSize(); err != nil {
-		level.Warn(logger).Log("msg", "failed to initialize current size", "err", err)
+		return nil, fmt.Errorf("filestore: initialize current size: %w", err)
 	}
 
 	return fs, nil
@@ -775,7 +775,16 @@ func (s *stagedFileWriteSink) abort() error {
 // and populate the fileSizes map for existing files.
 // It uses filepath.WalkDir for better performance than filepath.Walk.
 func (fs *FileStore) initializeCurrentSize() error {
-	return filepath.WalkDir(fs.baseDir, func(path string, d os.DirEntry, err error) error {
+	type policyOperation struct {
+		key    string
+		size   int64
+		remove bool
+	}
+
+	fileSizes := make(map[string]int64)
+	var currentSize int64
+	var policyOperations []policyOperation
+	if err := filepath.WalkDir(fs.baseDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -807,16 +816,29 @@ func (fs *FileStore) initializeCurrentSize() error {
 		}
 		size := info.Size()
 
-		if oldSize, exists := fs.fileSizes[key]; exists {
-			fs.currentSize -= oldSize
-			fs.policy.Remove(key)
+		if oldSize, exists := fileSizes[key]; exists {
+			currentSize -= oldSize
+			policyOperations = append(policyOperations, policyOperation{key: key, remove: true})
 		}
-		fs.fileSizes[key] = size
-		fs.currentSize += size
-		fs.policy.Add(key, size)
+		fileSizes[key] = size
+		currentSize += size
+		policyOperations = append(policyOperations, policyOperation{key: key, size: size})
 
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	fs.fileSizes = fileSizes
+	fs.currentSize = currentSize
+	for _, operation := range policyOperations {
+		if operation.remove {
+			fs.policy.Remove(operation.key)
+			continue
+		}
+		fs.policy.Add(operation.key, operation.size)
+	}
+	return nil
 }
 
 func (fs *FileStore) nextGeneration() uint64 {

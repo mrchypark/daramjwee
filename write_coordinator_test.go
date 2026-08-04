@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,215 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestTopWriteManagerRetiresCompletedHighCardinalityWrites(t *testing.T) {
+	store := &stubStagingStore{}
+	cache := &DaramjweeCache{
+		tiers:  []Store{store},
+		config: cacheConfig{opTimeout: time.Second, closeTimeout: time.Second},
+	}
+
+	const keyCount = 128
+	for i := range keyCount {
+		writer, err := cache.Set(context.Background(), fmt.Sprintf("key-%d", i), &Metadata{})
+		if err != nil {
+			t.Fatalf("Set key %d: %v", i, err)
+		}
+		if i%2 == 0 {
+			err = writer.Close()
+		} else {
+			err = writer.Abort()
+		}
+		if err != nil {
+			t.Fatalf("finish key %d: %v", i, err)
+		}
+	}
+
+	retained := 0
+	cache.topWrites.coords.Range(func(_, _ any) bool {
+		retained++
+		return true
+	})
+	if retained != 0 {
+		t.Fatalf("expected completed coordinators to retire, retained %d", retained)
+	}
+}
+
+func TestTopWriteManagerConcurrentAcquiresShareCoordinator(t *testing.T) {
+	manager := &topWriteManager{}
+	const callers = 64
+
+	start := make(chan struct{})
+	release := make(chan struct{})
+	results := make(chan *writeCoordinator, callers)
+	var workers sync.WaitGroup
+	workers.Add(callers)
+	for range callers {
+		go func() {
+			defer workers.Done()
+			<-start
+			coord := manager.coordinator("key")
+			results <- coord
+			<-release
+			coord.releaseReference()
+		}()
+	}
+
+	close(start)
+	first := <-results
+	for range callers - 1 {
+		if got := <-results; got != first {
+			t.Fatalf("concurrent callers split across coordinators: first=%p got=%p", first, got)
+		}
+	}
+	close(release)
+	workers.Wait()
+	if _, ok := manager.coords.Load("key"); ok {
+		t.Fatal("expected shared coordinator to retire after the last caller")
+	}
+}
+
+func TestTopWriteManagerRejectsReleasedObservationAfterReplacement(t *testing.T) {
+	manager := &topWriteManager{}
+	stale := manager.currentGeneration("key")
+	retired := stale.coord
+	stale.release()
+
+	fresh := manager.coordinator("key")
+	defer fresh.releaseReference()
+	if fresh == retired {
+		t.Fatal("expected a fresh coordinator after retirement")
+	}
+
+	if coord, _, err := manager.coordinatorForWrite("key", stale); !errors.Is(err, ErrTopWriteInvalidated) || coord != nil {
+		t.Fatalf("expected released observation to be rejected, coord=%p err=%v", coord, err)
+	}
+	if current, ok := manager.coords.Load("key"); !ok || current != fresh {
+		t.Fatal("stale observation changed or removed the fresh coordinator")
+	}
+}
+
+func TestTopWriteManagerUnrelatedKeyDoesNotInvalidateObservation(t *testing.T) {
+	cache := &DaramjweeCache{}
+	observed := cache.currentTopWriteGeneration("key-a")
+	defer observed.release()
+
+	cache.noteTopWriteGeneration("key-b")
+	if !cache.canAttemptExpectedTopWrite("key-a", observed) {
+		t.Fatal("unrelated key write invalidated key-a observation")
+	}
+	if got := observed.coord.current(); got != observed.generation {
+		t.Fatalf("unrelated key changed visible generation: got %d want %d", got, observed.generation)
+	}
+}
+
+func TestCloseCorePanicReleasesCoordinatorReferenceAndWriteLease(t *testing.T) {
+	tests := []struct {
+		name           string
+		conditional    bool
+		panicFromAbort bool
+	}{
+		{name: "non-staging commit"},
+		{name: "conditional commit", conditional: true},
+		{name: "abort", panicFromAbort: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := &topWriteManager{}
+			coord := manager.coordinator("key")
+			var generation uint64
+			var err error
+			if tt.conditional {
+				generation, err = coord.reserve(context.Background(), nil)
+			} else {
+				generation, err = coord.begin(context.Background(), nil)
+			}
+			require.NoError(t, err)
+
+			if tt.panicFromAbort {
+				coord.stateMu.Lock()
+				coord.committedGeneration.Store(generation + 1)
+				coord.stateMu.Unlock()
+			}
+
+			var recovered any
+			var releaseLease func()
+			if !tt.conditional {
+				releaseLease = coord.releaseWrite
+			}
+			func() {
+				defer func() { recovered = recover() }()
+				_ = closeCore(context.Background(), closeCoreParams{
+					generation: generation,
+					coord:      coord,
+				}, func(context.Context) error {
+					panic("commit panic")
+				}, func() error {
+					if tt.panicFromAbort {
+						panic("abort panic")
+					}
+					return nil
+				}, releaseLease)
+			}()
+			require.NotNil(t, recovered)
+			if tt.panicFromAbort {
+				require.Equal(t, "abort panic", recovered)
+			} else {
+				require.Equal(t, "commit panic", recovered)
+			}
+			if _, ok := manager.coords.Load("key"); ok {
+				t.Fatal("expected coordinator reference to be released after panic")
+			}
+
+			if !tt.conditional {
+				leaseCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				require.NoError(t, coord.acquireWrite(leaseCtx))
+				coord.releaseWrite()
+			}
+		})
+	}
+}
+
+func TestStagedClosePreservesCommitPanicWhenAbortPanics(t *testing.T) {
+	manager := &topWriteManager{}
+	coord := manager.coordinator("key")
+	generation, err := coord.reserve(context.Background(), nil)
+	require.NoError(t, err)
+
+	commitPanic := errors.New("commit panic")
+	abortPanic := errors.New("abort panic")
+	underlying := &panicStagedWriteSink{
+		commitPanic: commitPanic,
+		abortPanic:  abortPanic,
+	}
+	sink := &coordinatedStagedTopWriteSink{
+		sink:       underlying,
+		coord:      coord,
+		generation: generation,
+	}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = sink.Close()
+	}()
+	require.Same(t, commitPanic, recovered)
+	require.Equal(t, 1, underlying.abortCalls)
+	if _, ok := manager.coords.Load("key"); ok {
+		t.Fatal("expected coordinator reference to be released after panic")
+	}
+	coord.stateMu.Lock()
+	_, reserved := coord.activeReservations[generation]
+	coord.stateMu.Unlock()
+	require.False(t, reserved)
+
+	leaseCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, coord.acquireCommit(leaseCtx))
+	coord.releaseCommit()
+}
 
 func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *testing.T) {
 	store := &destructiveReservationStore{
@@ -25,10 +235,11 @@ func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *te
 			closeTimeout: time.Second,
 		},
 	}
+	expectedGeneration := cache.currentTopWriteGeneration("key")
+	defer expectedGeneration.release()
 	cache.noteTopWriteGeneration("key")
 
-	expectedGeneration := uint64(0)
-	writer, err := cache.setStreamToTopStoreWithGeneration(context.Background(), "key", &Metadata{CacheTag: "stale"}, &expectedGeneration)
+	writer, err := cache.setStreamToTopStoreWithGeneration(context.Background(), "key", &Metadata{CacheTag: "stale"}, expectedGeneration)
 	if !errors.Is(err, ErrTopWriteInvalidated) {
 		t.Fatalf("expected invalidated error, got writer=%v err=%v", writer, err)
 	}
@@ -50,15 +261,18 @@ func TestSetStreamToStoreWithTopGenerationRestoresGenerationOnBeginSetFailure(t 
 		},
 	}
 
-	expectedGeneration := uint64(0)
-	writer, err := cache.setStreamToTopStoreWithGeneration(context.Background(), "key", &Metadata{CacheTag: "v1"}, &expectedGeneration)
+	expectedGeneration := cache.currentTopWriteGeneration("key")
+	defer expectedGeneration.release()
+	writer, err := cache.setStreamToTopStoreWithGeneration(context.Background(), "key", &Metadata{CacheTag: "v1"}, expectedGeneration)
 	if writer != nil {
 		t.Fatalf("expected no writer on BeginSet failure, got %T", writer)
 	}
 	if !errors.Is(err, store.err) {
 		t.Fatalf("expected BeginSet error, got %v", err)
 	}
-	if got := cache.currentTopWriteGeneration("key"); got != 0 {
+	current := cache.currentTopWriteGeneration("key")
+	defer current.release()
+	if got := current.generation; got != 0 {
 		t.Fatalf("expected generation to be restored after BeginSet failure, got %d", got)
 	}
 }
@@ -85,7 +299,7 @@ func TestRolledBackReservationDoesNotInvalidateConditionalWrite(t *testing.T) {
 func TestSetStreamToTopStoreDoesNotExposeStagedCommitBypass(t *testing.T) {
 	store := &stubStagingStore{}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
@@ -111,7 +325,7 @@ func TestLaterStagedBeginFailureDoesNotInvalidateOlderWriter(t *testing.T) {
 		secondBeginErr:     beginErr,
 	}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
@@ -165,7 +379,7 @@ func TestLaterStagedAbortCleanupDoesNotInvalidateOlderWriter(t *testing.T) {
 		releaseAbort: make(chan struct{}),
 	}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
@@ -220,14 +434,16 @@ func TestStagedFillPreemptDoesNotWaitForAbortCleanup(t *testing.T) {
 		releaseAbort: make(chan struct{}),
 	}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
 		},
 	}
 
-	fill, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
+	observed := cache.currentTopWriteGeneration("key")
+	defer observed.release()
+	fill, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, observed)
 	if err != nil {
 		t.Fatalf("fill writer failed: %v", err)
 	}
@@ -269,14 +485,16 @@ func TestStagedFillDeletePreemptDoesNotWaitForAbortCleanup(t *testing.T) {
 		releaseAbort: make(chan struct{}),
 	}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
 		},
 	}
 
-	fill, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
+	observed := cache.currentTopWriteGeneration("key")
+	defer observed.release()
+	fill, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, observed)
 	if err != nil {
 		t.Fatalf("fill writer failed: %v", err)
 	}
@@ -314,7 +532,7 @@ func TestLegacyFillContextCancelPreemptsPendingBeginSet(t *testing.T) {
 		releaseBegin: make(chan struct{}),
 	}
 	cache := &DaramjweeCache{
-		tiers:            []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:        time.Second,
 			closeTimeout:     time.Second,
@@ -323,9 +541,11 @@ func TestLegacyFillContextCancelPreemptsPendingBeginSet(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	observed := cache.currentTopWriteGeneration("key")
+	defer observed.release()
 	fillDone := make(chan error, 1)
 	go func() {
-		writer, err := cache.setStreamToTopStoreForFill(ctx, "key", &Metadata{CacheTag: "fill"}, 0)
+		writer, err := cache.setStreamToTopStoreForFill(ctx, "key", &Metadata{CacheTag: "fill"}, observed)
 		if writer != nil {
 			_ = writer.Abort()
 		}
@@ -380,7 +600,7 @@ func TestLegacyFillPreemptCancelsPendingBeginSet(t *testing.T) {
 		releaseBegin: make(chan struct{}),
 	}
 	cache := &DaramjweeCache{
-		tiers:            []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:        time.Second,
 			closeTimeout:     time.Second,
@@ -388,9 +608,11 @@ func TestLegacyFillPreemptCancelsPendingBeginSet(t *testing.T) {
 		},
 	}
 
+	observed := cache.currentTopWriteGeneration("key")
+	defer observed.release()
 	fillDone := make(chan error, 1)
 	go func() {
-		writer, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, 0)
+		writer, err := cache.setStreamToTopStoreForFill(context.Background(), "key", &Metadata{CacheTag: "fill"}, observed)
 		if writer != nil {
 			_ = writer.Abort()
 		}
@@ -438,7 +660,7 @@ func TestStaleStagedCloseAbortCleanupDoesNotBlockNewerCommit(t *testing.T) {
 		releaseAbort: make(chan struct{}),
 	}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
@@ -498,7 +720,7 @@ func TestStaleStagedCloseAbortCleanupDoesNotBlockNewerCommit(t *testing.T) {
 func TestStagedCloseWaitingForDeleteTimesOutAndReleasesReservation(t *testing.T) {
 	store := &stubStagingStore{}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: 25 * time.Millisecond,
@@ -534,7 +756,7 @@ func TestStagedCloseWaitingForDeleteTimesOutAndReleasesReservation(t *testing.T)
 func TestLegacyTopWriteCloseWaitingForDeleteTimesOut(t *testing.T) {
 	store := &countingBeginSetStore{}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: 25 * time.Millisecond,
@@ -607,7 +829,7 @@ func TestStagedCloseWaitingForCommitLeaseTimesOutAndReleasesReservation(t *testi
 		releaseCommit: make(chan struct{}),
 	}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: 25 * time.Millisecond,
@@ -668,7 +890,7 @@ func TestStagedCloseWaitingForCommitLeaseTimesOutAndReleasesReservation(t *testi
 func TestCommittedStagedWritePrunesOlderAbandonedReservations(t *testing.T) {
 	store := &stubStagingStore{}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
@@ -701,7 +923,7 @@ func TestStagedCloseAbortsUnderlyingSinkAfterCommitFailure(t *testing.T) {
 	commitErr := errors.New("commit failed")
 	store := &failingCommitStagingStore{commitErr: commitErr}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
@@ -729,7 +951,7 @@ func TestFailedStagedCommitAbortCleanupDoesNotHoldCommitLease(t *testing.T) {
 		releaseAbort: make(chan struct{}),
 	}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: 25 * time.Millisecond,
@@ -784,18 +1006,20 @@ func TestFailedStagedCommitAbortCleanupDoesNotHoldCommitLease(t *testing.T) {
 func TestCurrentTopWriteGenerationDoesNotCreateCoordinatorForMissingKey(t *testing.T) {
 	cache := &DaramjweeCache{}
 
-	if got := cache.currentTopWriteGeneration("missing"); got != 0 {
+	observed := cache.currentTopWriteGeneration("missing")
+	if got := observed.generation; got != 0 {
 		t.Fatalf("expected zero generation for missing key, got %d", got)
 	}
+	observed.release()
 	if _, ok := cache.topWrites.coords.Load("missing"); ok {
-		t.Fatal("expected read-only generation lookup not to create coordinator")
+		t.Fatal("expected completed generation observation not to retain a coordinator")
 	}
 }
 
 func TestSetStreamToTopStoreWithGenerationHonorsCanceledContextWhileDeleteInProgress(t *testing.T) {
 	store := &failingBeginSetStore{}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
@@ -878,7 +1102,7 @@ func TestConditionalGenerationWriteSinkDoesNotReturnTimeoutAfterSuccessfulClose(
 func TestSetWithAbandonedTopWriteSinkReturnsWhenContextExpires(t *testing.T) {
 	store := &countingBeginSetStore{}
 	cache := &DaramjweeCache{
-		tiers:        []Store{store},
+		tiers: []Store{store},
 		config: cacheConfig{
 			opTimeout:    time.Second,
 			closeTimeout: time.Second,
@@ -1813,6 +2037,21 @@ func (s *stubStagedWriteSink) Commit(ctx context.Context) error {
 	return nil
 }
 func (s *stubStagedWriteSink) Abort() error { return nil }
+
+type panicStagedWriteSink struct {
+	commitPanic any
+	abortPanic  any
+	abortCalls  int
+}
+
+func (s *panicStagedWriteSink) Write(p []byte) (int, error) { return len(p), nil }
+func (s *panicStagedWriteSink) Commit(context.Context) error {
+	panic(s.commitPanic)
+}
+func (s *panicStagedWriteSink) Abort() error {
+	s.abortCalls++
+	panic(s.abortPanic)
+}
 
 type blockingFirstBeginSetStore struct {
 	beginStarted chan struct{}

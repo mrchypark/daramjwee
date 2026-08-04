@@ -11,10 +11,11 @@ type staleRefreshCallback struct {
 	fetcher            Fetcher
 	cancel             context.CancelFunc
 	meta               *Metadata
-	observedGeneration uint64
+	observedGeneration *topWriteGeneration
 }
 
-func newStaleRefreshCallback(cache *DaramjweeCache, requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, meta *Metadata, observedGeneration uint64) *staleRefreshCallback {
+func newStaleRefreshCallback(cache *DaramjweeCache, requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, meta *Metadata, observedGeneration *topWriteGeneration) *staleRefreshCallback {
+	ownedGeneration := observedGeneration.retain()
 	return &staleRefreshCallback{
 		cache:              cache,
 		requestCtx:         requestCtx,
@@ -22,15 +23,16 @@ func newStaleRefreshCallback(cache *DaramjweeCache, requestCtx context.Context, 
 		fetcher:            fetcher,
 		cancel:             cancel,
 		meta:               meta,
-		observedGeneration: observedGeneration,
+		observedGeneration: ownedGeneration,
 	}
 }
 
 func (s *staleRefreshCallback) handle() {
 	defer s.cancel()
+	defer s.observedGeneration.release()
 	if err := s.cache.scheduleRefreshWithMetadata(
 		detachedValueContext(s.requestCtx), s.key, s.fetcher,
-		cloneMetadata(s.meta), nil, &s.observedGeneration,
+		cloneMetadata(s.meta), nil, s.observedGeneration,
 	); err != nil {
 		s.cache.warnLog("msg", "failed to schedule stale refresh", "key", s.key, "err", err)
 	}
@@ -45,14 +47,15 @@ type lowerTierRefreshCallback struct {
 	cancel             context.CancelFunc
 	meta               *Metadata
 	source             tierDestination
-	observedGeneration uint64
+	observedGeneration *topWriteGeneration
 }
 
 func (s *lowerTierRefreshCallback) handle() {
 	defer s.cancel()
+	defer s.observedGeneration.release()
 	if err := s.cache.scheduleRefreshWithMetadata(
 		detachedValueContext(s.requestCtx), s.key, s.fetcher,
-		cloneMetadata(s.meta), &s.source, &s.observedGeneration,
+		cloneMetadata(s.meta), &s.source, s.observedGeneration,
 	); err != nil {
 		s.cache.warnLog("msg", "failed to schedule stale refresh", "key", s.key, "source_tier", s.source.tierIndex, "err", err)
 	}

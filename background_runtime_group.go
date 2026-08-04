@@ -58,6 +58,7 @@ type queuedBackgroundJob struct {
 	cacheID string
 	kind    JobKind
 	job     worker.Job
+	onDrop  func()
 }
 
 func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) *groupRuntime {
@@ -118,6 +119,14 @@ func (r *groupRuntime) Register(cacheID string, cfg CacheRuntimeConfig) error {
 }
 
 func (r *groupRuntime) Submit(cacheID string, kind JobKind, job worker.Job) bool {
+	return r.submit(cacheID, kind, job, nil)
+}
+
+func (r *groupRuntime) SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
+	return r.submit(cacheID, kind, job, onDrop)
+}
+
+func (r *groupRuntime) submit(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
 	if r == nil {
 		return false
 	}
@@ -146,7 +155,7 @@ func (r *groupRuntime) Submit(cacheID string, kind JobKind, job worker.Job) bool
 		return false
 	}
 	select {
-	case state.queue <- queuedBackgroundJob{cacheID: cacheID, kind: kind, job: job}:
+	case state.queue <- queuedBackgroundJob{cacheID: cacheID, kind: kind, job: job, onDrop: onDrop}:
 	default:
 		r.noteRejectLocked(cacheID, kind, rejectReasonQueueFull, len(state.queue), state.queueLimit)
 		r.mu.Unlock()
@@ -163,6 +172,12 @@ func (r *groupRuntime) Submit(cacheID string, kind JobKind, job worker.Job) bool
 	r.cond.Signal()
 	r.mu.Unlock()
 	return true
+}
+
+func (j queuedBackgroundJob) drop() {
+	if j.onDrop != nil {
+		j.onDrop()
+	}
 }
 
 func (r *groupRuntime) RemoveCache(cacheID string) {
@@ -226,7 +241,8 @@ func (r *groupRuntime) CloseCache(cacheID string, timeout time.Duration) error {
 	state.cancel()
 	dropped := len(state.queue)
 	for len(state.queue) > 0 {
-		<-state.queue
+		job := <-state.queue
+		job.drop()
 	}
 	r.cond.Broadcast()
 	done := r.cacheCloseDoneLocked(state)
@@ -257,7 +273,8 @@ func (r *groupRuntime) Shutdown(timeout time.Duration) error {
 		}
 		dropped := len(state.queue)
 		for len(state.queue) > 0 {
-			<-state.queue
+			job := <-state.queue
+			job.drop()
 		}
 		r.cacheCloseDoneLocked(state)
 		level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
@@ -292,6 +309,7 @@ func (r *groupRuntime) workerLoop(workerID int) {
 		closed := state.closed
 		r.mu.Unlock()
 		if closed {
+			job.drop()
 			r.mu.Lock()
 			state.active--
 			r.notifyCacheActivityLocked(state)

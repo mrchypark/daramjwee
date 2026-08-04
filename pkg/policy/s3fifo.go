@@ -143,6 +143,9 @@ func (p *S3FIFO) Evict() []string {
 			elem = prevElem
 		}
 		// If the loop finishes, all items in the main queue were given a second chance.
+		// They have now had their hit flags reset, so evict the oldest entry.
+		victim := p.removeElement(p.mainQueue.Back())
+		return []string{victim.key}
 	}
 
 	// 3. If the main queue is empty, or if the small queue still exceeds capacity
