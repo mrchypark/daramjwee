@@ -44,7 +44,7 @@ func closeCore(
 
 	// Phase 2: Pre-commit generation check
 	p.coord.stateMu.Lock()
-	if p.coord.committedGeneration > p.generation {
+	if p.coord.committedGeneration.Load() > p.generation {
 		p.coord.removeReservationLocked(p.generation)
 		p.coord.stateMu.Unlock()
 		if abortFn != nil {
@@ -73,10 +73,10 @@ func closeCore(
 	// Phase 4: Advance generation on success (if applicable)
 	if p.advanceGen {
 		p.coord.stateMu.Lock()
-		if p.coord.committedGeneration < p.generation {
-			p.coord.committedGeneration = p.generation
+		if p.coord.committedGeneration.Load() < p.generation {
+			p.coord.committedGeneration.Store(p.generation)
 		}
-		p.coord.pruneReservationsThroughLocked(p.coord.committedGeneration)
+		p.coord.pruneReservationsThroughLocked(p.coord.committedGeneration.Load())
 		p.coord.stateMu.Unlock()
 	}
 
@@ -87,7 +87,7 @@ func closeCore(
 
 	// Phase 6: Final invalidation check
 	p.coord.stateMu.Lock()
-	if p.coord.committedGeneration > p.generation {
+	if p.coord.committedGeneration.Load() > p.generation {
 		p.coord.stateMu.Unlock()
 		err := ErrTopWriteInvalidated
 		if p.onInvalidated != nil {

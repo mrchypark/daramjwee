@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// testCloseHandler is a closeHandler for tests.
+type testCloseHandler func()
+
+func (h testCloseHandler) handle() { h() }
+
 func TestSafeCloserReadAll(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -42,9 +47,9 @@ func TestSafeCloserReadAll(t *testing.T) {
 			reader := io.NopCloser(strings.NewReader(tt.input))
 
 			// safeCloser 생성
-			sc := newSafeCloser(reader, func() {
+			sc := newSafeCloser(reader, testCloseHandler(func() {
 				callbackExecuted = true
-			})
+			}))
 
 			// ReadAll 테스트
 			result, err := sc.ReadAll()
@@ -80,9 +85,9 @@ func TestSafeCloserReadAllAutoClose(t *testing.T) {
 		},
 	}
 
-	sc := newSafeCloser(reader, func() {
+	sc := newSafeCloser(reader, testCloseHandler(func() {
 		callbackExecuted = true
-	})
+	}))
 
 	// ReadAll 실행
 	data, err := sc.ReadAll()
@@ -153,9 +158,9 @@ func TestReadAllSmart(t *testing.T) {
 			if tt.useSafe {
 				// safeCloser 사용
 				reader := io.NopCloser(strings.NewReader(tt.input))
-				rc = newSafeCloser(reader, func() {
+				rc = newSafeCloser(reader, testCloseHandler(func() {
 					callbackExecuted = true
-				})
+				}))
 			} else {
 				// 일반 ReadCloser 사용
 				rc = io.NopCloser(strings.NewReader(tt.input))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,9 +25,8 @@ type writeCoordinator struct {
 	commitLease chan struct{}
 	stateMu     sync.Mutex
 	// committedGeneration is the latest generation visible in the top store.
-	// activeReservations tracks in-flight writers so conditional fills can be
-	// invalidated without holding a same-key lock for the writer lifetime.
-	committedGeneration uint64
+	// Uses atomic for lock-free reads on the hot path (currentTopWriteGeneration).
+	committedGeneration atomic.Uint64
 	nextGeneration      uint64
 	activeReservations  map[uint64]struct{}
 	activeDeletes       int
@@ -130,9 +130,7 @@ func (m *topWriteManager) currentGeneration(key string) uint64 {
 
 func (c *writeCoordinator) current() uint64 {
 	c.init()
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	return c.committedGeneration
+	return c.committedGeneration.Load()
 }
 
 func (c *writeCoordinator) canAttemptExpectedTopWrite(expectedGeneration uint64) bool {
@@ -140,7 +138,7 @@ func (c *writeCoordinator) canAttemptExpectedTopWrite(expectedGeneration uint64)
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.activeDeletes == 0 &&
-		c.committedGeneration == expectedGeneration
+		c.committedGeneration.Load() == expectedGeneration
 }
 
 func (c *writeCoordinator) ensureReservationsLocked() {
@@ -150,7 +148,7 @@ func (c *writeCoordinator) ensureReservationsLocked() {
 }
 
 func (c *writeCoordinator) latestGenerationLocked() uint64 {
-	latest := c.committedGeneration
+	latest := c.committedGeneration.Load()
 	if len(c.activeReservations) == 0 {
 		return latest
 	}
@@ -179,7 +177,7 @@ func (c *writeCoordinator) reserveGenerationLocked() uint64 {
 
 func (c *writeCoordinator) advanceCommittedLocked() {
 	generation := c.reserveGenerationLocked()
-	c.committedGeneration = generation
+	c.committedGeneration.Store(generation)
 	c.pruneReservationsThroughLocked(generation)
 }
 

@@ -17,9 +17,9 @@ func FuzzSafeCloserReadAll(f *testing.F) {
 			chunkSize: int(chunk%17) + 1,
 		}
 		callbacks := 0
-		sc := newSafeCloser(reader, func() {
+		sc := newSafeCloser(reader, testCloseHandler(func() {
 			callbacks++
-		})
+		}))
 
 		got, err := sc.ReadAll()
 		if err != nil {

@@ -43,15 +43,13 @@ func (c *DaramjweeCache) handleConditionalTopTierHit(requestCtx context.Context,
 	return newGetResponse(GetStatusNotModified, nil, meta), nil
 }
 
-func (c *DaramjweeCache) topTierCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, meta *Metadata, isStale bool, observedGeneration uint64) func() {
+func (c *DaramjweeCache) topTierCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, meta *Metadata, isStale bool, observedGeneration uint64) closeHandler {
 	if !isStale {
-		return func() {
-			cancel()
-		}
+		return cancelHandler{cancel: cancel}
 	}
 
 	c.debugLog("msg", "top tier is stale, scheduling refresh", "key", key)
-	return c.refreshOnCloseCallback(requestCtx, key, fetcher, cancel, meta, observedGeneration)
+	return newStaleRefreshCallback(c, requestCtx, key, fetcher, cancel, meta, observedGeneration)
 }
 
 // lowerTierHitParams groups the parameters for handleLowerTierHit.

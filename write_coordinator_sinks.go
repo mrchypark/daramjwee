@@ -99,7 +99,7 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 		}()
 
 		s.coord.stateMu.Lock()
-		if s.coord.committedGeneration > s.generation {
+		if s.coord.committedGeneration.Load() > s.generation {
 			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.coord.releaseCommit()
@@ -128,14 +128,14 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 		}
 
 		s.coord.stateMu.Lock()
-		if s.coord.committedGeneration < s.generation {
-			s.coord.committedGeneration = s.generation
+		if s.coord.committedGeneration.Load() < s.generation {
+			s.coord.committedGeneration.Store(s.generation)
 		}
-		s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration)
+		s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration.Load())
 		s.coord.stateMu.Unlock()
 
 		s.coord.stateMu.Lock()
-		if s.coord.committedGeneration > s.generation {
+		if s.coord.committedGeneration.Load() > s.generation {
 			s.coord.stateMu.Unlock()
 			s.err = ErrTopWriteInvalidated
 			if s.onInvalidated != nil {

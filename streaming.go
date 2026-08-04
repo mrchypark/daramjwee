@@ -13,6 +13,10 @@ var streamCopyBufferPool = sync.Pool{
 	},
 }
 
+var teeWriterPool = sync.Pool{
+	New: func() any { return &streamTeeWriter{} },
+}
+
 func writeAll(w io.Writer, p []byte) error {
 	_, err := writeAllCount(w, p)
 	return err
@@ -485,7 +489,10 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 	}
 	r.mu.Unlock()
 
-	tee := &streamTeeWriter{dst: dst, sink: r.sink}
+	tee := teeWriterPool.Get().(*streamTeeWriter)
+	tee.dst = dst
+	tee.sink = r.sink
+	tee.sinkErr = nil
 
 	var (
 		written int64
@@ -529,6 +536,10 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 			err = tee.sinkErr
 		}
 	}
+
+	tee.dst = nil
+	tee.sink = nil
+	teeWriterPool.Put(tee)
 
 	r.mu.Lock()
 	if err == nil {

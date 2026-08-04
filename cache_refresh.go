@@ -110,21 +110,21 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 	return nil
 }
 
-func (c *DaramjweeCache) refreshOnCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata, observedGeneration uint64) func() {
-	return func() {
-		defer cancel()
-		if err := c.scheduleRefreshWithMetadata(detachedValueContext(requestCtx), key, fetcher, cloneMetadata(oldMetadata), nil, &observedGeneration); err != nil {
-			c.warnLog("msg", "failed to schedule stale refresh", "key", key, "err", err)
-		}
-	}
-}
+// lowerTierRefreshOnCloseCallback is no longer used directly.
+// Use newStaleRefreshCallback for top-tier and similar struct-based approach for lower-tier.
 
-func (c *DaramjweeCache) lowerTierRefreshOnCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata, source tierDestination, observedGeneration uint64) func() {
-	return func() {
-		defer cancel()
-		if err := c.scheduleRefreshWithMetadata(detachedValueContext(requestCtx), key, fetcher, cloneMetadata(oldMetadata), &source, &observedGeneration); err != nil {
-			c.warnLog("msg", "failed to schedule stale refresh", "key", key, "source_tier", source.tierIndex, "err", err)
-		}
+// lowerTierRefreshOnCloseCallback creates a closeHandler for lower-tier stale refresh.
+// Uses a struct-based approach to reduce closure allocations.
+func (c *DaramjweeCache) lowerTierRefreshOnCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata, source tierDestination, observedGeneration uint64) closeHandler {
+	return &lowerTierRefreshCallback{
+		cache:              c,
+		requestCtx:         requestCtx,
+		key:                key,
+		fetcher:            fetcher,
+		cancel:             cancel,
+		meta:               oldMetadata,
+		source:             source,
+		observedGeneration: observedGeneration,
 	}
 }
 

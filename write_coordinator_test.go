@@ -920,7 +920,7 @@ func TestSetWithAbandonedTopWriteSinkReturnsWhenContextExpires(t *testing.T) {
 
 func TestInvalidatedCleanupDoesNotHoldStateMu(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.committedGeneration = 1
+	coord.committedGeneration.Store(1)
 
 	closeStarted := make(chan struct{})
 	releaseClose := make(chan struct{})
@@ -946,7 +946,7 @@ func TestInvalidatedCleanupDoesNotHoldStateMu(t *testing.T) {
 
 	<-closeStarted
 	coord.stateMu.Lock()
-	coord.committedGeneration = 2
+	coord.committedGeneration.Store(2)
 	coord.stateMu.Unlock()
 	close(releaseClose)
 
@@ -1081,7 +1081,7 @@ func TestFanoutWriteManagerReleasesIdleLocksAfterConcurrentUse(t *testing.T) {
 func TestFanoutWriteManagerOrdersStaleCleanupBeforeNewerWrite(t *testing.T) {
 	var manager fanoutWriteManager
 	coord := &writeCoordinator{}
-	coord.committedGeneration = 1
+	coord.committedGeneration.Store(1)
 
 	firstCloseStarted := make(chan struct{})
 	releaseFirstClose := make(chan struct{})
@@ -1110,7 +1110,7 @@ func TestFanoutWriteManagerOrdersStaleCleanupBeforeNewerWrite(t *testing.T) {
 	<-firstCloseStarted
 
 	coord.stateMu.Lock()
-	coord.committedGeneration = 2
+	coord.committedGeneration.Store(2)
 	coord.stateMu.Unlock()
 
 	secondSinkDone := make(chan error, 1)
@@ -1367,7 +1367,7 @@ func TestReserveBestEffortFailsOnStaleExpectedGeneration(t *testing.T) {
 	coord.init()
 
 	coord.stateMu.Lock()
-	coord.committedGeneration = 2
+	coord.committedGeneration.Store(2)
 	coord.stateMu.Unlock()
 
 	stale := uint64(1)
@@ -1532,9 +1532,7 @@ func TestFinishDeleteWithSuccessAdvancesCommittedGeneration(t *testing.T) {
 	require.NoError(t, coord.beginDelete(context.Background()))
 	coord.finishDelete(true)
 
-	coord.stateMu.Lock()
-	gen := coord.committedGeneration
-	coord.stateMu.Unlock()
+	gen := coord.committedGeneration.Load()
 	require.NotZero(t, gen, "committedGeneration should advance on successful delete")
 }
 
@@ -1545,9 +1543,7 @@ func TestFinishDeleteWithoutSuccessDoesNotAdvanceGeneration(t *testing.T) {
 	require.NoError(t, coord.beginDelete(context.Background()))
 	coord.finishDelete(false)
 
-	coord.stateMu.Lock()
-	gen := coord.committedGeneration
-	coord.stateMu.Unlock()
+	gen := coord.committedGeneration.Load()
 	require.Zero(t, gen, "committedGeneration should remain zero on unsuccessful delete")
 }
 
@@ -1697,7 +1693,7 @@ func TestWriteCoordinatorCanAttemptExpectedTopWrite(t *testing.T) {
 	require.True(t, coord.canAttemptExpectedTopWrite(0))
 
 	coord.stateMu.Lock()
-	coord.committedGeneration = 5
+	coord.committedGeneration.Store(5)
 	coord.stateMu.Unlock()
 
 	require.True(t, coord.canAttemptExpectedTopWrite(5))

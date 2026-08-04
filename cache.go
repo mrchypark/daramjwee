@@ -63,20 +63,36 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 	if fetcher == nil {
 		return nil, ErrNilFetcher
 	}
-	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 	topGenerationAtStart := c.currentTopWriteGeneration(key)
+
+	// Fast path: try top tier without timeout context
+	if len(c.tiers) > 0 {
+		topTierStream, topTierMeta, err := c.getStreamFromStore(ctx, c.tiers[0], key)
+		if err == nil {
+			// Top tier hit — no timeout context needed for the hot path
+			nopCancel := func() {}
+			resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, topTierStream, topTierMeta, nopCancel, topGenerationAtStart)
+			if respErr != nil {
+				return nil, respErr
+			}
+			return resp, nil
+		}
+		if errors.Is(err, ErrNilMetadata) {
+			return nil, err
+		}
+	}
+
+	// Slow path: need timeout context for lower tiers and origin fetch
+	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 	higherTiersClean := true
 
 	for i, tier := range c.tiers {
 		tierStream, tierMeta, err := c.getStreamFromStore(c.getStreamContextForStore(ctx, setupCtx, tier), tier, key)
 		if err == nil {
 			if i == 0 {
-				resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart)
-				if respErr != nil {
-					cancel()
-					return nil, respErr
-				}
-				return resp, nil
+				// Already handled in fast path
+				cancel()
+				continue
 			}
 			resp, respErr := c.handleLowerTierHit(lowerTierHitParams{
 				requestCtx:         ctx,
@@ -208,22 +224,33 @@ func (c *DaramjweeCache) Close() {
 	}
 }
 
-// cancelWriteCloser cancels the context when the WriteCloser is closed.
-// safeCloser wraps an io.ReadCloser and executes a callback function upon Close.
+// closeHandler is the interface for callbacks executed when a safeCloser is closed.
+type closeHandler interface {
+	handle()
+}
+
+// cancelHandler is a closeHandler that calls a cancel function.
+type cancelHandler struct {
+	cancel func()
+}
+
+func (h cancelHandler) handle() { h.cancel() }
+
+// safeCloser wraps an io.ReadCloser and executes a closeHandler upon Close.
 // It automatically closes when EOF is reached and prevents duplicate closes using sync.Once.
 type safeCloser struct {
 	io.ReadCloser
-	callback  func()
+	handler   closeHandler
 	closeOnce sync.Once
 	closeErr  error
 }
 
-// newSafeCloser creates a new ReadCloser that executes a callback function
+// newSafeCloser creates a new ReadCloser that executes a closeHandler
 // after the underlying ReadCloser is closed, with automatic EOF detection and safe duplicate close handling.
-func newSafeCloser(rc io.ReadCloser, cb func()) *safeCloser {
+func newSafeCloser(rc io.ReadCloser, h closeHandler) *safeCloser {
 	return &safeCloser{
 		ReadCloser: rc,
-		callback:   cb,
+		handler:    h,
 	}
 }
 
@@ -238,11 +265,11 @@ func (c *safeCloser) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-// Close closes the underlying ReadCloser and executes the callback function.
-// It uses sync.Once to ensure the close operation and callback are executed only once.
+// Close closes the underlying ReadCloser and executes the closeHandler.
+// It uses sync.Once to ensure the close operation and handler are executed only once.
 func (c *safeCloser) Close() error {
 	c.closeOnce.Do(func() {
-		defer c.callback()
+		defer c.handler.handle()
 		c.closeErr = c.ReadCloser.Close()
 	})
 	return c.closeErr
