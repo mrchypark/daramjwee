@@ -66,6 +66,31 @@ func TestObjstoreAdapter_PrefersModernEntriesOverLegacyFallback(t *testing.T) {
 	assert.Equal(t, "modern", meta.CacheTag)
 }
 
+func TestObjstoreAdapter_StagedWriteCommitsOnlyOnCommit(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+	staging, ok := store.(daramjwee.StagingStore)
+	require.True(t, ok)
+
+	writer, err := staging.BeginStagedSet(ctx, "staged-key", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "staged body")
+	require.NoError(t, err)
+
+	_, err = store.Stat(ctx, "staged-key")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+
+	require.NoError(t, writer.Commit(ctx))
+	reader, meta, err := store.GetStream(ctx, "staged-key")
+	require.NoError(t, err)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "staged body", string(body))
+	assert.Equal(t, "v1", meta.CacheTag)
+}
+
 func TestObjstoreAdapter_DeleteRemovesLegacyObjects(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()

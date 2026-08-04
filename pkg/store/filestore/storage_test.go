@@ -3,6 +3,7 @@ package filestore
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1199,6 +1200,87 @@ func TestFileStore_ReopenPreservesLegacyB64PrefixedKeyTracking(t *testing.T) {
 	require.NoError(t, fs.Delete(ctx, key))
 	_, statErr := os.Stat(legacyPath)
 	assert.True(t, os.IsNotExist(statErr), "reopened store should still track and delete legacy b64-prefixed files")
+}
+
+func TestFileStore_NewFailsWhenAmbiguousLegacyFileHasShortMetadata(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "b64_broken")
+
+	// Root-level b64_ files are ambiguous legacy paths, so initialization reads
+	// their metadata to determine the stored key. Declare more metadata bytes
+	// than are present to make that scan fail deterministically.
+	require.NoError(t, os.WriteFile(legacyPath, []byte{0, 0, 0, 2, '{'}, 0644))
+
+	fs, err := New(dir, log.NewNopLogger())
+	require.Nil(t, fs)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "initialize current size")
+	require.True(t, errors.Is(err, io.ErrUnexpectedEOF))
+}
+
+func TestFileStore_NewFailureDoesNotMutateEvictionPolicy(t *testing.T) {
+	dir := t.TempDir()
+	policy := newRecordingEvictionPolicy()
+
+	validPath := filepath.Join(dir, "a_valid")
+	validFile, err := os.Create(validPath)
+	require.NoError(t, err)
+	require.NoError(t, writeMetadata(validFile, &daramjwee.Metadata{CacheTag: "valid"}))
+	_, err = validFile.Write([]byte("valid-data"))
+	require.NoError(t, err)
+	require.NoError(t, validFile.Close())
+
+	// filepath.Walk visits a_valid before b64_broken, so the old scan mutates
+	// the policy before the malformed ambiguous legacy entry returns an error.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b64_broken"), []byte{0, 0, 0, 2, '{'}, 0644))
+
+	fs, err := New(dir, log.NewNopLogger(), WithEviction(policy))
+	require.Nil(t, fs)
+	require.True(t, errors.Is(err, io.ErrUnexpectedEOF))
+	assert.Empty(t, policy.entries)
+	assert.Empty(t, policy.order)
+
+	clean, err := New(t.TempDir(), log.NewNopLogger(), WithEviction(policy), WithCapacity(1))
+	require.NoError(t, err)
+	writer, err := clean.BeginSet(context.Background(), "fresh", nil)
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("too large"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	assert.Equal(t, []string{"fresh"}, policy.evictions)
+}
+
+type recordingEvictionPolicy struct {
+	entries   map[string]int64
+	order     []string
+	evictions []string
+}
+
+func newRecordingEvictionPolicy() *recordingEvictionPolicy {
+	return &recordingEvictionPolicy{entries: make(map[string]int64)}
+}
+
+func (p *recordingEvictionPolicy) Touch(string) {}
+
+func (p *recordingEvictionPolicy) Add(key string, size int64) {
+	if _, exists := p.entries[key]; !exists {
+		p.order = append(p.order, key)
+	}
+	p.entries[key] = size
+}
+
+func (p *recordingEvictionPolicy) Remove(key string) {
+	delete(p.entries, key)
+}
+
+func (p *recordingEvictionPolicy) Evict() []string {
+	for _, key := range p.order {
+		if _, exists := p.entries[key]; exists {
+			p.evictions = append(p.evictions, key)
+			return []string{key}
+		}
+	}
+	return nil
 }
 
 func TestFileStore_InitializeCurrentSizeDoesNotDoubleCountDuplicateLogicalKeys(t *testing.T) {

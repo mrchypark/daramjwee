@@ -8,11 +8,11 @@ import (
 
 // closeCoreParams holds parameters for the shared close sequence.
 type closeCoreParams struct {
-	generation     uint64
-	coord          *writeCoordinator
-	waitTimeout    time.Duration
-	onInvalidated  func() error
-	advanceGen     bool // whether to advance committedGeneration on success
+	generation    uint64
+	coord         *writeCoordinator
+	waitTimeout   time.Duration
+	onInvalidated func() error
+	advanceGen    bool // whether to advance committedGeneration on success
 }
 
 // closeCore executes the shared close sequence for generation-coordinated sinks.
@@ -25,6 +25,11 @@ func closeCore(
 	abortFn func() error,
 	releaseLease func(),
 ) error {
+	defer p.coord.releaseReference()
+	if releaseLease != nil {
+		defer releaseLease()
+	}
+
 	waitCtx, cancelWait := newCoordinatorWaitContext(p.waitTimeout)
 	defer cancelWait()
 
@@ -35,9 +40,6 @@ func closeCore(
 			if abortErr := abortFn(); abortErr != nil {
 				return errors.Join(err, abortErr)
 			}
-		}
-		if releaseLease != nil {
-			releaseLease()
 		}
 		return err
 	}
@@ -52,9 +54,6 @@ func closeCore(
 				return errors.Join(ErrTopWriteInvalidated, abortErr)
 			}
 		}
-		if releaseLease != nil {
-			releaseLease()
-		}
 		return ErrTopWriteInvalidated
 	}
 	p.coord.stateMu.Unlock()
@@ -64,9 +63,6 @@ func closeCore(
 		p.coord.stateMu.Lock()
 		p.coord.removeReservationLocked(p.generation)
 		p.coord.stateMu.Unlock()
-		if releaseLease != nil {
-			releaseLease()
-		}
 		return commitErr
 	}
 
@@ -95,15 +91,9 @@ func closeCore(
 				err = errors.Join(err, cleanupErr)
 			}
 		}
-		if releaseLease != nil {
-			releaseLease()
-		}
 		return err
 	}
 	p.coord.stateMu.Unlock()
 
-	if releaseLease != nil {
-		releaseLease()
-	}
 	return nil
 }

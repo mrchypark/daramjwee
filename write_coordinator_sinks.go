@@ -22,11 +22,11 @@ type coordinatedTopWriteSink struct {
 func (s *coordinatedTopWriteSink) Close() error {
 	s.once.Do(func() {
 		err := closeCore(context.Background(), closeCoreParams{
-			generation:     s.generation,
-			coord:          s.coord,
-			waitTimeout:    s.waitTimeout,
-			onInvalidated:  s.onInvalidated,
-			advanceGen:     true,
+			generation:    s.generation,
+			coord:         s.coord,
+			waitTimeout:   s.waitTimeout,
+			onInvalidated: s.onInvalidated,
+			advanceGen:    true,
 		}, func(ctx context.Context) error {
 			return s.WriteSink.Close()
 		}, func() error {
@@ -41,6 +41,7 @@ func (s *coordinatedTopWriteSink) Close() error {
 
 func (s *coordinatedTopWriteSink) Abort() error {
 	s.once.Do(func() {
+		defer s.coord.releaseReference()
 		defer s.coord.releaseWrite()
 		s.err = s.WriteSink.Abort()
 		s.coord.unregisterReservation(s.generation)
@@ -51,6 +52,7 @@ func (s *coordinatedTopWriteSink) Abort() error {
 func (s *coordinatedTopWriteSink) detachForFillPreempt() func() error {
 	var cleanup func() error
 	s.once.Do(func() {
+		defer s.coord.releaseReference()
 		s.err = ErrTopWriteInvalidated
 		s.coord.unregisterReservation(s.generation)
 		s.coord.releaseWrite()
@@ -77,6 +79,17 @@ func (s *coordinatedStagedTopWriteSink) Write(p []byte) (int, error) {
 
 func (s *coordinatedStagedTopWriteSink) Close() error {
 	s.once.Do(func() {
+		defer s.coord.releaseReference()
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				s.coord.unregisterReservation(s.generation)
+				func() {
+					defer func() { _ = recover() }()
+					_ = s.sink.Abort()
+				}()
+				panic(panicValue)
+			}
+		}()
 		commitCtx, cancelCommit := newCoordinatorWaitContext(s.waitTimeout)
 		defer cancelCommit()
 		waitCtx, cancelWait := newCoordinatorWaitContext(s.waitTimeout)
@@ -152,6 +165,7 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 
 func (s *coordinatedStagedTopWriteSink) Abort() error {
 	s.once.Do(func() {
+		defer s.coord.releaseReference()
 		s.coord.unregisterReservation(s.generation)
 		s.err = s.sink.Abort()
 	})
@@ -161,6 +175,7 @@ func (s *coordinatedStagedTopWriteSink) Abort() error {
 func (s *coordinatedStagedTopWriteSink) detachForFillPreempt() func() error {
 	var cleanup func() error
 	s.once.Do(func() {
+		defer s.coord.releaseReference()
 		s.coord.unregisterReservation(s.generation)
 		s.err = ErrTopWriteInvalidated
 		cleanup = s.sink.Abort
@@ -193,11 +208,11 @@ func newConditionalGenerationWriteSink(sink WriteSink, coord *writeCoordinator, 
 func (s *conditionalGenerationWriteSink) Close() error {
 	s.once.Do(func() {
 		err := closeCore(context.Background(), closeCoreParams{
-			generation:     s.generation,
-			coord:          s.coord,
-			waitTimeout:    s.waitTimeout,
-			onInvalidated:  s.onInvalidated,
-			advanceGen:     false, // conditional sinks never advance generation
+			generation:    s.generation,
+			coord:         s.coord,
+			waitTimeout:   s.waitTimeout,
+			onInvalidated: s.onInvalidated,
+			advanceGen:    false, // conditional sinks never advance generation
 		}, func(ctx context.Context) error {
 			return s.WriteSink.Close()
 		}, func() error {
@@ -210,6 +225,7 @@ func (s *conditionalGenerationWriteSink) Close() error {
 
 func (s *conditionalGenerationWriteSink) Abort() error {
 	s.once.Do(func() {
+		defer s.coord.releaseReference()
 		s.err = s.WriteSink.Abort()
 	})
 	return s.err

@@ -104,8 +104,12 @@ func TestStore_FlushPacksMultipleKeysIntoSingleRemoteSegment(t *testing.T) {
 		require.NoError(t, writer.Close())
 	}
 
-	writeAndClose(keyA, "v1", "alpha payload")
-	writeAndClose(keyB, "v2", "beta payload")
+	bodies := map[string]string{
+		keyA: "alpha payload",
+		keyB: "beta payload",
+	}
+	writeAndClose(keyA, "v1", bodies[keyA])
+	writeAndClose(keyB, "v2", bodies[keyB])
 
 	require.NoError(t, store.flushPending(ctx))
 
@@ -119,6 +123,19 @@ func TestStore_FlushPacksMultipleKeysIntoSingleRemoteSegment(t *testing.T) {
 	require.Len(t, checkpoint.Entries, 2)
 	assert.Equal(t, segmentObjects[0], checkpoint.Entries[keyA].SegmentPath)
 	assert.Equal(t, segmentObjects[0], checkpoint.Entries[keyB].SegmentPath)
+	assert.Equal(t, int64(0), checkpoint.Entries[keyA].Offset)
+	assert.Equal(t, int64(len(bodies[keyA])), checkpoint.Entries[keyB].Offset)
+
+	remoteOnly := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	for key, wantBody := range bodies {
+		stream, metadata, err := remoteOnly.GetStream(ctx, key)
+		require.NoError(t, err)
+		body, err := io.ReadAll(stream)
+		closeErr := stream.Close()
+		require.NoError(t, errors.Join(err, closeErr))
+		assert.Equal(t, wantBody, string(body), key)
+		assert.Equal(t, map[string]string{keyA: "v1", keyB: "v2"}[key], metadata.CacheTag, key)
+	}
 }
 
 func TestStore_FlushWritesShardScopedCheckpointWithoutKeyManifests(t *testing.T) {
@@ -172,6 +189,79 @@ func TestStore_FlushFailureKeepsShardPendingForRetry(t *testing.T) {
 
 	segmentObjects := listObjectNames(t, bucket, joinPath(store.prefix, "segments"))
 	require.Len(t, segmentObjects, 1)
+}
+
+func TestStore_AutomaticFlushBacksOffAndResetsAfterSuccess(t *testing.T) {
+	bucket := &failingUploadBucket{
+		Bucket: objstore.NewInMemBucket(),
+		failuresLeft: map[string]int{
+			"segments/": 8,
+		},
+	}
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	scheduler := &manualFlushScheduler{}
+	store.scheduleFlushAfter = scheduler.after
+
+	writePendingObject(t, store, "automatic-retry", "retry payload")
+
+	wantDelays := []time.Duration{
+		flushDebounce,
+		flushRetryMin,
+		2 * flushRetryMin,
+		4 * flushRetryMin,
+		8 * flushRetryMin,
+		16 * flushRetryMin,
+		32 * flushRetryMin,
+		flushRetryMax,
+		flushRetryMax,
+	}
+	for _, wantDelay := range wantDelays {
+		scheduled := scheduler.pop(t)
+		assert.Equal(t, wantDelay, scheduled.delay)
+		scheduled.run()
+	}
+	require.Zero(t, scheduler.len())
+
+	entry, ok := store.catalog.Get("automatic-retry")
+	require.True(t, ok)
+	assert.NotEmpty(t, entry.RemotePath)
+
+	writePendingObject(t, store, "automatic-after-success", "fresh payload")
+	assert.Equal(t, flushDebounce, scheduler.pop(t).delay)
+}
+
+func TestStore_AutomaticFlushKeepsOneRetryWhenNewShardIsQueued(t *testing.T) {
+	bucket := &failingUploadBucket{
+		Bucket: objstore.NewInMemBucket(),
+		failuresLeft: map[string]int{
+			"segments/": 1,
+		},
+	}
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	scheduler := &manualFlushScheduler{}
+	store.scheduleFlushAfter = scheduler.after
+
+	firstKey := "retry-one-scheduler"
+	secondKey := differentShardKey(firstKey)
+	writePendingObject(t, store, firstKey, "first payload")
+
+	initial := scheduler.pop(t)
+	require.Equal(t, flushDebounce, initial.delay)
+	initial.run()
+
+	writePendingObject(t, store, secondKey, "second payload")
+	require.Equal(t, 1, scheduler.len(), "enqueue during backoff must reuse the pending retry")
+
+	retry := scheduler.pop(t)
+	require.Equal(t, flushRetryMin, retry.delay)
+	retry.run()
+	require.Zero(t, scheduler.len())
+
+	for _, key := range []string{firstKey, secondKey} {
+		entry, ok := store.catalog.Get(key)
+		require.True(t, ok)
+		assert.NotEmpty(t, entry.RemotePath, key)
+	}
 }
 
 func TestStore_DeleteRepublishesCheckpointWithoutDeletedKey(t *testing.T) {
@@ -326,6 +416,59 @@ func sameShardKeys3(base string) (string, string, string) {
 		panic("failed to find same-shard keys")
 	}
 	return keys[0], keys[1], keys[2]
+}
+
+func differentShardKey(base string) string {
+	shard := shardForKey(base)
+	for i := 1; i < 2048; i++ {
+		candidate := base + "-" + strconv.Itoa(i)
+		if shardForKey(candidate) != shard {
+			return candidate
+		}
+	}
+	panic("failed to find different-shard key")
+}
+
+func writePendingObject(t *testing.T, store *Store, key, body string) {
+	t.Helper()
+
+	writer, err := store.BeginSet(context.Background(), key, &daramjwee.Metadata{CacheTag: key})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, body)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+}
+
+type scheduledFlush struct {
+	delay time.Duration
+	run   func()
+}
+
+type manualFlushScheduler struct {
+	mu        sync.Mutex
+	scheduled []scheduledFlush
+}
+
+func (s *manualFlushScheduler) after(delay time.Duration, run func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scheduled = append(s.scheduled, scheduledFlush{delay: delay, run: run})
+}
+
+func (s *manualFlushScheduler) pop(t *testing.T) scheduledFlush {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	require.NotEmpty(t, s.scheduled)
+	next := s.scheduled[0]
+	s.scheduled = s.scheduled[1:]
+	return next
+}
+
+func (s *manualFlushScheduler) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.scheduled)
 }
 
 func loadCheckpoint(t *testing.T, bucket objstore.Bucket, objectName string) checkpoint {

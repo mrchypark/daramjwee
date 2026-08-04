@@ -18,6 +18,10 @@ type fanoutWriteManager struct {
 }
 
 type writeCoordinator struct {
+	manager     *topWriteManager
+	key         string
+	refMu       sync.Mutex
+	references  int
 	initOnce    sync.Once
 	leaseOnce   sync.Once
 	writeLease  chan struct{}
@@ -35,6 +39,11 @@ type writeCoordinator struct {
 	fillPreemptions     int
 }
 
+type topWriteGeneration struct {
+	coord      *writeCoordinator
+	generation uint64
+	once       sync.Once
+}
 type fanoutWriteLock struct {
 	mu    sync.Mutex
 	refMu sync.Mutex
@@ -47,25 +56,99 @@ type fanoutLockKey struct {
 }
 
 func (m *topWriteManager) coordinator(key string) *writeCoordinator {
-	if coord, ok := m.coords.Load(key); ok {
-		resolved := coord.(*writeCoordinator)
-		resolved.init()
-		return resolved
+	for {
+		if coord := m.acquireCoordinatorIfPresent(key); coord != nil {
+			return coord
+		}
+
+		coord := &writeCoordinator{
+			manager:    m,
+			key:        key,
+			references: 1,
+		}
+		coord.init()
+		if _, loaded := m.coords.LoadOrStore(key, coord); !loaded {
+			return coord
+		}
 	}
-	coord := &writeCoordinator{}
-	coord.init()
-	actual, _ := m.coords.LoadOrStore(key, coord)
-	resolved := actual.(*writeCoordinator)
-	resolved.init()
-	return resolved
 }
 
-func (m *topWriteManager) coordinatorIfPresent(key string) *writeCoordinator {
-	coord, ok := m.coords.Load(key)
-	if !ok {
+func (m *topWriteManager) acquireCoordinatorIfPresent(key string) *writeCoordinator {
+	for {
+		value, ok := m.coords.Load(key)
+		if !ok {
+			return nil
+		}
+		coord := value.(*writeCoordinator)
+		coord.refMu.Lock()
+		current, stillPresent := m.coords.Load(key)
+		if !stillPresent || current != value {
+			coord.refMu.Unlock()
+			continue
+		}
+		coord.references++
+		coord.refMu.Unlock()
+		return coord
+	}
+}
+
+func (c *writeCoordinator) releaseReference() {
+	if c.manager == nil {
+		return
+	}
+	c.refMu.Lock()
+	defer c.refMu.Unlock()
+	c.references--
+	if c.references < 0 {
+		panic("daramjwee: released top-write coordinator too many times")
+	}
+	if c.references == 0 {
+		c.manager.coords.CompareAndDelete(c.key, c)
+	}
+}
+
+func (c *writeCoordinator) retainReference() bool {
+	if c.manager == nil {
+		return true
+	}
+	c.refMu.Lock()
+	defer c.refMu.Unlock()
+	if c.references <= 0 {
+		return false
+	}
+	c.references++
+	return true
+}
+
+func (g *topWriteGeneration) retain() *topWriteGeneration {
+	if g == nil {
 		return nil
 	}
-	return coord.(*writeCoordinator)
+	if !g.coord.retainReference() {
+		return nil
+	}
+	return &topWriteGeneration{coord: g.coord, generation: g.generation}
+}
+
+func (g *topWriteGeneration) release() {
+	if g == nil {
+		return
+	}
+	g.once.Do(g.coord.releaseReference)
+}
+
+func (m *topWriteManager) coordinatorForWrite(key string, expected *topWriteGeneration) (*writeCoordinator, *uint64, error) {
+	if expected == nil {
+		return m.coordinator(key), nil, nil
+	}
+	if expected.coord.manager != m || expected.coord.key != key {
+		return nil, nil, ErrTopWriteInvalidated
+	}
+	if !expected.coord.retainReference() {
+		return nil, nil, ErrTopWriteInvalidated
+	}
+	generation := expected.generation
+	return expected.coord, &generation, nil
 }
 
 func (m *fanoutWriteManager) lock(destTierIndex int, key string) func() {
@@ -120,12 +203,9 @@ func (m *fanoutWriteManager) release(lockKey fanoutLockKey, lock *fanoutWriteLoc
 	}
 }
 
-func (m *topWriteManager) currentGeneration(key string) uint64 {
-	coord := m.coordinatorIfPresent(key)
-	if coord == nil {
-		return 0
-	}
-	return coord.current()
+func (m *topWriteManager) currentGeneration(key string) *topWriteGeneration {
+	coord := m.coordinator(key)
+	return &topWriteGeneration{coord: coord, generation: coord.current()}
 }
 
 func (c *writeCoordinator) current() uint64 {
@@ -553,32 +633,38 @@ func (c *writeCoordinator) finishDelete(success bool) {
 	c.releaseCommit()
 }
 
-func (c *DaramjweeCache) currentTopWriteGeneration(key string) uint64 {
+func (c *DaramjweeCache) currentTopWriteGeneration(key string) *topWriteGeneration {
 	return c.topWrites.currentGeneration(key)
 }
 
 func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 	coord := c.topWrites.coordinator(key)
+	defer coord.releaseReference()
 	coord.stateMu.Lock()
 	coord.advanceCommittedLocked()
 	coord.stateMu.Unlock()
 }
 
-func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
+func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *topWriteGeneration) (WriteSink, error) {
 	store := c.topWriteStore()
-	coord := c.topWrites.coordinator(key)
+	coord, expected, err := c.topWrites.coordinatorForWrite(key, expectedGeneration)
+	if err != nil {
+		return nil, err
+	}
 	if expectedGeneration == nil {
 		unblockFills := coord.preemptActiveFillForWrite()
 		defer unblockFills()
 	}
 	if staging, ok := store.(StagingStore); ok {
-		generation, err := coord.reserve(ctx, expectedGeneration)
+		generation, err := coord.reserve(ctx, expected)
 		if err != nil {
+			coord.releaseReference()
 			return nil, err
 		}
 		sink, err := staging.BeginStagedSet(ctx, key, metadata)
 		if err != nil {
 			coord.unregisterReservation(generation)
+			coord.releaseReference()
 			return nil, err
 		}
 		return &coordinatedStagedTopWriteSink{
@@ -589,14 +675,16 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 			onInvalidated: func() error { return c.deleteTopStoreKey(key) },
 		}, nil
 	}
-	generation, err := coord.begin(ctx, expectedGeneration)
+	generation, err := coord.begin(ctx, expected)
 	if err != nil {
+		coord.releaseReference()
 		return nil, err
 	}
 
 	sink, err := store.BeginSet(ctx, key, metadata)
 	if err != nil {
 		coord.rollbackAndUnlock(generation)
+		coord.releaseReference()
 		return nil, err
 	}
 
@@ -609,17 +697,22 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 	}, nil
 }
 
-func (c *DaramjweeCache) setStreamToTopStoreBestEffortWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *uint64) (WriteSink, error) {
+func (c *DaramjweeCache) setStreamToTopStoreBestEffortWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *topWriteGeneration) (WriteSink, error) {
 	store := c.topWriteStore()
-	coord := c.topWrites.coordinator(key)
+	coord, expected, err := c.topWrites.coordinatorForWrite(key, expectedGeneration)
+	if err != nil {
+		return nil, err
+	}
 	if staging, ok := store.(StagingStore); ok {
-		generation, err := coord.reserveBestEffort(ctx, expectedGeneration)
+		generation, err := coord.reserveBestEffort(ctx, expected)
 		if err != nil {
+			coord.releaseReference()
 			return nil, err
 		}
 		sink, err := staging.BeginStagedSet(ctx, key, metadata)
 		if err != nil {
 			coord.unregisterReservation(generation)
+			coord.releaseReference()
 			return nil, err
 		}
 		return &coordinatedStagedTopWriteSink{
@@ -631,13 +724,15 @@ func (c *DaramjweeCache) setStreamToTopStoreBestEffortWithGeneration(ctx context
 		}, nil
 	}
 
-	generation, err := coord.beginBestEffort(ctx, expectedGeneration)
+	generation, err := coord.beginBestEffort(ctx, expected)
 	if err != nil {
+		coord.releaseReference()
 		return nil, err
 	}
 	sink, err := store.BeginSet(ctx, key, metadata)
 	if err != nil {
 		coord.rollbackAndUnlock(generation)
+		coord.releaseReference()
 		return nil, err
 	}
 	return &coordinatedTopWriteSink{
@@ -649,24 +744,32 @@ func (c *DaramjweeCache) setStreamToTopStoreBestEffortWithGeneration(ctx context
 	}, nil
 }
 
-func (c *DaramjweeCache) setStreamToTopStoreForFill(ctx context.Context, key string, metadata *Metadata, expectedGeneration uint64) (WriteSink, error) {
+func (c *DaramjweeCache) setStreamToTopStoreForFill(ctx context.Context, key string, metadata *Metadata, expectedGeneration *topWriteGeneration) (WriteSink, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	store := c.topWriteStore()
-	coord := c.topWrites.coordinator(key)
+	coord, expected, err := c.topWrites.coordinatorForWrite(key, expectedGeneration)
+	if err != nil {
+		return nil, err
+	}
+	if expected == nil {
+		coord.releaseReference()
+		return nil, ErrTopWriteInvalidated
+	}
 	var generation uint64
 
 	if staging, ok := store.(StagingStore); ok {
 		fillCtx, cancelFill := context.WithCancel(ctx)
 		fill := newPendingTopFillSink(coord, func() {
 			coord.unregisterReservation(generation)
+			coord.releaseReference()
 		}, cancelFill)
 		fill.reportPreemptOnClose = true
-		var err error
-		generation, err = coord.reserveWithFill(fillCtx, expectedGeneration, fill)
+		generation, err = coord.reserveWithFill(fillCtx, *expected, fill)
 		if err != nil {
 			cancelFill()
+			coord.releaseReference()
 			return nil, err
 		}
 		sink, err := staging.BeginStagedSet(fillCtx, key, metadata)
@@ -692,10 +795,12 @@ func (c *DaramjweeCache) setStreamToTopStoreForFill(ctx context.Context, key str
 	fillCtx, cancelFill := context.WithCancel(ctx)
 	fill := newPendingTopFillSink(coord, func() {
 		coord.rollbackAndUnlock(generation)
+		coord.releaseReference()
 	}, cancelFill)
-	generation, err := coord.beginWithFill(fillCtx, expectedGeneration, fill)
+	generation, err = coord.beginWithFill(fillCtx, *expected, fill)
 	if err != nil {
 		cancelFill()
+		coord.releaseReference()
 		return nil, err
 	}
 	type beginResult struct {

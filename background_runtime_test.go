@@ -134,6 +134,41 @@ func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
 	require.NoError(t, rt.Shutdown(time.Second))
 }
 
+func TestGroupRuntime_CloseCacheRunsQueuedJobDropCleanupOnce(t *testing.T) {
+	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+
+	const cacheID = "cache-drop-cleanup"
+	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 2}))
+
+	activeStarted := make(chan struct{})
+	releaseActive := make(chan struct{})
+	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(context.Context) {
+		close(activeStarted)
+		<-releaseActive
+	}))
+	<-activeStarted
+
+	var cleanupCalls atomic.Int32
+	cleanupDone := make(chan struct{})
+	require.True(t, rt.SubmitWithDropCleanup(cacheID, JobKindPersist, func(context.Context) {
+		t.Fatal("queued job ran after CloseCache")
+	}, func() {
+		if cleanupCalls.Add(1) == 1 {
+			close(cleanupDone)
+		}
+	}))
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- rt.CloseCache(cacheID, time.Second)
+	}()
+	<-cleanupDone
+	close(releaseActive)
+	require.NoError(t, <-closeDone)
+	require.Equal(t, int32(1), cleanupCalls.Load())
+	require.NoError(t, rt.Shutdown(time.Second))
+}
+
 func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
 	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
 

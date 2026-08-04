@@ -148,6 +148,22 @@ func TestSieve_EvictSingleItem(t *testing.T) {
 	assert.Equal(t, 0, p.(*Sieve).ll.Len(), "Cache should be empty after eviction.")
 }
 
+func TestSieve_EvictAfterSoleEntryEvicted(t *testing.T) {
+	p := NewSieve().(*Sieve)
+	p.Add("A", 1)
+
+	assert.Equal(t, []string{"A"}, p.Evict())
+	assert.Zero(t, p.ll.Len())
+	assert.Empty(t, p.cache)
+	assert.Nil(t, p.hand, "the hand must not retain a detached element")
+
+	p.Add("B", 1)
+	assert.Equal(t, []string{"B"}, p.Evict(), "the next eviction must select the live entry")
+	assert.Zero(t, p.ll.Len())
+	assert.Empty(t, p.cache)
+	assert.Nil(t, p.hand)
+}
+
 // TestSieve_RemoveHandledElement verifies that the hand pointer is safely adjusted
 // when the item it points to is removed.
 func TestSieve_RemoveHandledElement(t *testing.T) {

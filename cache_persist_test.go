@@ -151,7 +151,9 @@ func TestSchedulePersistFromTop_InvalidationCleanupUsesFreshContext(t *testing.T
 	t.Cleanup(cache.Close)
 
 	key := "persist-cleanup-key"
-	cache.schedulePersistFromTop(context.Background(), key, 0, tierDestination{tierIndex: 1, store: dest})
+	expectedGeneration := cache.currentTopWriteGeneration(key)
+	defer expectedGeneration.release()
+	cache.schedulePersistFromTop(context.Background(), key, expectedGeneration, tierDestination{tierIndex: 1, store: dest})
 
 	select {
 	case <-dest.closeStartedCh:

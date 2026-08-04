@@ -123,12 +123,16 @@ func (p *Sieve) Evict() []string {
 func (p *Sieve) removeElement(e *list.Element) *sieveEntry {
 	// If the element to be removed is the one pointed to by hand, move hand to the previous element.
 	if e == p.hand {
-		prev := e.Prev()
-		if prev == nil {
-			// If the removed element was the first and hand pointed to it, wrap hand to the end.
-			p.hand = p.ll.Back()
+		if p.ll.Len() == 1 {
+			p.hand = nil
 		} else {
-			p.hand = prev
+			prev := e.Prev()
+			if prev == nil {
+				// If the removed element was the first and hand pointed to it, wrap hand to the end.
+				p.hand = p.ll.Back()
+			} else {
+				p.hand = prev
+			}
 		}
 	}
 
