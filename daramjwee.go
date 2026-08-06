@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/mrchypark/daramjwee/internal/runtime"
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
@@ -316,9 +317,9 @@ func New(logger log.Logger, opts ...Option) (Cache, error) {
 		return nil, err
 	}
 
-	runtime := newStandaloneRuntime(manager)
+	rt := runtime.NewStandalone(manager)
 	cacheID := "standalone"
-	return newCacheFromConfig(logger, runtime, cacheID, cfg, fillLeaseTimeout)
+	return newCacheFromConfig(logger, rt, cacheID, cfg, fillLeaseTimeout)
 }
 
 func buildCacheConfig(mode cacheConstructionMode, groupCfg *GroupConfig, opts ...Option) (Config, time.Duration, error) {

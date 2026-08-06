@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/mrchypark/daramjwee/internal/runtime"
 	"github.com/mrchypark/daramjwee/internal/worker"
 	"github.com/stretchr/testify/require"
 )
@@ -240,7 +241,7 @@ func TestRefreshKeepsFetcherMetadataUnchangedWhileStoringFreshCachedAt(t *testin
 	cache := &DaramjweeCache{
 		tiers:   []Store{store},
 		logger:  log.NewNopLogger(),
-		runtime: newStandaloneRuntime(manager),
+		runtime: runtime.NewStandalone(manager),
 		cacheID: "metadata-ownership-refresh",
 		config:  cacheConfig{opTimeout: time.Second, closeTimeout: time.Second},
 	}

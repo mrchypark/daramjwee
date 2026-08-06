@@ -1,0 +1,71 @@
+package runtime
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"github.com/mrchypark/daramjwee/internal/worker"
+)
+
+type Standalone struct {
+	manager *worker.Manager
+	once    sync.Once
+}
+
+func NewStandalone(manager *worker.Manager) Runtime {
+	return &Standalone{manager: manager}
+}
+
+func (r *Standalone) Register(string, Config) error {
+	return nil
+}
+
+func (r *Standalone) Submit(_ string, _ JobKind, job worker.Job) bool {
+	if r == nil || r.manager == nil {
+		return false
+	}
+	return r.manager.Submit(job)
+}
+
+func (r *Standalone) SubmitWithDropCleanup(_ string, _ JobKind, job worker.Job, onDrop func()) bool {
+	if r == nil || r.manager == nil {
+		if onDrop != nil {
+			onDrop()
+		}
+		return false
+	}
+	wrappedJob := func(ctx context.Context) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if onDrop != nil {
+					onDrop()
+				}
+				panic(rec)
+			}
+		}()
+		job(ctx)
+	}
+	submitted := r.manager.Submit(wrappedJob)
+	if !submitted && onDrop != nil {
+		onDrop()
+	}
+	return submitted
+}
+
+func (r *Standalone) CloseCache(_ string, timeout time.Duration) error {
+	return r.Shutdown(timeout)
+}
+
+func (r *Standalone) RemoveCache(_ string) {}
+
+func (r *Standalone) Shutdown(timeout time.Duration) error {
+	if r == nil || r.manager == nil {
+		return nil
+	}
+	var shutdownErr error
+	r.once.Do(func() {
+		shutdownErr = r.manager.Shutdown(timeout)
+	})
+	return shutdownErr
+}

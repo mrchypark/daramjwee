@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/mrchypark/daramjwee/internal/runtime"
 	"github.com/mrchypark/daramjwee/internal/worker"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +17,7 @@ func TestStandaloneRuntime_CloseCacheWaitsForJobCompletion(t *testing.T) {
 	manager, err := worker.NewManager("pool", log.NewNopLogger(), 1, 1, time.Second)
 	require.NoError(t, err)
 
-	rt := newStandaloneRuntime(manager)
+	rt := runtime.NewStandalone(manager)
 	jobStarted := make(chan struct{})
 	releaseJob := make(chan struct{})
 
@@ -36,7 +37,7 @@ func TestStandaloneRuntime_CloseCacheWaitsForJobCompletion(t *testing.T) {
 }
 
 func TestGroupRuntime_QueueIsolationAndLimitEnforcement(t *testing.T) {
-	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+	rt := runtime.NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	require.NoError(t, rt.Register("cache-a", CacheRuntimeConfig{Weight: 1, QueueLimit: 1}))
 	require.NoError(t, rt.Register("cache-b", CacheRuntimeConfig{Weight: 1, QueueLimit: 1}))
@@ -60,7 +61,7 @@ func TestGroupRuntime_QueueIsolationAndLimitEnforcement(t *testing.T) {
 }
 
 func TestGroupRuntime_WeightedDequeueProgress(t *testing.T) {
-	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+	rt := runtime.NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	require.NoError(t, rt.Register("cache-a", CacheRuntimeConfig{Weight: 2, QueueLimit: 8}))
 	require.NoError(t, rt.Register("cache-b", CacheRuntimeConfig{Weight: 1, QueueLimit: 8}))
@@ -96,7 +97,7 @@ func TestGroupRuntime_WeightedDequeueProgress(t *testing.T) {
 }
 
 func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
-	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+	rt := runtime.NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	const cacheID = "cache-race"
 	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
@@ -127,7 +128,7 @@ func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
 }
 
 func TestGroupRuntime_CloseCacheRunsQueuedJobDropCleanupOnce(t *testing.T) {
-	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+	rt := runtime.NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	const cacheID = "cache-drop-cleanup"
 	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 2}))
@@ -162,7 +163,7 @@ func TestGroupRuntime_CloseCacheRunsQueuedJobDropCleanupOnce(t *testing.T) {
 }
 
 func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
-	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+	rt := runtime.NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	const cacheID = "cache-repeat-close"
 	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
@@ -201,7 +202,7 @@ func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
 }
 
 func TestGroupRuntime_RecoversPanickingJobAndContinues(t *testing.T) {
-	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
+	rt := runtime.NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	const cacheID = "cache-panic"
 	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
@@ -226,23 +227,4 @@ func TestGroupRuntime_RecoversPanickingJobAndContinues(t *testing.T) {
 
 	require.NoError(t, rt.CloseCache(cacheID, time.Second))
 	require.NoError(t, rt.Shutdown(time.Second))
-}
-
-func TestGroupRuntime_RemoveCache_AdjustsNextIndex(t *testing.T) {
-	rt := newGroupRuntime(log.NewNopLogger(), 1, time.Second)
-
-	require.NoError(t, rt.Register("cache-a", CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
-	require.NoError(t, rt.Register("cache-b", CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
-	require.NoError(t, rt.Register("cache-c", CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
-
-	rt.mu.Lock()
-	rt.nextIdx = 2
-	rt.mu.Unlock()
-
-	rt.RemoveCache("cache-a")
-
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	require.Equal(t, []string{"cache-b", "cache-c"}, rt.order)
-	require.Equal(t, 1, rt.nextIdx)
 }

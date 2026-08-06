@@ -3,20 +3,7 @@ package daramjwee
 import (
 	"context"
 	"errors"
-
-	"github.com/mrchypark/daramjwee/internal/worker"
 )
-
-type backgroundRuntimeWithDropCleanup interface {
-	SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool
-}
-
-func submitBackgroundJob(runtime backgroundRuntime, cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
-	if dropAware, ok := runtime.(backgroundRuntimeWithDropCleanup); ok {
-		return dropAware.SubmitWithDropCleanup(cacheID, kind, job, onDrop)
-	}
-	return runtime.Submit(cacheID, kind, job)
-}
 
 func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {
 	if len(c.tiers) <= 1 {
@@ -115,7 +102,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
 		}
 
-		if !submitBackgroundJob(c.runtime, c.cacheID, JobKindPersist, job, jobGeneration.release) {
+		if !c.runtime.SubmitWithDropCleanup(c.cacheID, JobKindPersist, job, jobGeneration.release) {
 			jobGeneration.release()
 			c.warnLog("msg", "background set rejected", "key", key, "dest_tier", destTierIndex)
 		}

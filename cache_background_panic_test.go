@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/mrchypark/daramjwee/internal/runtime"
 	"github.com/mrchypark/daramjwee/internal/worker"
 	"github.com/stretchr/testify/require"
 )
@@ -210,7 +211,7 @@ func newPanicTestRuntime(t *testing.T) backgroundRuntime {
 	t.Helper()
 	manager, err := worker.NewManager("pool", log.NewNopLogger(), 1, 4, time.Second)
 	require.NoError(t, err)
-	return newStandaloneRuntime(manager)
+	return runtime.NewStandalone(manager)
 }
 
 func waitForRuntimeRecovery(t *testing.T, runtime backgroundRuntime, cacheID string, kind JobKind) {

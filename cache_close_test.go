@@ -21,6 +21,9 @@ func (s *cacheCloseStubRuntime) Register(cacheID string, cfg CacheRuntimeConfig)
 func (s *cacheCloseStubRuntime) Submit(cacheID string, kind JobKind, job worker.Job) bool {
 	return true
 }
+func (s *cacheCloseStubRuntime) SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
+	return true
+}
 func (s *cacheCloseStubRuntime) CloseCache(cacheID string, timeout time.Duration) error {
 	s.closeCalls++
 	s.lastCacheID = cacheID

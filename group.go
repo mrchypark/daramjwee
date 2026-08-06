@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/mrchypark/daramjwee/internal/runtime"
 )
 
 // CacheGroup owns a shared background runtime for multiple caches.
@@ -19,7 +20,7 @@ type CacheGroup interface {
 type cacheGroup struct {
 	logger log.Logger
 	cfg    GroupConfig
-	rt     *groupRuntime
+	rt     runtime.Runtime
 
 	closed         atomic.Bool
 	registrationMu sync.Mutex
@@ -53,7 +54,7 @@ func NewGroup(logger log.Logger, opts ...GroupOption) (CacheGroup, error) {
 	group := &cacheGroup{
 		logger: logger,
 		cfg:    cfg,
-		rt:     newGroupRuntime(logger, cfg.Workers, cfg.WorkerTimeout),
+		rt:     runtime.NewGroup(logger, cfg.Workers, cfg.WorkerTimeout),
 		caches: make(map[string]*DaramjweeCache),
 	}
 	group.cond = sync.NewCond(&group.mu)
