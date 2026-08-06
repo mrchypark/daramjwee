@@ -1503,3 +1503,23 @@ func BenchmarkFileStore_Get_CopyStrategy(b *testing.B) {
 	store := setupBenchmarkStore(b, WithCopyWrite())
 	benchmarkFileStoreGet(b, store)
 }
+
+func TestLockedReadCloserDoubleClose(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello"), 0644))
+
+	unlockCalled := 0
+	f, err := os.Open(path)
+	require.NoError(t, err)
+
+	lrc := newLockedReadCloser(f, func() {
+		unlockCalled++
+	})
+
+	require.NoError(t, lrc.Close())
+	assert.Equal(t, 1, unlockCalled, "unlock should be called exactly once after first Close")
+
+	_ = lrc.Close()
+	assert.Equal(t, 1, unlockCalled, "unlock should not be called again on second Close")
+}

@@ -17,13 +17,13 @@ import (
 )
 
 type countingManifestBucket struct {
-	inner        objstore.Bucket
+	objstore.Bucket
 	mu           sync.Mutex
 	manifestGets int
 }
 
 func (b *countingManifestBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
-	reader, err := b.inner.Get(ctx, name)
+	reader, err := b.Bucket.Get(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -35,58 +35,6 @@ func (b *countingManifestBucket) Get(ctx context.Context, name string) (io.ReadC
 	return reader, nil
 }
 
-func (b *countingManifestBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
-	return b.inner.Upload(ctx, name, r, opts...)
-}
-
-func (b *countingManifestBucket) Delete(ctx context.Context, name string) error {
-	return b.inner.Delete(ctx, name)
-}
-
-func (b *countingManifestBucket) Name() string {
-	return b.inner.Name()
-}
-
-func (b *countingManifestBucket) Close() error {
-	return b.inner.Close()
-}
-
-func (b *countingManifestBucket) Provider() objstore.ObjProvider {
-	return b.inner.Provider()
-}
-
-func (b *countingManifestBucket) Iter(ctx context.Context, dir string, f func(string) error, options ...objstore.IterOption) error {
-	return b.inner.Iter(ctx, dir, f, options...)
-}
-
-func (b *countingManifestBucket) IterWithAttributes(ctx context.Context, dir string, f func(objstore.IterObjectAttributes) error, options ...objstore.IterOption) error {
-	return b.inner.IterWithAttributes(ctx, dir, f, options...)
-}
-
-func (b *countingManifestBucket) Exists(ctx context.Context, name string) (bool, error) {
-	return b.inner.Exists(ctx, name)
-}
-
-func (b *countingManifestBucket) IsObjNotFoundErr(err error) bool {
-	return b.inner.IsObjNotFoundErr(err)
-}
-
-func (b *countingManifestBucket) IsAccessDeniedErr(err error) bool {
-	return b.inner.IsAccessDeniedErr(err)
-}
-
-func (b *countingManifestBucket) GetRange(ctx context.Context, name string, off, length int64) (io.ReadCloser, error) {
-	return b.inner.GetRange(ctx, name, off, length)
-}
-
-func (b *countingManifestBucket) Attributes(ctx context.Context, name string) (objstore.ObjectAttributes, error) {
-	return b.inner.Attributes(ctx, name)
-}
-
-func (b *countingManifestBucket) SupportedIterOptions() []objstore.IterOptionType {
-	return b.inner.SupportedIterOptions()
-}
-
 func (b *countingManifestBucket) manifestCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -95,7 +43,7 @@ func (b *countingManifestBucket) manifestCalls() int {
 
 func TestStore_ManifestCacheAvoidsRepeatedManifestFetch(t *testing.T) {
 	ctx := context.Background()
-	bucket := &countingManifestBucket{inner: objstore.NewInMemBucket()}
+	bucket := &countingManifestBucket{Bucket: objstore.NewInMemBucket()}
 	store := New(bucket, log.NewNopLogger(),
 		WithDir(t.TempDir()),
 		WithManifestCache(1<<20),
@@ -133,7 +81,7 @@ func TestStore_ManifestCacheAvoidsRepeatedManifestFetch(t *testing.T) {
 
 func TestStore_ManifestCacheReloadsAfterTTL(t *testing.T) {
 	ctx := context.Background()
-	bucket := &countingManifestBucket{inner: objstore.NewInMemBucket()}
+	bucket := &countingManifestBucket{Bucket: objstore.NewInMemBucket()}
 	store := New(bucket, log.NewNopLogger(),
 		WithDir(t.TempDir()),
 		WithManifestCache(1<<20),
@@ -172,4 +120,28 @@ func TestStore_ManifestCacheReloadsAfterTTL(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, stream.Close())
 	assert.Equal(t, 2, bucket.manifestCalls())
+}
+
+func TestManifestCacheNilSafe(t *testing.T) {
+	var c *manifestCache
+
+	_, ok := c.Get("key")
+	assert.False(t, ok)
+
+	c.Set("key", &manifest{})
+}
+
+func TestManifestCacheLRUEviction(t *testing.T) {
+	now := time.Now()
+	c := newManifestCache(1, time.Hour, func() time.Time { return now })
+
+	m1 := &manifest{Version: "v1", Metadata: daramjwee.Metadata{CacheTag: "t1"}}
+	m2 := &manifest{Version: "v2", Metadata: daramjwee.Metadata{CacheTag: "t2"}}
+
+	c.Set("key1", m1)
+	c.Set("key2", m2)
+
+	c.mu.Lock()
+	assert.Empty(t, c.entries, "all entries should be evicted when each exceeds maxBytes")
+	c.mu.Unlock()
 }
