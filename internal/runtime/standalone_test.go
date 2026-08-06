@@ -69,6 +69,7 @@ func TestStandalone_SubmitWithDropCleanup_Panic(t *testing.T) {
 	rt := NewStandalone(manager)
 	jobStarted := make(chan struct{})
 	releaseJob := make(chan struct{})
+	onDropDone := make(chan struct{})
 	onDropCalled := false
 
 	require.True(t, rt.SubmitWithDropCleanup("cache", JobKindRefresh, func(ctx context.Context) {
@@ -77,11 +78,12 @@ func TestStandalone_SubmitWithDropCleanup_Panic(t *testing.T) {
 		panic("test panic")
 	}, func() {
 		onDropCalled = true
+		close(onDropDone)
 	}))
 	<-jobStarted
 
 	releaseJob <- struct{}{}
-	time.Sleep(100 * time.Millisecond)
+	<-onDropDone
 	require.True(t, onDropCalled, "onDrop should be called on panic")
 	require.NoError(t, rt.Shutdown(time.Second))
 }
