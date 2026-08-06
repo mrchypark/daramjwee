@@ -2,13 +2,52 @@ package catalog
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCatalogUnchangedMutationsSkipPersist(t *testing.T) {
+	dir := t.TempDir()
+	cat, err := Open(dir)
+	require.NoError(t, err)
+
+	entry := Entry{SegmentPath: filepath.Join(dir, "segment.seg"), Generation: 1}
+
+	require.NoError(t, cat.Set("key", entry))
+
+	var persistCalls atomic.Int32
+	restoreWrite := writeFileFn
+	writeFileFn = func(path string, data []byte, perm os.FileMode) error {
+		persistCalls.Add(1)
+		return restoreWrite(path, data, perm)
+	}
+	t.Cleanup(func() {
+		writeFileFn = restoreWrite
+	})
+
+	require.NoError(t, cat.Set("key", entry))
+	require.NoError(t, cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
+		return current, exists
+	}))
+	require.NoError(t, cat.Delete("missing-key"))
+	require.Equal(t, int32(0), persistCalls.Load(), "unchanged mutations must not rewrite the snapshot")
+
+	require.NoError(t, cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
+		current.Generation = 2
+		return current, true
+	}))
+	require.Equal(t, int32(1), persistCalls.Load(), "real mutations must still persist")
+
+	updated, ok := cat.Get("key")
+	require.True(t, ok)
+	assert.Equal(t, uint64(2), updated.Generation)
+}
 
 func TestCatalogSetRollsBackOnPreCommitFailure(t *testing.T) {
 	dir := t.TempDir()

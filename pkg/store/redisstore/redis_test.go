@@ -1,10 +1,13 @@
 package redisstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -431,4 +434,46 @@ func TestRedisStore_ZeroByteWrite(t *testing.T) {
 	assert.Len(t, body, 0)
 	assert.Equal(t, metadata.CacheTag, meta.CacheTag)
 	assert.True(t, meta.IsNegative)
+}
+
+// TestRedisStore_ConcurrentWriteCommitNoOrphanTempKey guards against the
+// Write/Commit TOCTOU window: a Write that passes the done-check but is still
+// in flight when Commit renames the temp key would recreate the temp key and
+// leak it forever. After Commit returns, no temp key may remain.
+func TestRedisStore_ConcurrentWriteCommitNoOrphanTempKey(t *testing.T) {
+	mr := setupMiniRedis(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := New(client, log.NewNopLogger()).(*RedisStore)
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("x"), 2048)
+
+	for i := 0; i < 30; i++ {
+		key := fmt.Sprintf("race-%d", i)
+		sink, err := store.BeginStagedSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+		require.NoError(t, err)
+		writer := sink.(*redisStoreWriter)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if _, err := sink.Write(data); err != nil {
+					require.ErrorIs(t, err, io.ErrClosedPipe)
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			_ = sink.Commit(ctx)
+		}()
+		wg.Wait()
+
+		exists, err := client.Exists(ctx, writer.tempKey).Result()
+		require.NoError(t, err)
+		require.Zero(t, exists, "orphaned temp key after commit for %q", key)
+	}
 }

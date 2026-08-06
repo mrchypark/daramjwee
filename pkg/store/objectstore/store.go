@@ -93,6 +93,7 @@ type Store struct {
 	lockManager        *stripedlock.Manager
 	blockLoads         singleflight.Group
 	pageLoads          singleflight.Group
+	manifestCache      *manifestCache
 	versionSeq         atomic.Uint64
 	generationSeq      atomic.Uint64
 	initErr            error
@@ -173,6 +174,9 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 			return segment.Open(root, shard, segmentID)
 		},
 	}
+	store.manifestCache = newManifestCache(cfg.manifestCacheBytes, cfg.manifestTTL, func() time.Time {
+		return store.now()
+	})
 	store.checkpointCache = newCheckpointCache(cfg.checkpointCacheBytes, cfg.checkpointTTL, func() time.Time {
 		return store.now()
 	})
@@ -404,6 +408,10 @@ func (s *Store) ensureReady() error {
 }
 
 func (s *Store) loadManifest(ctx context.Context, key string) (*manifest, error) {
+	if m, ok := s.manifestCache.Get(key); ok {
+		return m, nil
+	}
+
 	reader, err := s.bucket.Get(ctx, s.manifestPath(key))
 	if err != nil {
 		if s.bucket.IsObjNotFoundErr(err) {
@@ -426,6 +434,7 @@ func (s *Store) loadManifest(ctx context.Context, key string) (*manifest, error)
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("objectstore: decode manifest for %q: %w", key, err)
 	}
+	s.manifestCache.Set(key, &m)
 	return &m, nil
 }
 

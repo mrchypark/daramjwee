@@ -1,297 +1,590 @@
 package daramjwee
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-kit/log"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func testTopWriteGeneration(t *testing.T, cache *DaramjweeCache, key string) *topWriteGeneration {
-	t.Helper()
-	observed := cache.currentTopWriteGeneration(key)
-	t.Cleanup(observed.release)
-	return observed
-}
-
-func TestHandleConditionalLowerTierPromotionError_CancelsOnGenericPromotionFailure(t *testing.T) {
-	cache := &DaramjweeCache{
-		logger: log.NewNopLogger(),
-	}
-	canceled := false
-
-	resp := cache.handleConditionalLowerTierPromotionError(
-		"key",
-		1,
-		errors.New("promotion failed"),
-		io.NopCloser(&noopReader{}),
-		&Metadata{CacheTag: "cache-v1"},
-		func() { canceled = true },
-	)
-
-	require.True(t, canceled)
-	require.Equal(t, GetStatusNotModified, resp.Status)
-	require.Nil(t, resp.Body)
-	require.Equal(t, "cache-v1", resp.Metadata.CacheTag)
-}
-
-func TestPromoteNegativeLowerTierHitJoinsWriterSetupAndSourceCloseErrors(t *testing.T) {
-	writerSetupErr := errors.New("writer setup failed")
-	sourceCloseErr := errors.New("source close failed")
-	cache := &DaramjweeCache{
-		tiers:  []Store{&cacheReadFailingBeginSetStore{err: writerSetupErr}},
-		logger: log.NewNopLogger(),
-	}
-	src := &closeErrorReadCloser{err: sourceCloseErr}
-	canceled := false
-
-	resp, err := cache.promoteNegativeLowerTierHit(
-		context.Background(),
-		context.Background(),
-		"key",
-		1,
-		src,
-		&Metadata{IsNegative: true},
-		&Metadata{IsNegative: true},
-		func() { canceled = true },
-		testTopWriteGeneration(t, cache, "key"),
-	)
-
-	require.Nil(t, resp)
-	require.ErrorIs(t, err, writerSetupErr)
-	require.ErrorIs(t, err, sourceCloseErr)
-	require.True(t, canceled)
-	require.True(t, src.closed)
-}
-
-func TestPromoteLowerTierHitToTopJoinsWriterSetupAndSourceCloseErrors(t *testing.T) {
-	writerSetupErr := errors.New("writer setup failed")
-	sourceCloseErr := errors.New("source close failed")
-	cache := &DaramjweeCache{
-		tiers:  []Store{&cacheReadFailingBeginSetStore{err: writerSetupErr}},
-		logger: log.NewNopLogger(),
-	}
-	src := &closeErrorReadCloser{err: sourceCloseErr}
-
-	err := cache.promoteLowerTierHitToTop(
-		context.Background(),
-		context.Background(),
-		"key",
-		1,
-		src,
-		&Metadata{},
-		testTopWriteGeneration(t, cache, "key"),
-	)
-
-	require.ErrorIs(t, err, writerSetupErr)
-	require.ErrorIs(t, err, sourceCloseErr)
-	require.True(t, src.closed)
-}
-
-func TestPromoteRefreshFallbackToTopPreservesInvalidationOnSourceCloseSuccess(t *testing.T) {
-	meta := &Metadata{CacheTag: "v1"}
-	cache := &DaramjweeCache{
-		tiers: []Store{
-			&cacheReadFailingBeginSetStore{err: ErrTopWriteInvalidated},
-			&cacheReadSourceStore{metadata: meta, body: []byte("value")},
+func TestIsConditionalRequestSatisfied(t *testing.T) {
+	tests := []struct {
+		name     string
+		req      GetRequest
+		meta     *Metadata
+		expected bool
+	}{
+		{
+			name:     "nil metadata",
+			req:      GetRequest{IfNoneMatch: `"v1"`},
+			meta:     nil,
+			expected: false,
 		},
-		logger: log.NewNopLogger(),
-	}
-
-	err := cache.promoteRefreshFallbackToTop(
-		context.Background(),
-		"key",
-		tierDestination{tierIndex: 1, store: cache.tiers[1]},
-		meta,
-		testTopWriteGeneration(t, cache, "key"),
-	)
-
-	require.ErrorIs(t, err, ErrTopWriteInvalidated)
-}
-
-func TestPromoteRefreshFallbackToTopJoinsInvalidationAndSourceCloseError(t *testing.T) {
-	sourceCloseErr := errors.New("source close failed")
-	meta := &Metadata{CacheTag: "v1"}
-	cache := &DaramjweeCache{
-		tiers: []Store{
-			&cacheReadFailingBeginSetStore{err: ErrTopWriteInvalidated},
-			&cacheReadSourceStore{metadata: meta, body: []byte("value"), closeErr: sourceCloseErr},
+		{
+			name:     "empty if-none-match",
+			req:      GetRequest{IfNoneMatch: ""},
+			meta:     &Metadata{CacheTag: "v1"},
+			expected: false,
 		},
-		logger: log.NewNopLogger(),
-	}
-
-	err := cache.promoteRefreshFallbackToTop(
-		context.Background(),
-		"key",
-		tierDestination{tierIndex: 1, store: cache.tiers[1]},
-		meta,
-		testTopWriteGeneration(t, cache, "key"),
-	)
-
-	require.ErrorIs(t, err, ErrTopWriteInvalidated)
-	require.ErrorIs(t, err, sourceCloseErr)
-}
-
-func TestPromoteRefreshFallbackToTopPreservesNegativeInvalidation(t *testing.T) {
-	meta := &Metadata{CacheTag: "v1", IsNegative: true}
-	cache := &DaramjweeCache{
-		tiers: []Store{
-			&cacheReadFailingBeginSetStore{err: ErrTopWriteInvalidated},
-			&cacheReadSourceStore{metadata: meta},
+		{
+			name:     "negative entry",
+			req:      GetRequest{IfNoneMatch: `"v1"`},
+			meta:     &Metadata{CacheTag: "v1", IsNegative: true},
+			expected: false,
 		},
-		logger: log.NewNopLogger(),
-	}
-
-	err := cache.promoteRefreshFallbackToTop(
-		context.Background(),
-		"key",
-		tierDestination{tierIndex: 1, store: cache.tiers[1]},
-		meta,
-		testTopWriteGeneration(t, cache, "key"),
-	)
-
-	require.ErrorIs(t, err, ErrTopWriteInvalidated)
-}
-
-func TestPromoteRefreshFallbackToTopSkipsMissingNegativeSource(t *testing.T) {
-	meta := &Metadata{CacheTag: "v1", IsNegative: true}
-	cache := &DaramjweeCache{
-		tiers: []Store{
-			&cacheReadFailingBeginSetStore{err: errors.New("unexpected BeginSet")},
-			&cacheReadSourceStore{metadata: meta, statErr: ErrNotFound},
+		{
+			name:     "matching etag",
+			req:      GetRequest{IfNoneMatch: `"v1"`},
+			meta:     &Metadata{CacheTag: "v1"},
+			expected: true,
 		},
-		logger: log.NewNopLogger(),
-	}
-
-	err := cache.promoteRefreshFallbackToTop(
-		context.Background(),
-		"key",
-		tierDestination{tierIndex: 1, store: cache.tiers[1]},
-		meta,
-		testTopWriteGeneration(t, cache, "key"),
-	)
-
-	require.NoError(t, err)
-}
-
-func TestPromoteRefreshFallbackToTopSkipsMissingSourceStream(t *testing.T) {
-	meta := &Metadata{CacheTag: "v1"}
-	cache := &DaramjweeCache{
-		tiers: []Store{
-			&cacheReadFailingBeginSetStore{err: errors.New("unexpected BeginSet")},
-			&cacheReadSourceStore{metadata: meta, getErr: ErrNotFound},
+		{
+			name:     "non-matching etag",
+			req:      GetRequest{IfNoneMatch: `"v2"`},
+			meta:     &Metadata{CacheTag: "v1"},
+			expected: false,
 		},
-		logger: log.NewNopLogger(),
+		{
+			name:     "wildcard if-none-match",
+			req:      GetRequest{IfNoneMatch: "*"},
+			meta:     &Metadata{CacheTag: "v1"},
+			expected: true,
+		},
+		{
+			name:     "wildcard if-none-match with negative entry",
+			req:      GetRequest{IfNoneMatch: "*"},
+			meta:     &Metadata{CacheTag: "v1", IsNegative: true},
+			expected: false,
+		},
+		{
+			name:     "multiple etags first matches",
+			req:      GetRequest{IfNoneMatch: `"v2", "v1"`},
+			meta:     &Metadata{CacheTag: "v1"},
+			expected: true,
+		},
+		{
+			name:     "multiple etags second matches",
+			req:      GetRequest{IfNoneMatch: `"v2", "v1"`},
+			meta:     &Metadata{CacheTag: "v2"},
+			expected: true,
+		},
+		{
+			name:     "whitespace if-none-match",
+			req:      GetRequest{IfNoneMatch: "  "},
+			meta:     &Metadata{CacheTag: "v1"},
+			expected: false,
+		},
+		{
+			name:     "weak etag matching strong",
+			req:      GetRequest{IfNoneMatch: `W/"v1"`},
+			meta:     &Metadata{CacheTag: `"v1"`},
+			expected: true,
+		},
+		{
+			name:     "empty cache tag",
+			req:      GetRequest{IfNoneMatch: `"v1"`},
+			meta:     &Metadata{CacheTag: ""},
+			expected: false,
+		},
 	}
 
-	err := cache.promoteRefreshFallbackToTop(
-		context.Background(),
-		"key",
-		tierDestination{tierIndex: 1, store: cache.tiers[1]},
-		meta,
-		testTopWriteGeneration(t, cache, "key"),
-	)
-
-	require.NoError(t, err)
-}
-
-func TestFetchFromOriginRejectsNilResult(t *testing.T) {
-	cache := &DaramjweeCache{}
-
-	_, err := cache.fetchFromOrigin(context.Background(), nilResultFetcher{}, nil)
-
-	require.ErrorContains(t, err, "fetcher returned nil result")
-}
-
-func TestFetchFromOriginRejectsNilBody(t *testing.T) {
-	cache := &DaramjweeCache{}
-
-	_, err := cache.fetchFromOrigin(context.Background(), nilBodyFetcher{}, nil)
-
-	require.ErrorContains(t, err, "fetcher returned nil body")
-}
-
-type noopReader struct{}
-
-func (noopReader) Read(p []byte) (int, error) { return 0, io.EOF }
-
-type cacheReadFailingBeginSetStore struct {
-	err error
-}
-
-func (s *cacheReadFailingBeginSetStore) GetStream(context.Context, string) (io.ReadCloser, *Metadata, error) {
-	return nil, nil, ErrNotFound
-}
-
-func (s *cacheReadFailingBeginSetStore) BeginSet(context.Context, string, *Metadata) (WriteSink, error) {
-	return nil, s.err
-}
-
-func (s *cacheReadFailingBeginSetStore) Delete(context.Context, string) error {
-	return nil
-}
-
-func (s *cacheReadFailingBeginSetStore) Stat(context.Context, string) (*Metadata, error) {
-	return nil, ErrNotFound
-}
-
-type closeErrorReadCloser struct {
-	err    error
-	closed bool
-}
-
-func (r *closeErrorReadCloser) Read(p []byte) (int, error) { return 0, io.EOF }
-
-func (r *closeErrorReadCloser) Close() error {
-	r.closed = true
-	return r.err
-}
-
-type cacheReadSourceStore struct {
-	metadata *Metadata
-	body     []byte
-	closeErr error
-	getErr   error
-	statErr  error
-}
-
-func (s *cacheReadSourceStore) GetStream(context.Context, string) (io.ReadCloser, *Metadata, error) {
-	if s.getErr != nil {
-		return nil, nil, s.getErr
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := &DaramjweeCache{logger: log.NewNopLogger()}
+			got := cache.isConditionalRequestSatisfied(tt.req, tt.meta)
+			assert.Equal(t, tt.expected, got)
+		})
 	}
-	if s.closeErr != nil {
-		return &closeErrorReadCloser{err: s.closeErr}, cloneMetadata(s.metadata), nil
+}
+
+func TestTopTierCloseCallback(t *testing.T) {
+	t.Run("not stale returns cancel handler", func(t *testing.T) {
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+		cache := &DaramjweeCache{logger: log.NewNopLogger()}
+
+		handler := cache.topTierCloseCallback(context.Background(), "key", nil, cancel, &Metadata{}, false, nil)
+		handler.handle()
+
+		assert.True(t, cancelCalled)
+	})
+
+	t.Run("stale returns refresh callback", func(t *testing.T) {
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+		observedGen := &topWriteGeneration{
+			coord: &writeCoordinator{
+				manager:            &topWriteManager{},
+				committedGeneration: atomic.Uint64{},
+			},
+			generation: 1,
+		}
+		observedGen.coord.committedGeneration.Store(1)
+		cache := &DaramjweeCache{logger: log.NewNopLogger()}
+
+		handler := cache.topTierCloseCallback(context.Background(), "key", nil, cancel, &Metadata{CacheTag: "v1"}, true, observedGen)
+		require.NotNil(t, handler)
+
+		handler.handle()
+		assert.True(t, cancelCalled)
+	})
+}
+
+func TestHandleConditionalLowerTierPromotionError(t *testing.T) {
+	tests := []struct {
+		name           string
+		err            error
+		expectedStatus GetStatus
+		cancelExpected bool
+	}{
+		{
+			name:           "invalidation with preserveBody true",
+			err:            lowerTierPromotionInvalidatedError{preserveBody: true},
+			expectedStatus: GetStatusOK,
+			cancelExpected: false,
+		},
+		{
+			name:           "invalidation with preserveBody false",
+			err:            lowerTierPromotionInvalidatedError{preserveBody: false},
+			expectedStatus: GetStatusNotFound,
+			cancelExpected: true,
+		},
+		{
+			name:           "ErrTopWriteInvalidated",
+			err:            ErrTopWriteInvalidated,
+			expectedStatus: GetStatusOK,
+			cancelExpected: false,
+		},
+		{
+			name:           "other error",
+			err:            errors.New("some error"),
+			expectedStatus: GetStatusNotModified,
+			cancelExpected: true,
+		},
 	}
-	return io.NopCloser(bytes.NewReader(s.body)), cloneMetadata(s.metadata), nil
-}
 
-func (s *cacheReadSourceStore) BeginSet(context.Context, string, *Metadata) (WriteSink, error) {
-	return nil, errors.New("unexpected BeginSet")
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cancelCalled := false
+			cancel := func() { cancelCalled = true }
+			src := io.NopCloser(strings.NewReader("data"))
+			cache := &DaramjweeCache{logger: log.NewNopLogger()}
+			meta := &Metadata{CacheTag: "v1"}
 
-func (s *cacheReadSourceStore) Delete(context.Context, string) error {
-	return nil
-}
-
-func (s *cacheReadSourceStore) Stat(context.Context, string) (*Metadata, error) {
-	if s.statErr != nil {
-		return nil, s.statErr
+			resp := cache.handleConditionalLowerTierPromotionError("key", 1, tt.err, src, meta, cancel)
+			assert.Equal(t, tt.expectedStatus, resp.Status)
+			assert.Equal(t, tt.cancelExpected, cancelCalled)
+		})
 	}
-	return cloneMetadata(s.metadata), nil
 }
 
-type nilResultFetcher struct{}
+func TestDecideLowerTierHit(t *testing.T) {
+	tests := []struct {
+		name             string
+		higherTiersClean bool
+		ifNoneMatch      string
+		cacheTag         string
+		isNegative       bool
+		isStale          bool
+		canServeCond     bool
+		expectedAction   lowerTierAction
+	}{
+		{
+			name:             "higher tiers dirty + positive",
+			higherTiersClean: false,
+			cacheTag:         "v1",
+			isStale:          false,
+			expectedAction:   actionServeBodyDirect,
+		},
+		{
+			name:             "higher tiers dirty + conditional",
+			higherTiersClean: false,
+			ifNoneMatch:      `"v1"`,
+			cacheTag:         "v1",
+			expectedAction:   actionServeConditionalDirect,
+		},
+		{
+			name:             "higher tiers dirty + negative",
+			higherTiersClean: false,
+			isNegative:       true,
+			expectedAction:   actionServeNotFoundDirect,
+		},
+		{
+			name:             "higher tiers dirty + stale",
+			higherTiersClean: false,
+			isStale:          true,
+			expectedAction:   actionServeStaleBodyRefresh,
+		},
+		{
+			name:             "higher tiers clean + conditional + can serve",
+			higherTiersClean: true,
+			ifNoneMatch:      `"v1"`,
+			cacheTag:         "v1",
+			canServeCond:     true,
+			expectedAction:   actionServeConditionalWithPromotion,
+		},
+		{
+			name:             "higher tiers clean + conditional + cannot serve",
+			higherTiersClean: true,
+			ifNoneMatch:      `"v1"`,
+			cacheTag:         "v1",
+			canServeCond:     false,
+			expectedAction:   actionServeBodyDirect,
+		},
+		{
+			name:             "higher tiers clean + negative + not stale",
+			higherTiersClean: true,
+			isNegative:       true,
+			isStale:          false,
+			expectedAction:   actionServeNegativeNotFoundPromote,
+		},
+		{
+			name:             "higher tiers clean + negative + stale",
+			higherTiersClean: true,
+			isNegative:       true,
+			isStale:          true,
+			expectedAction:   actionServeNegativeNotFoundStale,
+		},
+		{
+			name:             "higher tiers clean + positive + stale",
+			higherTiersClean: true,
+			isStale:          true,
+			expectedAction:   actionServeStaleBodyRefresh,
+		},
+		{
+			name:             "higher tiers clean + positive + not stale",
+			higherTiersClean: true,
+			expectedAction:   actionPromotePositive,
+		},
+	}
 
-func (nilResultFetcher) Fetch(context.Context, *Metadata) (*FetchResult, error) {
-	return nil, nil
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := &DaramjweeCache{logger: log.NewNopLogger()}
+
+			p := lowerTierHitParams{
+				key:              "key",
+				higherTiersClean: tt.higherTiersClean,
+				req:              GetRequest{IfNoneMatch: tt.ifNoneMatch},
+			}
+			meta := &Metadata{
+				CacheTag:   tt.cacheTag,
+				IsNegative: tt.isNegative,
+			}
+
+			if tt.canServeCond {
+				gen := &topWriteGeneration{
+					coord: &writeCoordinator{
+						manager:            &cache.topWrites,
+						key:                "key",
+						committedGeneration: atomic.Uint64{},
+					},
+					generation: 1,
+				}
+				gen.coord.committedGeneration.Store(1)
+				p.expectedGeneration = gen
+			}
+
+			decision := cache.decideLowerTierHit(p, meta, tt.isStale)
+			assert.Equal(t, tt.expectedAction, decision.action)
+			assert.Equal(t, tt.isStale, decision.isStale)
+		})
+	}
 }
 
-type nilBodyFetcher struct{}
+func TestServeLowerTierWithoutPromotion(t *testing.T) {
+	t.Run("conditional request satisfied", func(t *testing.T) {
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+		src := io.NopCloser(strings.NewReader("data"))
+		cache := &DaramjweeCache{logger: log.NewNopLogger()}
 
-func (nilBodyFetcher) Fetch(context.Context, *Metadata) (*FetchResult, error) {
-	return &FetchResult{Metadata: &Metadata{}}, nil
+		p := lowerTierHitParams{
+			key:    "key",
+			req:    GetRequest{IfNoneMatch: `"v1"`},
+			src:    src,
+			cancel: cancel,
+			meta:   &Metadata{CacheTag: "v1"},
+		}
+
+		resp, err := cache.serveLowerTierWithoutPromotion(p, false)
+		require.NoError(t, err)
+		assert.Equal(t, GetStatusOK, resp.Status)
+		assert.False(t, cancelCalled)
+	})
+
+	t.Run("negative entry", func(t *testing.T) {
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+		src := io.NopCloser(strings.NewReader("data"))
+		cache := &DaramjweeCache{logger: log.NewNopLogger()}
+
+		p := lowerTierHitParams{
+			key:    "key",
+			req:    GetRequest{},
+			src:    src,
+			cancel: cancel,
+			meta:   &Metadata{IsNegative: true},
+		}
+
+		resp, err := cache.serveLowerTierWithoutPromotion(p, false)
+		require.NoError(t, err)
+		assert.Equal(t, GetStatusNotFound, resp.Status)
+		assert.True(t, cancelCalled)
+	})
+
+	t.Run("positive entry", func(t *testing.T) {
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+		src := io.NopCloser(strings.NewReader("data"))
+		cache := &DaramjweeCache{logger: log.NewNopLogger()}
+
+		p := lowerTierHitParams{
+			key:    "key",
+			req:    GetRequest{},
+			src:    src,
+			cancel: cancel,
+			meta:   &Metadata{CacheTag: "v1"},
+		}
+
+		resp, err := cache.serveLowerTierWithoutPromotion(p, false)
+		require.NoError(t, err)
+		assert.Equal(t, GetStatusOK, resp.Status)
+		assert.False(t, cancelCalled)
+	})
+}
+
+func TestHandleStaleLowerTierHit(t *testing.T) {
+	t.Run("negative entry returns not found", func(t *testing.T) {
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+		src := io.NopCloser(strings.NewReader("data"))
+		observedGen := &topWriteGeneration{
+			coord: &writeCoordinator{
+				manager:            &topWriteManager{},
+				committedGeneration: atomic.Uint64{},
+			},
+			generation: 1,
+		}
+		observedGen.coord.committedGeneration.Store(1)
+		cache := &DaramjweeCache{
+			tiers:  []Store{&nullStore{}},
+			logger: log.NewNopLogger(),
+		}
+
+		resp, err := cache.handleStaleLowerTierHit(context.Background(), "key", 0, nil, src, &Metadata{IsNegative: true}, cancel, observedGen)
+		require.NoError(t, err)
+		assert.Equal(t, GetStatusNotFound, resp.Status)
+		assert.True(t, cancelCalled)
+	})
+
+	t.Run("positive entry returns ok", func(t *testing.T) {
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+		src := io.NopCloser(strings.NewReader("data"))
+		observedGen := &topWriteGeneration{
+			coord: &writeCoordinator{
+				manager:            &topWriteManager{},
+				committedGeneration: atomic.Uint64{},
+			},
+			generation: 1,
+		}
+		observedGen.coord.committedGeneration.Store(1)
+		cache := &DaramjweeCache{
+			tiers:  []Store{&nullStore{}},
+			logger: log.NewNopLogger(),
+		}
+
+		resp, err := cache.handleStaleLowerTierHit(context.Background(), "key", 0, nil, src, &Metadata{CacheTag: "v1"}, cancel, observedGen)
+		require.NoError(t, err)
+		assert.Equal(t, GetStatusOK, resp.Status)
+		assert.False(t, cancelCalled)
+	})
+}
+
+func TestCanAttemptExpectedTopWrite(t *testing.T) {
+	t.Run("nil generation", func(t *testing.T) {
+		cache := &DaramjweeCache{}
+		assert.False(t, cache.canAttemptExpectedTopWrite("key", nil))
+	})
+
+	t.Run("wrong manager", func(t *testing.T) {
+		cache := &DaramjweeCache{}
+		gen := &topWriteGeneration{
+			coord: &writeCoordinator{
+				manager:            &topWriteManager{},
+				key:                "key",
+				committedGeneration: atomic.Uint64{},
+			},
+			generation: 1,
+		}
+		gen.coord.committedGeneration.Store(1)
+		assert.False(t, cache.canAttemptExpectedTopWrite("key", gen))
+	})
+
+	t.Run("wrong key", func(t *testing.T) {
+		cache := &DaramjweeCache{}
+		gen := &topWriteGeneration{
+			coord: &writeCoordinator{
+				manager:            &cache.topWrites,
+				key:                "other",
+				committedGeneration: atomic.Uint64{},
+			},
+			generation: 1,
+		}
+		gen.coord.committedGeneration.Store(1)
+		assert.False(t, cache.canAttemptExpectedTopWrite("key", gen))
+	})
+
+	t.Run("coord rejects (generation mismatch)", func(t *testing.T) {
+		cache := &DaramjweeCache{}
+		gen := &topWriteGeneration{
+			coord: &writeCoordinator{
+				manager:            &cache.topWrites,
+				key:                "key",
+				committedGeneration: atomic.Uint64{},
+			},
+			generation: 1,
+		}
+		gen.coord.committedGeneration.Store(2)
+		assert.False(t, cache.canAttemptExpectedTopWrite("key", gen))
+	})
+
+	t.Run("all conditions met", func(t *testing.T) {
+		cache := &DaramjweeCache{}
+		gen := &topWriteGeneration{
+			coord: &writeCoordinator{
+				manager:            &cache.topWrites,
+				key:                "key",
+				committedGeneration: atomic.Uint64{},
+			},
+			generation: 1,
+		}
+		gen.coord.committedGeneration.Store(1)
+		assert.True(t, cache.canAttemptExpectedTopWrite("key", gen))
+	})
+}
+
+func TestDecideDirectServe(t *testing.T) {
+	tests := []struct {
+		name           string
+		ifNoneMatch    string
+		cacheTag       string
+		isNegative     bool
+		isStale        bool
+		expectedAction lowerTierAction
+	}{
+		{
+			name:           "conditional satisfied",
+			ifNoneMatch:    `"v1"`,
+			cacheTag:       "v1",
+			expectedAction: actionServeConditionalDirect,
+		},
+		{
+			name:           "negative entry",
+			isNegative:     true,
+			expectedAction: actionServeNotFoundDirect,
+		},
+		{
+			name:           "stale entry",
+			isStale:        true,
+			expectedAction: actionServeStaleBodyRefresh,
+		},
+		{
+			name:           "positive entry",
+			expectedAction: actionServeBodyDirect,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := &DaramjweeCache{logger: log.NewNopLogger()}
+			p := lowerTierHitParams{
+				key:  "key",
+				req:  GetRequest{IfNoneMatch: tt.ifNoneMatch},
+				meta: &Metadata{CacheTag: tt.cacheTag, IsNegative: tt.isNegative},
+			}
+
+			decision := cache.decideDirectServe(p, p.meta, tt.isStale)
+			assert.Equal(t, tt.expectedAction, decision.action)
+		})
+	}
+}
+
+func TestHandleMissFetchError(t *testing.T) {
+	t.Run("ErrCacheableNotFound higher tiers clean", func(t *testing.T) {
+		cache := &DaramjweeCache{
+			logger: log.NewNopLogger(),
+			tiers:  []Store{&nullStore{}},
+		}
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+
+		_, err := cache.handleMissFetchError(
+			context.Background(), context.Background(), "key",
+			GetRequest{}, cancel, nil,
+			ErrCacheableNotFound, nil, true,
+		)
+		require.NoError(t, err)
+		assert.True(t, cancelCalled)
+	})
+
+	t.Run("ErrCacheableNotFound higher tiers dirty", func(t *testing.T) {
+		cache := &DaramjweeCache{
+			logger: log.NewNopLogger(),
+			tiers:  []Store{&nullStore{}},
+		}
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+
+		resp, err := cache.handleMissFetchError(
+			context.Background(), context.Background(), "key",
+			GetRequest{}, cancel, nil,
+			ErrCacheableNotFound, nil, false,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, GetStatusNotFound, resp.Status)
+		assert.True(t, cancelCalled)
+	})
+
+	t.Run("ErrNotModified higher tiers dirty", func(t *testing.T) {
+		cache := &DaramjweeCache{
+			logger: log.NewNopLogger(),
+			tiers:  []Store{&nullStore{}},
+		}
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+
+		_, err := cache.handleMissFetchError(
+			context.Background(), context.Background(), "key",
+			GetRequest{}, cancel, nil,
+			ErrNotModified, nil, false,
+		)
+		require.Error(t, err)
+		assert.True(t, cancelCalled)
+	})
+
+	t.Run("other error", func(t *testing.T) {
+		cache := &DaramjweeCache{
+			logger: log.NewNopLogger(),
+			tiers:  []Store{&nullStore{}},
+		}
+		cancelCalled := false
+		cancel := func() { cancelCalled = true }
+
+		fetchErr := errors.New("network error")
+		_, err := cache.handleMissFetchError(
+			context.Background(), context.Background(), "key",
+			GetRequest{}, cancel, nil,
+			fetchErr, nil, true,
+		)
+		assert.Equal(t, fetchErr, err)
+		assert.False(t, cancelCalled)
+	})
 }

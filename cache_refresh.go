@@ -116,31 +116,9 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 	return nil
 }
 
-func (c *DaramjweeCache) refreshOnCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata, observedGeneration *topWriteGeneration) func() {
-	ownedGeneration := observedGeneration.retain()
-	return func() {
-		defer cancel()
-		defer ownedGeneration.release()
-		if err := c.scheduleRefreshWithMetadata(detachedValueContext(requestCtx), key, fetcher, cloneMetadata(oldMetadata), nil, ownedGeneration); err != nil {
-			c.warnLog("msg", "failed to schedule stale refresh", "key", key, "err", err)
-		}
-	}
-}
-
 // lowerTierRefreshOnCloseCallback creates a closeHandler for lower-tier stale refresh.
-// Uses a struct-based approach to reduce closure allocations.
 func (c *DaramjweeCache) lowerTierRefreshOnCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata, source tierDestination, observedGeneration *topWriteGeneration) closeHandler {
-	ownedGeneration := observedGeneration.retain()
-	return &lowerTierRefreshCallback{
-		cache:              c,
-		requestCtx:         requestCtx,
-		key:                key,
-		fetcher:            fetcher,
-		cancel:             cancel,
-		meta:               oldMetadata,
-		source:             source,
-		observedGeneration: ownedGeneration,
-	}
+	return newStaleRefreshCallback(c, requestCtx, key, fetcher, cancel, oldMetadata, &source, observedGeneration)
 }
 
 func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key string, source tierDestination, fallbackMetadata *Metadata, expectedGeneration *topWriteGeneration) error {

@@ -24,20 +24,15 @@ func (r rejectReason) String() string { return string(r) }
 type groupRuntime struct {
 	logger log.Logger
 
-	mu             sync.Mutex
-	cond           *sync.Cond
-	beforeJobStart func(cacheID string, kind JobKind)
-	caches         map[string]*groupRuntimeCacheState
-	order          []string
-	nextIdx        int
-	closing        bool
+	mu      sync.Mutex
+	cond    *sync.Cond
+	caches  map[string]*groupRuntimeCacheState
+	order   []string
+	nextIdx int
+	closing bool
 
 	wg      sync.WaitGroup
 	timeout time.Duration
-
-	acceptedByKind  map[JobKind]int
-	rejectedByKind  map[JobKind]int
-	rejectedByCause map[rejectReason]int
 }
 
 type groupRuntimeCacheState struct {
@@ -70,12 +65,9 @@ func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) *gro
 	}
 
 	rt := &groupRuntime{
-		logger:          logger,
-		caches:          make(map[string]*groupRuntimeCacheState),
-		timeout:         timeout,
-		acceptedByKind:  make(map[JobKind]int),
-		rejectedByKind:  make(map[JobKind]int),
-		rejectedByCause: make(map[rejectReason]int),
+		logger:  logger,
+		caches:  make(map[string]*groupRuntimeCacheState),
+		timeout: timeout,
 	}
 	rt.cond = sync.NewCond(&rt.mu)
 
@@ -161,7 +153,6 @@ func (r *groupRuntime) submit(cacheID string, kind JobKind, job worker.Job, onDr
 		r.mu.Unlock()
 		return false
 	}
-	r.acceptedByKind[kind]++
 	level.Debug(r.logger).Log(
 		"msg", "queued background job",
 		"cache_id", cacheID,
@@ -205,8 +196,6 @@ func (r *groupRuntime) RemoveCache(cacheID string) {
 }
 
 func (r *groupRuntime) noteRejectLocked(cacheID string, kind JobKind, reason rejectReason, depth, limit int) {
-	r.rejectedByKind[kind]++
-	r.rejectedByCause[reason]++
 	level.Warn(r.logger).Log(
 		"msg", "rejected background job",
 		"cache_id", cacheID,
@@ -240,13 +229,17 @@ func (r *groupRuntime) CloseCache(cacheID string, timeout time.Duration) error {
 	state.closed = true
 	state.cancel()
 	dropped := len(state.queue)
+	var droppedJobs []queuedBackgroundJob
 	for len(state.queue) > 0 {
-		job := <-state.queue
-		job.drop()
+		droppedJobs = append(droppedJobs, <-state.queue)
 	}
 	r.cond.Broadcast()
 	done := r.cacheCloseDoneLocked(state)
 	r.mu.Unlock()
+
+	for _, job := range droppedJobs {
+		job.drop()
+	}
 
 	level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
 	return r.waitForCacheClose(cacheID, done, timeout)
@@ -266,6 +259,7 @@ func (r *groupRuntime) Shutdown(timeout time.Duration) error {
 		return nil
 	}
 	r.closing = true
+	var droppedJobs []queuedBackgroundJob
 	for cacheID, state := range r.caches {
 		if !state.closed {
 			state.closed = true
@@ -273,14 +267,17 @@ func (r *groupRuntime) Shutdown(timeout time.Duration) error {
 		}
 		dropped := len(state.queue)
 		for len(state.queue) > 0 {
-			job := <-state.queue
-			job.drop()
+			droppedJobs = append(droppedJobs, <-state.queue)
 		}
 		r.cacheCloseDoneLocked(state)
 		level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
 	}
 	r.cond.Broadcast()
 	r.mu.Unlock()
+
+	for _, job := range droppedJobs {
+		job.drop()
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -318,9 +315,6 @@ func (r *groupRuntime) workerLoop(workerID int) {
 			continue
 		}
 
-		if hook := r.beforeJobStart; hook != nil {
-			hook(cacheID, job.kind)
-		}
 		ctx, cancel := context.WithTimeout(state.ctx, r.timeout)
 		level.Debug(r.logger).Log("msg", "starting background job", "cache_id", cacheID, "job_kind", job.kind.String())
 		func() {

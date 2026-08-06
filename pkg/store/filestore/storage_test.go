@@ -21,6 +21,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
+	return writeStoredMetadataEnvelope(w, storedMetadata{Metadata: derefMetadata(meta)})
+}
+
+func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
+	meta, _, _, dataOffset, err := readStoredMetadata(r)
+	return meta, dataOffset, err
+}
+
 // setupTestStore is a helper to create a temporary filestore for testing.
 func setupTestStore(t *testing.T, opts ...Option) *FileStore {
 	t.Helper()
@@ -566,7 +575,7 @@ func TestFileStore_LateCloseDoesNotOverwriteNewerVisibleValue(t *testing.T) {
 	_, err = second.Write([]byte("second"))
 	require.NoError(t, err)
 	require.NoError(t, second.Close())
-	require.NoError(t, first.Close())
+	require.ErrorIs(t, first.Close(), ErrGenerationSuperseded)
 
 	reader, meta, err := fs.GetStream(ctx, key)
 	require.NoError(t, err)
@@ -602,7 +611,7 @@ func TestFileStore_GenerationStatePrunedWhenKeyBecomesIdle(t *testing.T) {
 	require.True(t, floorPresent)
 	require.Equal(t, 1, activeWriters)
 
-	require.NoError(t, first.Close())
+	require.ErrorIs(t, first.Close(), ErrGenerationSuperseded)
 
 	fs.generationMu.Lock()
 	_, floorPresent = fs.generations[key]
@@ -631,7 +640,7 @@ func TestFileStore_DeleteKeepsGenerationFloorUntilActiveWriterFinishes(t *testin
 	require.True(t, floorPresent)
 	require.Equal(t, 1, activeWriters)
 
-	require.NoError(t, writer.Close())
+	require.ErrorIs(t, writer.Close(), ErrGenerationSuperseded)
 
 	_, _, err = fs.GetStream(ctx, key)
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
@@ -1493,4 +1502,24 @@ func BenchmarkFileStore_Get_RenameStrategy(b *testing.B) {
 func BenchmarkFileStore_Get_CopyStrategy(b *testing.B) {
 	store := setupBenchmarkStore(b, WithCopyWrite())
 	benchmarkFileStoreGet(b, store)
+}
+
+func TestLockedReadCloserDoubleClose(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello"), 0644))
+
+	unlockCalled := 0
+	f, err := os.Open(path)
+	require.NoError(t, err)
+
+	lrc := newLockedReadCloser(f, func() {
+		unlockCalled++
+	})
+
+	require.NoError(t, lrc.Close())
+	assert.Equal(t, 1, unlockCalled, "unlock should be called exactly once after first Close")
+
+	_ = lrc.Close()
+	assert.Equal(t, 1, unlockCalled, "unlock should not be called again on second Close")
 }

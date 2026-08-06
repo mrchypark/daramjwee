@@ -208,20 +208,23 @@ type redisStoreWriter struct {
 	key      string
 	tempKey  string
 	metadata *daramjwee.Metadata
-	wrote    bool
 	mu       sync.Mutex
 	done     bool
 }
 
 // Write appends the provided data to the Redis key.
+// It holds the mutex across the Append so that a Write already in flight can
+// never land after Commit renames the temp key to its final location. Without
+// this, a late Append would recreate the temp key and leak an orphaned object.
 func (w *redisStoreWriter) Write(p []byte) (n int, err error) {
-	if w.isDone() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
 		return 0, io.ErrClosedPipe
 	}
 	if err := w.rs.client.Append(w.ctx, w.tempKey, string(p)).Err(); err != nil {
 		return 0, err
 	}
-	w.wrote = true
 	return len(p), nil
 }
 
@@ -289,12 +292,6 @@ func (w *redisStoreWriter) markDone() bool {
 	}
 	w.done = true
 	return true
-}
-
-func (w *redisStoreWriter) isDone() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.done
 }
 
 // redisStreamReader is a helper type that satisfies the io.ReadCloser interface
