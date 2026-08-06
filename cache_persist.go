@@ -7,15 +7,8 @@ import (
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
-type backgroundRuntimeWithDropCleanup interface {
-	SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool
-}
-
-func submitBackgroundJob(runtime backgroundRuntime, cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
-	if dropAware, ok := runtime.(backgroundRuntimeWithDropCleanup); ok {
-		return dropAware.SubmitWithDropCleanup(cacheID, kind, job, onDrop)
-	}
-	return runtime.Submit(cacheID, kind, job)
+func submitBackgroundJob(rt backgroundRuntime, cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
+	return rt.SubmitWithDropCleanup(cacheID, kind, job, onDrop)
 }
 
 func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {

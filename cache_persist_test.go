@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/mrchypark/daramjwee/internal/runtime"
 	"github.com/mrchypark/daramjwee/internal/worker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -140,7 +141,7 @@ func TestSchedulePersistFromTop_InvalidationCleanupUsesFreshContext(t *testing.T
 
 	cache := &DaramjweeCache{
 		tiers:   []Store{src},
-		runtime: newStandaloneRuntime(workerManager),
+		runtime: runtime.NewStandalone(workerManager),
 		cacheID: "persist-cleanup",
 		logger:  log.NewNopLogger(),
 		config: cacheConfig{

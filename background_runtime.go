@@ -1,10 +1,19 @@
 package daramjwee
 
 import (
-	"time"
-
-	"github.com/mrchypark/daramjwee/internal/worker"
+	"github.com/mrchypark/daramjwee/internal/runtime"
 )
+
+type backgroundRuntime = runtime.Runtime
+
+type JobKind = runtime.JobKind
+
+const (
+	JobKindRefresh = runtime.JobKindRefresh
+	JobKindPersist = runtime.JobKindPersist
+)
+
+type CacheRuntimeConfig = runtime.Config
 
 type cacheConstructionMode int
 
@@ -12,34 +21,3 @@ const (
 	cacheConstructionStandalone cacheConstructionMode = iota
 	cacheConstructionGroup
 )
-
-type JobKind int
-
-const (
-	JobKindRefresh JobKind = iota
-	JobKindPersist
-)
-
-func (k JobKind) String() string {
-	switch k {
-	case JobKindRefresh:
-		return "refresh"
-	case JobKindPersist:
-		return "persist"
-	default:
-		return "unknown"
-	}
-}
-
-type CacheRuntimeConfig struct {
-	Weight     int
-	QueueLimit int
-}
-
-type backgroundRuntime interface {
-	Register(cacheID string, cfg CacheRuntimeConfig) error
-	Submit(cacheID string, kind JobKind, job worker.Job) bool
-	CloseCache(cacheID string, timeout time.Duration) error
-	RemoveCache(cacheID string)
-	Shutdown(timeout time.Duration) error
-}

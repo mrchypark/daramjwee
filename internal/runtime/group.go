@@ -1,4 +1,4 @@
-package daramjwee
+package runtime
 
 import (
 	"context"
@@ -21,12 +21,12 @@ const (
 
 func (r rejectReason) String() string { return string(r) }
 
-type groupRuntime struct {
+type Group struct {
 	logger log.Logger
 
 	mu      sync.Mutex
 	cond    *sync.Cond
-	caches  map[string]*groupRuntimeCacheState
+	caches  map[string]*groupCacheState
 	order   []string
 	nextIdx int
 	closing bool
@@ -35,12 +35,12 @@ type groupRuntime struct {
 	timeout time.Duration
 }
 
-type groupRuntimeCacheState struct {
+type groupCacheState struct {
 	cacheID    string
 	weight     int
 	credit     int
 	queueLimit int
-	queue      chan queuedBackgroundJob
+	queue      chan queuedJob
 	ctx        context.Context
 	cancel     context.CancelFunc
 	active     int
@@ -49,14 +49,14 @@ type groupRuntimeCacheState struct {
 	closeSent  bool
 }
 
-type queuedBackgroundJob struct {
+type queuedJob struct {
 	cacheID string
 	kind    JobKind
 	job     worker.Job
 	onDrop  func()
 }
 
-func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) *groupRuntime {
+func NewGroup(logger log.Logger, workers int, timeout time.Duration) Manager {
 	if workers <= 0 {
 		workers = 1
 	}
@@ -64,9 +64,9 @@ func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) *gro
 		timeout = 30 * time.Second
 	}
 
-	rt := &groupRuntime{
+	rt := &Group{
 		logger:  logger,
-		caches:  make(map[string]*groupRuntimeCacheState),
+		caches:  make(map[string]*groupCacheState),
 		timeout: timeout,
 	}
 	rt.cond = sync.NewCond(&rt.mu)
@@ -78,7 +78,7 @@ func newGroupRuntime(logger log.Logger, workers int, timeout time.Duration) *gro
 	return rt
 }
 
-func (r *groupRuntime) Register(cacheID string, cfg CacheRuntimeConfig) error {
+func (r *Group) Register(cacheID string, cfg Config) error {
 	if r == nil {
 		return nil
 	}
@@ -97,11 +97,11 @@ func (r *groupRuntime) Register(cacheID string, cfg CacheRuntimeConfig) error {
 
 	cacheCtx, cancel := context.WithCancel(context.Background())
 	queueLimit := maxInt(cfg.QueueLimit, 1)
-	r.caches[cacheID] = &groupRuntimeCacheState{
+	r.caches[cacheID] = &groupCacheState{
 		cacheID:    cacheID,
 		weight:     maxInt(cfg.Weight, 1),
 		queueLimit: queueLimit,
-		queue:      make(chan queuedBackgroundJob, queueLimit),
+		queue:      make(chan queuedJob, queueLimit),
 		ctx:        cacheCtx,
 		cancel:     cancel,
 	}
@@ -110,15 +110,15 @@ func (r *groupRuntime) Register(cacheID string, cfg CacheRuntimeConfig) error {
 	return nil
 }
 
-func (r *groupRuntime) Submit(cacheID string, kind JobKind, job worker.Job) bool {
+func (r *Group) Submit(cacheID string, kind JobKind, job worker.Job) bool {
 	return r.submit(cacheID, kind, job, nil)
 }
 
-func (r *groupRuntime) SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
+func (r *Group) SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
 	return r.submit(cacheID, kind, job, onDrop)
 }
 
-func (r *groupRuntime) submit(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
+func (r *Group) submit(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
 	if r == nil {
 		return false
 	}
@@ -147,7 +147,7 @@ func (r *groupRuntime) submit(cacheID string, kind JobKind, job worker.Job, onDr
 		return false
 	}
 	select {
-	case state.queue <- queuedBackgroundJob{cacheID: cacheID, kind: kind, job: job, onDrop: onDrop}:
+	case state.queue <- queuedJob{cacheID: cacheID, kind: kind, job: job, onDrop: onDrop}:
 	default:
 		r.noteRejectLocked(cacheID, kind, rejectReasonQueueFull, len(state.queue), state.queueLimit)
 		r.mu.Unlock()
@@ -165,13 +165,13 @@ func (r *groupRuntime) submit(cacheID string, kind JobKind, job worker.Job, onDr
 	return true
 }
 
-func (j queuedBackgroundJob) drop() {
+func (j queuedJob) drop() {
 	if j.onDrop != nil {
 		j.onDrop()
 	}
 }
 
-func (r *groupRuntime) RemoveCache(cacheID string) {
+func (r *Group) RemoveCache(cacheID string) {
 	if r == nil {
 		return
 	}
@@ -195,7 +195,7 @@ func (r *groupRuntime) RemoveCache(cacheID string) {
 	}
 }
 
-func (r *groupRuntime) noteRejectLocked(cacheID string, kind JobKind, reason rejectReason, depth, limit int) {
+func (r *Group) noteRejectLocked(cacheID string, kind JobKind, reason rejectReason, depth, limit int) {
 	level.Warn(r.logger).Log(
 		"msg", "rejected background job",
 		"cache_id", cacheID,
@@ -206,7 +206,7 @@ func (r *groupRuntime) noteRejectLocked(cacheID string, kind JobKind, reason rej
 	)
 }
 
-func (r *groupRuntime) CloseCache(cacheID string, timeout time.Duration) error {
+func (r *Group) CloseCache(cacheID string, timeout time.Duration) error {
 	if r == nil {
 		return nil
 	}
@@ -229,7 +229,7 @@ func (r *groupRuntime) CloseCache(cacheID string, timeout time.Duration) error {
 	state.closed = true
 	state.cancel()
 	dropped := len(state.queue)
-	var droppedJobs []queuedBackgroundJob
+	var droppedJobs []queuedJob
 	for len(state.queue) > 0 {
 		droppedJobs = append(droppedJobs, <-state.queue)
 	}
@@ -245,7 +245,7 @@ func (r *groupRuntime) CloseCache(cacheID string, timeout time.Duration) error {
 	return r.waitForCacheClose(cacheID, done, timeout)
 }
 
-func (r *groupRuntime) Shutdown(timeout time.Duration) error {
+func (r *Group) Shutdown(timeout time.Duration) error {
 	if r == nil {
 		return nil
 	}
@@ -259,7 +259,7 @@ func (r *groupRuntime) Shutdown(timeout time.Duration) error {
 		return nil
 	}
 	r.closing = true
-	var droppedJobs []queuedBackgroundJob
+	var droppedJobs []queuedJob
 	for cacheID, state := range r.caches {
 		if !state.closed {
 			state.closed = true
@@ -294,7 +294,7 @@ func (r *groupRuntime) Shutdown(timeout time.Duration) error {
 	}
 }
 
-func (r *groupRuntime) workerLoop(workerID int) {
+func (r *Group) workerLoop(workerID int) {
 	defer r.wg.Done()
 	for {
 		cacheID, job, state, ok := r.nextJob()
@@ -335,13 +335,13 @@ func (r *groupRuntime) workerLoop(workerID int) {
 	}
 }
 
-func (r *groupRuntime) nextJob() (string, queuedBackgroundJob, *groupRuntimeCacheState, bool) {
+func (r *Group) nextJob() (string, queuedJob, *groupCacheState, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	for {
 		if r.closing && r.allQueuesEmptyLocked() {
-			return "", queuedBackgroundJob{}, nil, false
+			return "", queuedJob{}, nil, false
 		}
 
 		cacheID, job, state, ok := r.pickNextLocked()
@@ -353,7 +353,7 @@ func (r *groupRuntime) nextJob() (string, queuedBackgroundJob, *groupRuntimeCach
 	}
 }
 
-func (r *groupRuntime) allQueuesEmptyLocked() bool {
+func (r *Group) allQueuesEmptyLocked() bool {
 	for _, cacheID := range r.order {
 		state := r.caches[cacheID]
 		if state != nil && !state.closed && len(state.queue) > 0 {
@@ -363,9 +363,9 @@ func (r *groupRuntime) allQueuesEmptyLocked() bool {
 	return true
 }
 
-func (r *groupRuntime) pickNextLocked() (string, queuedBackgroundJob, *groupRuntimeCacheState, bool) {
+func (r *Group) pickNextLocked() (string, queuedJob, *groupCacheState, bool) {
 	if len(r.order) == 0 {
-		return "", queuedBackgroundJob{}, nil, false
+		return "", queuedJob{}, nil, false
 	}
 
 	total := len(r.order)
@@ -379,7 +379,7 @@ func (r *groupRuntime) pickNextLocked() (string, queuedBackgroundJob, *groupRunt
 		if state.credit <= 0 {
 			state.credit = state.weight
 		}
-		var job queuedBackgroundJob
+		var job queuedJob
 		select {
 		case job = <-state.queue:
 		default:
@@ -394,10 +394,10 @@ func (r *groupRuntime) pickNextLocked() (string, queuedBackgroundJob, *groupRunt
 		state.active++
 		return cacheID, job, state, true
 	}
-	return "", queuedBackgroundJob{}, nil, false
+	return "", queuedJob{}, nil, false
 }
 
-func (r *groupRuntime) cacheCloseDoneLocked(state *groupRuntimeCacheState) chan struct{} {
+func (r *Group) cacheCloseDoneLocked(state *groupCacheState) chan struct{} {
 	if state.closeDone == nil {
 		state.closeDone = make(chan struct{})
 	}
@@ -408,7 +408,7 @@ func (r *groupRuntime) cacheCloseDoneLocked(state *groupRuntimeCacheState) chan 
 	return state.closeDone
 }
 
-func (r *groupRuntime) notifyCacheActivityLocked(state *groupRuntimeCacheState) {
+func (r *Group) notifyCacheActivityLocked(state *groupCacheState) {
 	if state.closed && state.active == 0 {
 		r.cacheCloseDoneLocked(state)
 	}
@@ -417,7 +417,7 @@ func (r *groupRuntime) notifyCacheActivityLocked(state *groupRuntimeCacheState) 
 	}
 }
 
-func (r *groupRuntime) waitForCacheClose(cacheID string, done <-chan struct{}, timeout time.Duration) error {
+func (r *Group) waitForCacheClose(cacheID string, done <-chan struct{}, timeout time.Duration) error {
 	select {
 	case <-done:
 		return nil
@@ -425,4 +425,19 @@ func (r *groupRuntime) waitForCacheClose(cacheID string, done <-chan struct{}, t
 		level.Warn(r.logger).Log("msg", "cache close timed out", "cache_id", cacheID, "timeout", timeout)
 		return worker.ErrShutdownTimeout
 	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+type ConfigError struct {
+	Msg string
+}
+
+func (e *ConfigError) Error() string {
+	return e.Msg
 }
