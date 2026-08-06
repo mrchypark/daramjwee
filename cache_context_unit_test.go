@@ -182,7 +182,10 @@ func TestIsCachedStale_StaleNegative(t *testing.T) {
 
 func TestIsCachedStale_ExactBoundary(t *testing.T) {
 	cache := &DaramjweeCache{}
-	cachedAt := time.Now()
+
+	// When freshness is 0, the item should be immediately stale.
+	// We use a time in the past to ensure Now() is always after CachedAt + 0.
+	cachedAt := time.Now().Add(-time.Millisecond)
 	meta := &Metadata{IsNegative: false, CachedAt: cachedAt}
 
 	// At the exact boundary, Now() is slightly after CachedAt + freshness, so stale.

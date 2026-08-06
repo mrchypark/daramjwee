@@ -648,7 +648,15 @@ func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, int64, 
 	return &meta.Metadata, *meta.StoredKey, true, dataOffset, nil
 }
 
-// copyFile copies a file from src to dst.
+// copyFilePool is a pool of reusable buffers for file copy operations.
+var copyFilePool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024) // 32KB buffer
+		return &buf
+	},
+}
+
+// copyFile copies a file from src to dst using a pooled buffer to minimize allocations.
 func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
@@ -670,7 +678,11 @@ func copyFile(src, dst string) (err error) {
 		}
 	}()
 
-	_, err = io.Copy(out, in)
+	bufPtr := copyFilePool.Get().(*[]byte)
+	defer copyFilePool.Put(bufPtr)
+	buf := *bufPtr
+
+	_, err = io.CopyBuffer(out, in, buf)
 	return err
 }
 
@@ -770,7 +782,7 @@ func (s *stagedFileWriteSink) abort() error {
 
 // initializeCurrentSize scans the base directory to calculate the current total size
 // and populate the fileSizes map for existing files.
-// It uses filepath.WalkDir for better performance than filepath.Walk.
+// It uses os.ReadDir for efficiency and processes files in a single pass.
 func (fs *FileStore) initializeCurrentSize() error {
 	type policyOperation struct {
 		key    string
@@ -781,36 +793,46 @@ func (fs *FileStore) initializeCurrentSize() error {
 	fileSizes := make(map[string]int64)
 	var currentSize int64
 	var policyOperations []policyOperation
-	if err := filepath.WalkDir(fs.baseDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+
+	// Process root-level files (legacy paths)
+	entries, err := os.ReadDir(fs.baseDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
 
-		if d.IsDir() {
-			return nil
-		}
+		name := entry.Name()
 
 		// Skip temporary files
-		if strings.Contains(d.Name(), "daramjwee-tmp-") {
-			return nil
+		if strings.HasPrefix(name, "daramjwee-tmp-") {
+			continue
 		}
 
-		// Get file info for size (WalkDir doesn't provide it automatically)
-		info, err := d.Info()
-		if err != nil {
-			return err
+		// Skip the encoded key directory marker
+		if name == encodedKeyDir {
+			continue
 		}
 
-		// Convert file path back to key
-		relPath, err := filepath.Rel(fs.baseDir, path)
+		// Get file info for size
+		info, err := entry.Info()
 		if err != nil {
-			return err
+			continue
 		}
 
-		key, err := fs.storedKeyForPath(path, filepath.ToSlash(relPath))
+		path := filepath.Join(fs.baseDir, name)
+		key, err := fs.storedKeyForPath(path, name)
 		if err != nil {
-			return err
+			// If we can't read metadata for an ambiguous legacy path, propagate the error
+			if fs.isAmbiguousLegacyPath(path) {
+				return err
+			}
+			continue
 		}
+
 		size := info.Size()
 
 		if oldSize, exists := fileSizes[key]; exists {
@@ -820,10 +842,45 @@ func (fs *FileStore) initializeCurrentSize() error {
 		fileSizes[key] = size
 		currentSize += size
 		policyOperations = append(policyOperations, policyOperation{key: key, size: size})
+	}
 
-		return nil
-	}); err != nil {
-		return err
+	// Process encoded key directory
+	encodedDir := filepath.Join(fs.baseDir, encodedKeyDir)
+	if encodedEntries, err := os.ReadDir(encodedDir); err == nil {
+		for _, entry := range encodedEntries {
+			if entry.IsDir() {
+				continue
+			}
+
+			name := entry.Name()
+
+			// Skip temporary files
+			if strings.HasPrefix(name, "daramjwee-tmp-") {
+				continue
+			}
+
+			// Get file info for size
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			path := filepath.Join(encodedDir, name)
+			key, err := fs.storedKeyForPath(path, filepath.ToSlash(filepath.Join(encodedKeyDir, name)))
+			if err != nil {
+				continue
+			}
+
+			size := info.Size()
+
+			if oldSize, exists := fileSizes[key]; exists {
+				currentSize -= oldSize
+				policyOperations = append(policyOperations, policyOperation{key: key, remove: true})
+			}
+			fileSizes[key] = size
+			currentSize += size
+			policyOperations = append(policyOperations, policyOperation{key: key, size: size})
+		}
 	}
 
 	fs.fileSizes = fileSizes

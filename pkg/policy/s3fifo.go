@@ -110,7 +110,8 @@ func (p *S3FIFO) Remove(key string) {
 
 // Evict determines which item(s) should be evicted and returns their keys.
 // It prioritizes eviction from the small queue if it exceeds its capacity.
-// Otherwise, it scans the main queue, applying the second-chance mechanism.
+// Otherwise, it scans the main queue with a bounded scan limit to prevent
+// unbounded latency when many items have been recently accessed.
 func (p *S3FIFO) Evict() []string {
 	// 1. If the small queue exceeds its capacity, evict the oldest item from it.
 	if p.smallSize > p.smallCapacity {
@@ -121,11 +122,18 @@ func (p *S3FIFO) Evict() []string {
 		}
 	}
 
-	// 2. Scan the main queue for eviction candidates.
+	// 2. Scan the main queue for eviction candidates with a bounded scan limit.
+	// This prevents the second-chance mechanism from causing unbounded latency
+	// when all items have been recently accessed.
 	if p.mainQueue.Len() > 0 {
+		// Limit the scan to at most half the main queue size to prevent
+		// excessive scanning when many items have been recently accessed.
+		maxScan := (p.mainQueue.Len() + 1) / 2
+		scanCount := 0
+
 		// Get the oldest element in the main queue.
 		elem := p.mainQueue.Back()
-		for elem != nil {
+		for elem != nil && scanCount < maxScan {
 			// Store the previous element before potentially modifying `elem`.
 			prevElem := elem.Prev()
 
@@ -134,6 +142,7 @@ func (p *S3FIFO) Evict() []string {
 				// Give it a second chance: reset hit flag and move to front of main queue.
 				entry.wasHit = false
 				p.mainQueue.MoveToFront(elem)
+				scanCount++
 			} else {
 				// Evict candidate found.
 				victim := p.removeElement(elem)
@@ -142,10 +151,12 @@ func (p *S3FIFO) Evict() []string {
 			// Move to the next element in the scan.
 			elem = prevElem
 		}
-		// If the loop finishes, all items in the main queue were given a second chance.
-		// They have now had their hit flags reset, so evict the oldest entry.
-		victim := p.removeElement(p.mainQueue.Back())
-		return []string{victim.key}
+
+		// If we've scanned enough or reached the end, evict the oldest entry.
+		if p.mainQueue.Len() > 0 {
+			victim := p.removeElement(p.mainQueue.Back())
+			return []string{victim.key}
+		}
 	}
 
 	// 3. If the main queue is empty, or if the small queue still exceeds capacity

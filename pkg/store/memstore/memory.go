@@ -49,16 +49,19 @@ func New(capacity int64, policy daramjwee.EvictionPolicy) *MemStore {
 
 // GetStream retrieves an object as a stream from the in-memory map.
 func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
-	ms.mu.Lock() // Use Lock because policy.Touch might modify internal state.
-	defer ms.mu.Unlock()
-
+	ms.mu.RLock()
 	e, ok := ms.data[key]
+	ms.mu.RUnlock()
+
 	if !ok {
 		return nil, nil, daramjwee.ErrNotFound
 	}
 
 	// Notify the policy that this key was accessed.
+	// Use a separate write lock for policy state mutation to minimize lock contention.
+	ms.mu.Lock()
 	ms.policy.Touch(key)
+	ms.mu.Unlock()
 
 	reader := bytes.NewReader(e.value)
 	readCloser := io.NopCloser(reader)
@@ -118,16 +121,19 @@ func (ms *MemStore) Delete(ctx context.Context, key string) error {
 
 // Stat retrieves metadata for an object from the in-memory map.
 func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, error) {
-	ms.mu.Lock() // Use Lock for policy.Touch
-	defer ms.mu.Unlock()
-
+	ms.mu.RLock()
 	e, ok := ms.data[key]
+	ms.mu.RUnlock()
+
 	if !ok {
 		return nil, daramjwee.ErrNotFound
 	}
 
 	// Access via Stat should also be considered a "touch".
+	// Use a separate write lock for policy state mutation to minimize lock contention.
+	ms.mu.Lock()
 	ms.policy.Touch(key)
+	ms.mu.Unlock()
 
 	return daramjwee.CloneMetadata(e.metadata), nil
 }

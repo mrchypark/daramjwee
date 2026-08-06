@@ -23,8 +23,9 @@ type sieveEntry struct {
 // - If an item with `visited` flag true is encountered, its `visited` flag is set to false, and it gets another chance.
 // - If an item with `visited` flag false is encountered, it is evicted.
 // - Accessing an item (`Touch`) sets its `visited` flag to true.
+// - To bound worst-case eviction latency, the hand performs at most 2 full passes over the list.
 type Sieve struct {
-	ll    *list.List               // Doubly linked list storing items in order.
+	ll    *list.List               // Doubly linked list storing items in the cache.
 	cache map[string]*list.Element // Map for fast lookup of list elements by key.
 	hand  *list.Element            // Pointer to the current position in the list for scanning.
 }
@@ -74,6 +75,8 @@ func (p *Sieve) Remove(key string) {
 // Evict determines which item(s) should be evicted and returns their keys.
 // It scans the list starting from the 'hand' pointer, evicting items with
 // `visited` flag false, and resetting `visited` to false for items with `visited` true.
+// The scan is bounded to at most 2 full passes over the list to prevent
+// unbounded latency when all items have been recently accessed.
 func (p *Sieve) Evict() []string {
 	if p.ll.Len() == 0 {
 		return nil
@@ -86,6 +89,14 @@ func (p *Sieve) Evict() []string {
 		victimElem = p.ll.Back()
 	}
 
+	// Limit the scan to at most 2 full passes to bound worst-case latency.
+	// After 2 passes, all items will have had their visited flag reset at least once.
+	// If we still haven't found a victim, force-evict the element at the hand position.
+	maxPasses := 2
+	passCount := 0
+	startPos := victimElem
+	secondPassStart := false
+
 	// Scan until an item with visited = false is found.
 	for {
 		entry := victimElem.Value.(*sieveEntry)
@@ -96,8 +107,33 @@ func (p *Sieve) Evict() []string {
 			if prev == nil {
 				// If at the beginning of the list, wrap around to the end.
 				victimElem = p.ll.Back()
+				passCount++
+				if victimElem == startPos {
+					secondPassStart = true
+				}
+				if passCount >= maxPasses || secondPassStart {
+					// We've done enough passes or completed a full circle.
+					// Force evict the element at hand position.
+					victimElem = p.hand
+					if victimElem == nil {
+						victimElem = p.ll.Back()
+					}
+					break
+				}
 			} else {
 				victimElem = prev
+				// Check if we've wrapped around to the start
+				if victimElem == startPos {
+					passCount++
+					if passCount >= maxPasses {
+						// Force evict the element at hand position
+						victimElem = p.hand
+						if victimElem == nil {
+							victimElem = p.ll.Back()
+						}
+						break
+					}
+				}
 			}
 		} else {
 			// Found a victim: visited is false.
