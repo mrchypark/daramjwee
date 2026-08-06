@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.11.1
+
+### ⚡ Performance
+
+*   **MemStore read lock optimization**: switched to `sync.RWMutex` for read operations, with separate write lock for `Touch()` calls to improve read parallelism.
+*   **SIEVE eviction latency bound**: limited eviction scan to at most 2 full passes, preventing O(n) worst-case latency when all items have been recently accessed.
+*   **FileStore initialization**: switched from `filepath.WalkDir` to `os.ReadDir` for faster cold-start, with separate handling for encoded key directory.
+*   **FileStore copy strategy**: introduced `sync.Pool` for 32KB buffer reuse, reducing memory allocations during file copy operations.
+
+### 🐛 Bug Fixes
+
+*   **S3-FIFO eviction**: bounded main queue scan to half the queue size, preventing excessive scanning when many items have `wasHit` flag set.
+*   **Boundary test stability**: fixed `TestIsCachedStale_ExactBoundary` timing issue by using a past timestamp.
+
+### ✅ Verification
+
+*   All unit tests pass
+*   Race detector tests pass
+*   Benchmarks confirm no performance regression
+
 ## v0.9.2
 
 ### 🧰 Internal Improvements
