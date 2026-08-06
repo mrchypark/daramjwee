@@ -8,10 +8,11 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/redisstore"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/redisstore"
 )
 
 func TestCache_Get_WithRedisHotStore_KeepsStreamUsable(t *testing.T) {

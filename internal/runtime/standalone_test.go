@@ -6,8 +6,9 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee/internal/worker"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
 func TestStandalone_Submit(t *testing.T) {

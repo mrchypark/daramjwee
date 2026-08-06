@@ -3,6 +3,7 @@ package daramjwee_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -10,8 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 // --- mockStore ---
@@ -341,7 +343,7 @@ func writeCacheValue(cache daramjwee.Cache, key, value, tag string) error {
 	if _, err := io.WriteString(writer, value); err != nil {
 		abortErr := writer.Abort()
 		if abortErr != nil {
-			return fmt.Errorf("write: %w; abort: %v", err, abortErr)
+			return fmt.Errorf("write: %w; abort: %w", err, abortErr)
 		}
 		return err
 	}
@@ -368,7 +370,7 @@ func eventuallyExpectStoreState(t *testing.T, store *mockStore, key string, want
 func currentMockStoreState(store *mockStore, key string) (entryExpectation, error) {
 	reader, meta, err := store.GetStream(context.Background(), key)
 	if err != nil {
-		if err == daramjwee.ErrNotFound {
+		if errors.Is(err, daramjwee.ErrNotFound) {
 			return entryExpectation{}, nil
 		}
 		return entryExpectation{}, err

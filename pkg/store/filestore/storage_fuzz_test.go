@@ -2,11 +2,13 @@ package filestore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
 
 	"github.com/go-kit/log"
+
 	"github.com/mrchypark/daramjwee"
 )
 
@@ -56,7 +58,7 @@ func FuzzFileStoreSequentialOperations(f *testing.F) {
 				got, gotMeta, err := readFileStore(ctx, store, key)
 				want, ok := expected[key]
 				if !ok {
-					if err != daramjwee.ErrNotFound {
+					if !errors.Is(err, daramjwee.ErrNotFound) {
 						t.Fatalf("get(%q): expected not found, got value=%q meta=%+v err=%v", key, got, gotMeta, err)
 					}
 					continue
@@ -71,7 +73,7 @@ func FuzzFileStoreSequentialOperations(f *testing.F) {
 				gotMeta, err := store.Stat(ctx, key)
 				want, ok := expected[key]
 				if !ok {
-					if err != daramjwee.ErrNotFound {
+					if !errors.Is(err, daramjwee.ErrNotFound) {
 						t.Fatalf("stat(%q): expected not found, got meta=%+v err=%v", key, gotMeta, err)
 					}
 					continue

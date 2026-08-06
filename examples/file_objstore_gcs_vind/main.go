@@ -12,10 +12,11 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee/examples/internal/objectstoredemo"
 	"github.com/thanos-io/objstore/providers/gcs"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+
+	"github.com/mrchypark/daramjwee/examples/internal/objectstoredemo"
 )
 
 type exampleConfig struct {

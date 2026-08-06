@@ -35,7 +35,7 @@ func (s *Store) Compact(ctx context.Context, olderThan time.Duration) (SweepStat
 		return stats, err
 	}
 
-	level.Debug(s.logger).Log("msg", "objectstore compaction complete", "scanned", stats.Scanned, "reachable", stats.Reachable, "deleted", stats.Deleted, "failed", stats.Failed)
+	_ = level.Debug(s.logger).Log("msg", "objectstore compaction complete", "scanned", stats.Scanned, "reachable", stats.Reachable, "deleted", stats.Deleted, "failed", stats.Failed)
 	return stats, nil
 }
 
@@ -60,7 +60,7 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 			return nil
 		}
 		stats.Scanned++
-		reader, err := s.bucket.Get(ctx, name)
+		reader, err := s.bucket.Get(ctx, name) //nolint:govet // shadow: iterator callback error handling
 		if err != nil {
 			if s.bucket.IsObjNotFoundErr(err) {
 				return nil
@@ -71,7 +71,7 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 
 		var m manifest
 		if err := json.NewDecoder(reader).Decode(&m); err != nil {
-			level.Warn(s.logger).Log("msg", "failed to decode manifest during compaction", "manifest", name, "err", err)
+			_ = level.Warn(s.logger).Log("msg", "failed to decode manifest during compaction", "manifest", name, "err", err)
 			return nil
 		}
 		if m.BlobPath == "" {
@@ -101,7 +101,7 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 
 		var cp checkpoint
 		if err := decodeCheckpoint(reader, &cp); err != nil {
-			level.Warn(s.logger).Log("msg", "failed to decode checkpoint during compaction", "checkpoint", name, "err", err)
+			_ = level.Warn(s.logger).Log("msg", "failed to decode checkpoint during compaction", "checkpoint", name, "err", err)
 			return nil
 		}
 		for _, entry := range cp.Entries {
@@ -137,7 +137,7 @@ func (s *Store) reclaimRemoteObjects(ctx context.Context, root string, reachable
 		if err := s.bucket.Delete(ctx, name); err != nil {
 			if ignoreNotFound(err, s.bucket) != nil {
 				stats.Failed++
-				level.Warn(s.logger).Log("msg", "failed to reclaim remote object", "path", name, "err", err)
+				_ = level.Warn(s.logger).Log("msg", "failed to reclaim remote object", "path", name, "err", err)
 			}
 			return nil
 		}
@@ -164,7 +164,7 @@ func (s *Store) pruneStaleCheckpoints(ctx context.Context, cutoff time.Time, imm
 		if err := s.bucket.Delete(ctx, name); err != nil {
 			if ignoreNotFound(err, s.bucket) != nil {
 				stats.Failed++
-				level.Warn(s.logger).Log("msg", "failed to prune stale checkpoint", "path", name, "err", err)
+				_ = level.Warn(s.logger).Log("msg", "failed to prune stale checkpoint", "path", name, "err", err)
 			}
 			return nil
 		}

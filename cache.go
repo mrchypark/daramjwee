@@ -293,7 +293,7 @@ func (c *safeCloser) ReadAll() ([]byte, error) {
 		if n > 0 {
 			buf = append(buf, readBuf[:n]...)
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			// safeCloser automatically closes on EOF, so we're done
 			return buf, nil
 		}

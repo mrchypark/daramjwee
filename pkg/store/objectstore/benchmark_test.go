@@ -7,8 +7,9 @@ import (
 	"testing"
 
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
 	"github.com/thanos-io/objstore"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func BenchmarkStore_ReadLocalPublished(b *testing.B) {

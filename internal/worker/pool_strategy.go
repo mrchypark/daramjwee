@@ -53,14 +53,14 @@ func (p *PoolStrategy) start() {
 		go func(workerID int) {
 			defer p.wg.Done()
 			logger := log.With(p.logger, "worker_id", workerID)
-			level.Info(logger).Log("msg", "worker started")
+			_ = level.Info(logger).Log("msg", "worker started")
 
 			for job := range p.jobs {
 				ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 				runJobSafely(logger, job, ctx)
 				cancel()
 			}
-			level.Info(logger).Log("msg", "worker stopped")
+			_ = level.Info(logger).Log("msg", "worker stopped")
 		}(i)
 	}
 }
@@ -72,7 +72,7 @@ func (s *PoolStrategy) Submit(job Job) bool {
 	defer s.submitMu.Unlock()
 
 	if s.isShutdown {
-		level.Warn(s.logger).Log("msg", "worker is shutdown, dropping job")
+		_ = level.Warn(s.logger).Log("msg", "worker is shutdown, dropping job")
 		return false
 	}
 
@@ -80,7 +80,7 @@ func (s *PoolStrategy) Submit(job Job) bool {
 	case s.jobs <- job:
 		return true
 	default:
-		level.Warn(s.logger).Log("msg", "worker queue is full, dropping job")
+		_ = level.Warn(s.logger).Log("msg", "worker queue is full, dropping job")
 		return false
 	}
 }
@@ -107,7 +107,7 @@ func (p *PoolStrategy) Shutdown(timeout time.Duration) error {
 	case <-doneCh:
 		return nil
 	case <-time.After(timeout):
-		level.Error(p.logger).Log("msg", "shutdown timed out", "timeout", timeout)
+		_ = level.Error(p.logger).Log("msg", "shutdown timed out", "timeout", timeout)
 		return ErrShutdownTimeout
 	}
 }

@@ -192,20 +192,18 @@ func TestWorkerPool_JobDroppingOnFullQueue(t *testing.T) {
 // TestShutdown_WithFullQueue verifies the behavior of Shutdown when the queue is full.
 func TestShutdown_WithFullQueue(t *testing.T) {
 	poolSize, queueSize := 2, 4
-	manager, err := NewManager("pool", log.NewNopLogger(), poolSize, queueSize, 1*time.Second)
-	require.NoError(t, err)
 
 	var jobsDone atomic.Int32
 	var wg sync.WaitGroup
-	manager, err = NewManager("pool", log.NewNopLogger(), 2, 4, 1*time.Second)
+	manager, err := NewManager("pool", log.NewNopLogger(), 2, 4, 1*time.Second)
 	require.NoError(t, err)
 
 	expectedJobsToSubmit := poolSize + queueSize + 2
 	var submittedJobs int32
 
-	wg.Add(int(expectedJobsToSubmit))
+	wg.Add(expectedJobsToSubmit)
 
-	for i := 0; i < int(expectedJobsToSubmit); i++ {
+	for i := 0; i < expectedJobsToSubmit; i++ {
 		if manager.Submit(func(ctx context.Context) {
 			jobsDone.Add(1)
 			wg.Done()

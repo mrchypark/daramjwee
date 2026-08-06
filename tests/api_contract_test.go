@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
+
+	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
 )
 
 type nilMetadataStore struct{}

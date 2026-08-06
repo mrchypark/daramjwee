@@ -56,7 +56,7 @@ func NewS3FIFO(totalCapacity int64, smallRatio int) daramjwee.EvictionPolicy {
 func (p *S3FIFO) Add(key string, size int64) {
 	if elem, ok := p.cache[key]; ok {
 		// Item already exists, update its size.
-		entry := elem.Value.(*s3fifoEntry)
+		entry, _ := elem.Value.(*s3fifoEntry)
 		if entry.isMain {
 			p.mainSize -= entry.size
 			p.mainSize += size
@@ -84,7 +84,7 @@ func (p *S3FIFO) Touch(key string) {
 		return
 	}
 
-	entry := elem.Value.(*s3fifoEntry)
+	entry, _ := elem.Value.(*s3fifoEntry)
 
 	if !entry.isMain {
 		// Promote from Small to Main queue.
@@ -137,7 +137,7 @@ func (p *S3FIFO) Evict() []string {
 			// Store the previous element before potentially modifying `elem`.
 			prevElem := elem.Prev()
 
-			entry := elem.Value.(*s3fifoEntry)
+			entry, _ := elem.Value.(*s3fifoEntry)
 			if entry.wasHit {
 				// Give it a second chance: reset hit flag and move to front of main queue.
 				entry.wasHit = false
@@ -175,7 +175,7 @@ func (p *S3FIFO) Evict() []string {
 // removeElement is an internal helper function that removes a given list.Element
 // from its respective queue and the cache map, and updates queue sizes.
 func (p *S3FIFO) removeElement(e *list.Element) *s3fifoEntry {
-	entry := e.Value.(*s3fifoEntry)
+	entry, _ := e.Value.(*s3fifoEntry)
 	if entry.isMain {
 		p.mainQueue.Remove(e)
 		p.mainSize -= entry.size

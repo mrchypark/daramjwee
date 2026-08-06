@@ -3,11 +3,13 @@ package daramjwee_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/go-kit/log"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/cache"
 	"github.com/mrchypark/daramjwee/pkg/policy"
@@ -76,7 +78,7 @@ func TestGenericCache_Set_MarshalError(t *testing.T) {
 	})
 
 	_, err = unmarshalableCache.Get(ctx, "bad-key", failingFetcher)
-	if err != daramjwee.ErrNotFound {
+	if !errors.Is(err, daramjwee.ErrNotFound) {
 		t.Errorf("Expected ErrNotFound for the bad key, but got: %v", err)
 	}
 }
@@ -105,6 +107,7 @@ func TestGenericCache_Set_WriteError(t *testing.T) {
 
 	// This should either succeed or fail cleanly without corrupting the cache
 	err = stringCache.Set(ctx, key, largeValue, &daramjwee.Metadata{CacheTag: "v1"})
+	_ = err
 	// We don't assert on the error here because it might succeed or fail depending on system limits
 	// The important thing is that it doesn't corrupt the cache
 

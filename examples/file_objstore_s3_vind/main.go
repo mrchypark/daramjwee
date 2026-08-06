@@ -11,8 +11,9 @@ import (
 	"github.com/go-kit/log"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/mrchypark/daramjwee/examples/internal/objectstoredemo"
 	"github.com/thanos-io/objstore/providers/s3"
+
+	"github.com/mrchypark/daramjwee/examples/internal/objectstoredemo"
 )
 
 type exampleConfig struct {

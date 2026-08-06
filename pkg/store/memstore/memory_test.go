@@ -8,10 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 )
 
 func TestMemStore_WriteSinkConformance(t *testing.T) {
@@ -140,11 +141,11 @@ func TestMemStore_CanceledStagedCommitIsTerminal(t *testing.T) {
 func TestMemStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	store := New(0, nil)
 
-	writer, err := store.BeginStagedSet(nil, "nil-context", &daramjwee.Metadata{CacheTag: "v1"})
+	writer, err := store.BeginStagedSet(context.Background(), "nil-context", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = writer.Write([]byte("value"))
 	require.NoError(t, err)
-	require.NoError(t, writer.Commit(nil))
+	require.NoError(t, writer.Commit(context.Background()))
 
 	reader, meta, err := store.GetStream(context.Background(), "nil-context")
 	require.NoError(t, err)

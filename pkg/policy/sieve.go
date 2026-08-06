@@ -46,7 +46,7 @@ func (p *Sieve) Add(key string, size int64) {
 	if elem, ok := p.cache[key]; ok {
 		// Item already exists, update and move to front.
 		p.ll.MoveToFront(elem)
-		entry := elem.Value.(*sieveEntry)
+		entry, _ := elem.Value.(*sieveEntry)
 		entry.size = size
 		entry.visited = true // Treat as recently accessed on update.
 		return
@@ -61,7 +61,8 @@ func (p *Sieve) Add(key string, size int64) {
 // Touch is called when an item is accessed. It sets the item's visited flag to true.
 func (p *Sieve) Touch(key string) {
 	if elem, ok := p.cache[key]; ok {
-		elem.Value.(*sieveEntry).visited = true
+		entry, _ := elem.Value.(*sieveEntry)
+		entry.visited = true
 	}
 }
 
@@ -99,7 +100,7 @@ func (p *Sieve) Evict() []string {
 
 	// Scan until an item with visited = false is found.
 	for {
-		entry := victimElem.Value.(*sieveEntry)
+		entry, _ := victimElem.Value.(*sieveEntry)
 		if entry.visited {
 			// Give it another chance: set visited to false and move to the next candidate.
 			entry.visited = false
@@ -173,7 +174,7 @@ func (p *Sieve) removeElement(e *list.Element) *sieveEntry {
 	}
 
 	p.ll.Remove(e)
-	entry := e.Value.(*sieveEntry)
+	entry, _ := e.Value.(*sieveEntry)
 	delete(p.cache, entry.key)
 	return entry
 }

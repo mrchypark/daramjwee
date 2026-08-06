@@ -3,6 +3,7 @@ package redisstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -10,8 +11,9 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/google/uuid"
-	"github.com/mrchypark/daramjwee"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 const commitLuaScript = `
@@ -68,7 +70,7 @@ func (rs *RedisStore) TempKey(key string) string {
 func (rs *RedisStore) getMetadata(ctx context.Context, key string) (*daramjwee.Metadata, error) {
 	metaBytes, err := rs.client.Get(ctx, rs.MetaKey(key)).Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil, daramjwee.ErrNotFound
 		}
 		return nil, err
@@ -98,7 +100,7 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 	existsCmd := pipe.Exists(ctx, rs.DataKey(key))
 	sizeCmd := pipe.StrLen(ctx, rs.DataKey(key))
 	if _, err := pipe.Exec(ctx); err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil, nil, daramjwee.ErrNotFound
 		}
 		return nil, nil, err
@@ -106,14 +108,14 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 
 	metaBytes, err := metaCmd.Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil, nil, daramjwee.ErrNotFound
 		}
 		return nil, nil, err
 	}
 
 	var meta daramjwee.Metadata
-	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+	if err := json.Unmarshal(metaBytes, &meta); err != nil { //nolint:govet // shadow: sequential error handling
 		return nil, nil, err
 	}
 
@@ -122,7 +124,7 @@ func (rs *RedisStore) GetStream(ctx context.Context, key string) (io.ReadCloser,
 		return nil, nil, err
 	}
 	if exists == 0 {
-		level.Warn(rs.logger).Log("msg", "metadata found but data is missing", "key", key)
+		_ = level.Warn(rs.logger).Log("msg", "metadata found but data is missing", "key", key)
 		return nil, nil, daramjwee.ErrNotFound
 	}
 
@@ -252,9 +254,9 @@ func (w *redisStoreWriter) Commit(ctx context.Context) error {
 
 	metaBytes, err := json.Marshal(w.metadata)
 	if err != nil {
-		level.Error(w.rs.logger).Log("msg", "failed to marshal metadata", "key", w.key, "err", err)
+		_ = level.Error(w.rs.logger).Log("msg", "failed to marshal metadata", "key", w.key, "err", err)
 		if delErr := w.rs.client.Del(context.Background(), w.tempKey).Err(); delErr != nil {
-			level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
+			_ = level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
 		}
 		return fmt.Errorf("redisstore: marshal metadata: %w", err)
 	}
@@ -266,10 +268,10 @@ func (w *redisStoreWriter) Commit(ctx context.Context) error {
 		metaBytes,
 	).Result()
 	if err != nil {
-		level.Error(w.rs.logger).Log("msg", "failed to commit data and metadata", "key", w.key, "err", err)
+		_ = level.Error(w.rs.logger).Log("msg", "failed to commit data and metadata", "key", w.key, "err", err)
 		// Attempt to clean up the temporary key
 		if delErr := w.rs.client.Del(context.Background(), w.tempKey).Err(); delErr != nil {
-			level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
+			_ = level.Error(w.rs.logger).Log("msg", "failed to delete temporary key", "key", w.key, "err", delErr)
 		}
 		return fmt.Errorf("redisstore: commit: %w", err)
 	}

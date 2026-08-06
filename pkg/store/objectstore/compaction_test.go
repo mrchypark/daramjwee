@@ -2,6 +2,7 @@ package objectstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -9,10 +10,11 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func TestStore_CompactWaitsForFlushCheckpointPublication(t *testing.T) {
@@ -109,7 +111,7 @@ func TestStore_RemotePublicationWaitHonorsContext(t *testing.T) {
 			store, bucket, _, flushDone := startCheckpointBlockedFlush(t, "context-wait")
 			var ctx context.Context
 			var cancel context.CancelFunc
-			if tc.want == context.DeadlineExceeded {
+			if errors.Is(tc.want, context.DeadlineExceeded) {
 				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 			} else {
 				ctx, cancel = context.WithCancel(context.Background())

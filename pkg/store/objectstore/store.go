@@ -20,6 +20,9 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/thanos-io/objstore"
+	"golang.org/x/sync/singleflight"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/internal/stripedlock"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/blockcache"
@@ -28,8 +31,6 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/rangeio"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/segment"
 	internalshard "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/shard"
-	"github.com/thanos-io/objstore"
-	"golang.org/x/sync/singleflight"
 )
 
 type layout string
@@ -325,7 +326,7 @@ func (s *Store) beginSet(ctx context.Context, key string, metadata *daramjwee.Me
 
 	generation := s.nextGeneration()
 	segmentID := s.nextVersion()
-	segmentWriter, err := s.openSegmentWriter(s.dataDir, shardForKey(key), segmentID)
+	segmentWriter, err := s.openSegmentWriter(s.dataDir, shardForKey(key), segmentID) //nolint:govet // shadow: intentional variable reuse
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +361,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		return nil
 	}
 	s.enqueueFlush(key)
-	if err := s.flushPending(ctx); err != nil {
+	if err := s.flushPending(ctx); err != nil { //nolint:govet // shadow: sequential error handling
 		return err
 	}
 
@@ -496,7 +497,8 @@ func (s *Store) loadPage(ctx context.Context, m *manifest, pageIndex int64) ([]b
 	if err != nil {
 		return nil, err
 	}
-	return value.([]byte), nil
+	val, _ := value.([]byte)
+	return val, nil
 }
 
 func (s *Store) effectivePageSize(m *manifest) int64 {
@@ -508,10 +510,6 @@ func (s *Store) effectivePageSize(m *manifest) int64 {
 
 func (s *Store) manifestPath(key string) string {
 	return joinPath(s.prefix, "manifests", shardForKey(key), encodeKey(key)+".json")
-}
-
-func (s *Store) manifestRoot() string {
-	return ensureDir(joinPath(s.prefix, "manifests"))
 }
 
 func (s *Store) blobDir(key string) string {
@@ -616,10 +614,6 @@ func objectTimestampFromPath(objectPath string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(0, nanos), true
-}
-
-func blobTimestampFromPath(blobPath string) (time.Time, bool) {
-	return objectTimestampFromPath(blobPath)
 }
 
 func (s *Store) nextGeneration() uint64 {
