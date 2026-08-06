@@ -20,7 +20,7 @@ type CacheGroup interface {
 type cacheGroup struct {
 	logger log.Logger
 	cfg    GroupConfig
-	rt     runtime.Manager
+	rt     runtime.Runtime
 
 	closed         atomic.Bool
 	registrationMu sync.Mutex

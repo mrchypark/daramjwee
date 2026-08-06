@@ -30,6 +30,9 @@ func (r *Standalone) Submit(_ string, _ JobKind, job worker.Job) bool {
 
 func (r *Standalone) SubmitWithDropCleanup(_ string, _ JobKind, job worker.Job, onDrop func()) bool {
 	if r == nil || r.manager == nil {
+		if onDrop != nil {
+			onDrop()
+		}
 		return false
 	}
 	wrappedJob := func(ctx context.Context) {
@@ -43,7 +46,11 @@ func (r *Standalone) SubmitWithDropCleanup(_ string, _ JobKind, job worker.Job, 
 		}()
 		job(ctx)
 	}
-	return r.manager.Submit(wrappedJob)
+	submitted := r.manager.Submit(wrappedJob)
+	if !submitted && onDrop != nil {
+		onDrop()
+	}
+	return submitted
 }
 
 func (r *Standalone) CloseCache(_ string, timeout time.Duration) error {

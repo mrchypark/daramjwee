@@ -37,12 +37,3 @@ type Runtime interface {
 	RemoveCache(cacheID string)
 	Shutdown(timeout time.Duration) error
 }
-
-type Manager interface {
-	Register(cacheID string, cfg Config) error
-	Submit(cacheID string, kind JobKind, job worker.Job) bool
-	SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool
-	CloseCache(cacheID string, timeout time.Duration) error
-	RemoveCache(cacheID string)
-	Shutdown(timeout time.Duration) error
-}

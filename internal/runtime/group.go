@@ -56,7 +56,7 @@ type queuedJob struct {
 	onDrop  func()
 }
 
-func NewGroup(logger log.Logger, workers int, timeout time.Duration) Manager {
+func NewGroup(logger log.Logger, workers int, timeout time.Duration) Runtime {
 	if workers <= 0 {
 		workers = 1
 	}
@@ -86,13 +86,13 @@ func (r *Group) Register(cacheID string, cfg Config) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closing {
-		return &ConfigError{"cache group is closed"}
+		return fmt.Errorf("cache group is closed")
 	}
 	if cacheID == "" {
-		return &ConfigError{"cache name cannot be empty"}
+		return fmt.Errorf("cache name cannot be empty")
 	}
 	if _, exists := r.caches[cacheID]; exists {
-		return &ConfigError{fmt.Sprintf("duplicate cache name %q", cacheID)}
+		return fmt.Errorf("duplicate cache name %q", cacheID)
 	}
 
 	cacheCtx, cancel := context.WithCancel(context.Background())
@@ -432,12 +432,4 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
-}
-
-type ConfigError struct {
-	Msg string
-}
-
-func (e *ConfigError) Error() string {
-	return e.Msg
 }
