@@ -109,7 +109,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		}
 	}
 
-	if !submitBackgroundJob(c.runtime, c.cacheID, JobKindRefresh, job, expectedGeneration.release) {
+	if !c.runtime.SubmitWithDropCleanup(c.cacheID, JobKindRefresh, job, expectedGeneration.release) {
 		expectedGeneration.release()
 		return ErrBackgroundJobRejected
 	}

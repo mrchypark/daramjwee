@@ -3,13 +3,7 @@ package daramjwee
 import (
 	"context"
 	"errors"
-
-	"github.com/mrchypark/daramjwee/internal/worker"
 )
-
-func submitBackgroundJob(rt backgroundRuntime, cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
-	return rt.SubmitWithDropCleanup(cacheID, kind, job, onDrop)
-}
 
 func (c *DaramjweeCache) persistDestinationsAfterTop() []tierDestination {
 	if len(c.tiers) <= 1 {
@@ -108,7 +102,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 			c.infoLog("msg", "background set successful", "key", key, "dest_tier", destTierIndex)
 		}
 
-		if !submitBackgroundJob(c.runtime, c.cacheID, JobKindPersist, job, jobGeneration.release) {
+		if !c.runtime.SubmitWithDropCleanup(c.cacheID, JobKindPersist, job, jobGeneration.release) {
 			jobGeneration.release()
 			c.warnLog("msg", "background set rejected", "key", key, "dest_tier", destTierIndex)
 		}
