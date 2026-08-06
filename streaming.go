@@ -62,6 +62,16 @@ type topFillSink struct {
 	preemptCh   chan struct{}
 	preemptOnce sync.Once
 
+	// ioMu serializes I/O operations (Write, Abort cleanup) so that
+	// Preempt/Close can update state and release the coordinator while
+	// a Write is blocked on the underlying store. Without ioMu, a stalled
+	// Write would hold mu and prevent Preempt from completing promptly.
+	//
+	// Lock ordering: ioMu must be acquired before mu when both are needed.
+	// Write() acquires ioMu first (held for entire call), then briefly acquires mu.
+	// Close()/Abort() acquire mu first to check/set done, release it, then
+	// acquire ioMu, then re-acquire mu. This is safe because Close/Abort
+	// never hold both locks simultaneously in the opposite order of Write.
 	ioMu                 sync.Mutex
 	mu                   sync.Mutex
 	done                 bool

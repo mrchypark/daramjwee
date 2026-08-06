@@ -84,8 +84,14 @@ func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) error {
 	current, ok := c.entries[key]
 	next, keep := fn(current, ok)
 	if keep {
+		if next == current {
+			return nil
+		}
 		c.entries[key] = next
 	} else {
+		if !ok {
+			return nil
+		}
 		delete(c.entries, key)
 	}
 	if committed, err := c.persistLocked(); err != nil {
@@ -107,11 +113,19 @@ func (c *Catalog) UpdateMany(updates map[string]Entry) error {
 
 	previous := make(map[string]Entry, len(updates))
 	existed := make(map[string]bool, len(updates))
+	changed := false
 	for key, next := range updates {
 		prev, ok := c.entries[key]
 		previous[key] = prev
 		existed[key] = ok
+		if ok && next == prev {
+			continue
+		}
+		changed = true
 		c.entries[key] = next
+	}
+	if !changed {
+		return nil
 	}
 	if committed, err := c.persistLocked(); err != nil {
 		if !committed {
@@ -132,6 +146,9 @@ func (c *Catalog) Set(key string, entry Entry) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	prev, existed := c.entries[key]
+	if existed && entry == prev {
+		return nil
+	}
 	c.entries[key] = entry
 	if committed, err := c.persistLocked(); err != nil {
 		if !committed {
@@ -150,6 +167,9 @@ func (c *Catalog) Delete(key string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	prev, existed := c.entries[key]
+	if !existed {
+		return nil
+	}
 	delete(c.entries, key)
 	if committed, err := c.persistLocked(); err != nil {
 		if !committed && existed {

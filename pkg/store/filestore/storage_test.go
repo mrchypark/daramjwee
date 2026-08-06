@@ -21,6 +21,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
+	return writeStoredMetadataEnvelope(w, storedMetadata{Metadata: derefMetadata(meta)})
+}
+
+func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
+	meta, _, _, dataOffset, err := readStoredMetadata(r)
+	return meta, dataOffset, err
+}
+
 // setupTestStore is a helper to create a temporary filestore for testing.
 func setupTestStore(t *testing.T, opts ...Option) *FileStore {
 	t.Helper()
@@ -566,7 +575,7 @@ func TestFileStore_LateCloseDoesNotOverwriteNewerVisibleValue(t *testing.T) {
 	_, err = second.Write([]byte("second"))
 	require.NoError(t, err)
 	require.NoError(t, second.Close())
-	require.NoError(t, first.Close())
+	require.ErrorIs(t, first.Close(), ErrGenerationSuperseded)
 
 	reader, meta, err := fs.GetStream(ctx, key)
 	require.NoError(t, err)
@@ -602,7 +611,7 @@ func TestFileStore_GenerationStatePrunedWhenKeyBecomesIdle(t *testing.T) {
 	require.True(t, floorPresent)
 	require.Equal(t, 1, activeWriters)
 
-	require.NoError(t, first.Close())
+	require.ErrorIs(t, first.Close(), ErrGenerationSuperseded)
 
 	fs.generationMu.Lock()
 	_, floorPresent = fs.generations[key]
@@ -631,7 +640,7 @@ func TestFileStore_DeleteKeepsGenerationFloorUntilActiveWriterFinishes(t *testin
 	require.True(t, floorPresent)
 	require.Equal(t, 1, activeWriters)
 
-	require.NoError(t, writer.Close())
+	require.ErrorIs(t, writer.Close(), ErrGenerationSuperseded)
 
 	_, _, err = fs.GetStream(ctx, key)
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)

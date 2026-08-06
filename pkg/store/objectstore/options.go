@@ -15,6 +15,8 @@ type config struct {
 	blockCacheBytes      int64
 	checkpointCacheBytes int64
 	checkpointTTL        time.Duration
+	manifestCacheBytes   int64
+	manifestTTL          time.Duration
 }
 
 // WithDir configures the local objectstore working directory used for
@@ -94,5 +96,22 @@ func WithCheckpointCache(capacityBytes int64) Option {
 func WithCheckpointTTL(ttl time.Duration) Option {
 	return func(cfg *config) {
 		cfg.checkpointTTL = ttl
+	}
+}
+
+// WithManifestCache enables in-memory manifest caching with the provided byte
+// capacity. A non-positive capacity disables the cache.
+func WithManifestCache(capacityBytes int64) Option {
+	return func(cfg *config) {
+		cfg.manifestCacheBytes = capacityBytes
+	}
+}
+
+// WithManifestTTL sets how long decoded manifests stay valid in the in-memory
+// manifest cache before being reloaded from remote storage. A non-positive TTL
+// falls back to the backend default.
+func WithManifestTTL(ttl time.Duration) Option {
+	return func(cfg *config) {
+		cfg.manifestTTL = ttl
 	}
 }

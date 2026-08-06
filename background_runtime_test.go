@@ -103,18 +103,10 @@ func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
 
 	jobReady := make(chan struct{})
 	releaseJob := make(chan struct{})
-	rt.beforeJobStart = func(id string, kind JobKind) {
-		if id == cacheID && kind == JobKindRefresh {
-			select {
-			case <-jobReady:
-			default:
-				close(jobReady)
-			}
-			<-releaseJob
-		}
-	}
-
-	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {}))
+	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {
+		close(jobReady)
+		<-releaseJob
+	}))
 	<-jobReady
 
 	closeDone := make(chan error, 1)
@@ -177,18 +169,10 @@ func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
 
 	jobReady := make(chan struct{})
 	releaseJob := make(chan struct{})
-	rt.beforeJobStart = func(id string, kind JobKind) {
-		if id == cacheID && kind == JobKindRefresh {
-			select {
-			case <-jobReady:
-			default:
-				close(jobReady)
-			}
-			<-releaseJob
-		}
-	}
-
-	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {}))
+	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {
+		close(jobReady)
+		<-releaseJob
+	}))
 	<-jobReady
 
 	var firstReturned atomic.Bool

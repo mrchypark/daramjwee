@@ -41,8 +41,15 @@ type FileStore struct {
 	fileSizes   map[string]int64 // Track file sizes for eviction
 }
 
-var _ daramjwee.TierValidator = (*FileStore)(nil)
-var _ daramjwee.StagingStore = (*FileStore)(nil)
+var (
+	_ daramjwee.TierValidator = (*FileStore)(nil)
+	_ daramjwee.StagingStore  = (*FileStore)(nil)
+
+	// ErrGenerationSuperseded is returned by a staged write's Commit when a newer
+	// write has already committed for the same key, making this write's data
+	// obsolete. Callers can use errors.Is to recognize a lost generation.
+	ErrGenerationSuperseded = errors.New("filestore: write superseded by newer generation")
+)
 
 const encodedKeyPrefix = "b64_"
 const encodedKeyDir = "__encoded__"
@@ -305,7 +312,7 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 		}
 
 		if current := fs.generationFloor(key); current > generation {
-			return nil
+			return fmt.Errorf("filestore: commit superseded: %w", ErrGenerationSuperseded)
 		}
 
 		if fs.useCopyWrite {
@@ -576,11 +583,6 @@ func removeFiles(paths []string) error {
 	return nil
 }
 
-// writeMetadata serializes metadata, prefixes it with its length, and writes it to the provided writer.
-func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
-	return writeStoredMetadataEnvelope(w, storedMetadata{Metadata: derefMetadata(meta)})
-}
-
 func writeStoredMetadata(w io.Writer, key string, meta *daramjwee.Metadata) error {
 	storedKey := key
 	return writeStoredMetadataEnvelope(w, storedMetadata{
@@ -612,14 +614,6 @@ func derefMetadata(meta *daramjwee.Metadata) daramjwee.Metadata {
 		return daramjwee.Metadata{}
 	}
 	return *meta
-}
-
-// readMetadata reads metadata from a reader.
-// It expects the metadata length as a uint32 prefix, followed by the JSON-encoded metadata.
-// It returns the metadata, the offset where the data begins, and an error if any.
-func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
-	meta, _, _, dataOffset, err := readStoredMetadata(r)
-	return meta, dataOffset, err
 }
 
 func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, int64, error) {
@@ -681,8 +675,11 @@ func copyFile(src, dst string) (err error) {
 }
 
 // lockedReadCloser wraps an os.File and executes an unlock function on Close.
+// The unlock function runs exactly once, so the read pin is released even if
+// Close is called multiple times.
 type lockedReadCloser struct {
 	*os.File
+	unlockOnce sync.Once
 	unlockFunc func()
 }
 
@@ -693,7 +690,7 @@ func newLockedReadCloser(f *os.File, unlockFunc func()) io.ReadCloser {
 
 // Close closes the underlying file and executes the unlock function.
 func (lrc *lockedReadCloser) Close() error {
-	defer lrc.unlockFunc()
+	lrc.unlockOnce.Do(lrc.unlockFunc)
 	return lrc.File.Close()
 }
 

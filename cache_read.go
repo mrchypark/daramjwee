@@ -49,7 +49,7 @@ func (c *DaramjweeCache) topTierCloseCallback(requestCtx context.Context, key st
 	}
 
 	c.debugLog("msg", "top tier is stale, scheduling refresh", "key", key)
-	return newStaleRefreshCallback(c, requestCtx, key, fetcher, cancel, meta, observedGeneration)
+	return newStaleRefreshCallback(c, requestCtx, key, fetcher, cancel, meta, nil, observedGeneration)
 }
 
 // lowerTierHitParams groups the parameters for handleLowerTierHit.
