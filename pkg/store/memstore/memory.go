@@ -47,6 +47,37 @@ func New(capacity int64, policy daramjwee.EvictionPolicy) *MemStore {
 	}
 }
 
+// byteReadCloser is a lightweight io.ReadCloser that wraps a byte slice directly,
+// avoiding the allocations of bytes.NewReader + io.NopCloser.
+type byteReadCloser struct {
+	data []byte
+	pos  int
+}
+
+func (b *byteReadCloser) Read(p []byte) (int, error) {
+	if b.pos >= len(b.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.data[b.pos:])
+	b.pos += n
+	if b.pos >= len(b.data) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (b *byteReadCloser) Close() error {
+	b.data = nil
+	b.pos = 0
+	byteReadCloserPool.Put(b)
+	return nil
+}
+
+// byteReadCloser pool for reducing allocations on hot path.
+var byteReadCloserPool = sync.Pool{
+	New: func() any { return &byteReadCloser{} },
+}
+
 // GetStream retrieves an object as a stream from the in-memory map.
 func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
 	ms.mu.RLock()
@@ -63,10 +94,11 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 	ms.policy.Touch(key)
 	ms.mu.Unlock()
 
-	reader := bytes.NewReader(e.value)
-	readCloser := io.NopCloser(reader)
+	brc, _ := byteReadCloserPool.Get().(*byteReadCloser)
+	brc.data = e.value
+	brc.pos = 0
 
-	return readCloser, daramjwee.CloneMetadata(e.metadata), nil
+	return brc, daramjwee.CloneMetadata(e.metadata), nil
 }
 
 // BeginSet returns a writer that streams data into an in-memory buffer.

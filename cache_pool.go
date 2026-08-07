@@ -5,6 +5,30 @@ import (
 	"sync"
 )
 
+// Metadata pool for reducing allocations on hot path.
+var metadataPool = sync.Pool{
+	New: func() any { return &Metadata{} },
+}
+
+// pooledCloneMetadata returns a pooled Metadata copy.
+// Caller must call releaseMetadata when done.
+func pooledCloneMetadata(meta *Metadata) *Metadata {
+	if meta == nil {
+		return nil
+	}
+	m, _ := metadataPool.Get().(*Metadata)
+	*m = *meta
+	return m
+}
+
+// releaseMetadata returns a Metadata to the pool.
+func releaseMetadata(m *Metadata) {
+	if m != nil {
+		*m = Metadata{}
+		metadataPool.Put(m)
+	}
+}
+
 // safeCloser pool for reducing allocations on hot path.
 var safeCloserPool = sync.Pool{
 	New: func() any { return &safeCloser{} },
