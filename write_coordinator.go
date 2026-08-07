@@ -27,7 +27,7 @@ type writeCoordinator struct {
 	leaseOnce   sync.Once
 	writeLease  chan struct{}
 	commitLease chan struct{}
-	stateMu     sync.Mutex
+	stateMu     sync.RWMutex
 	// committedGeneration is the latest generation visible in the top store.
 	// Uses atomic for lock-free reads on the hot path (currentTopWriteGeneration).
 	committedGeneration atomic.Uint64
@@ -215,8 +215,8 @@ func (c *writeCoordinator) current() uint64 {
 
 func (c *writeCoordinator) canAttemptExpectedTopWrite(expectedGeneration uint64) bool {
 	c.init()
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	return c.activeDeletes == 0 &&
 		c.committedGeneration.Load() == expectedGeneration
 }

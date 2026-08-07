@@ -706,7 +706,7 @@ type cancelOnCloseReadCloser struct {
 }
 
 func newCancelOnCloseReadCloser(rc io.ReadCloser, cancel func()) io.ReadCloser {
-	return &cancelOnCloseReadCloser{ReadCloser: rc, cancel: cancel}
+	return pooledCancelOnCloseReadCloser(rc, cancel)
 }
 
 func (c *cancelOnCloseReadCloser) Close() error {
@@ -715,6 +715,7 @@ func (c *cancelOnCloseReadCloser) Close() error {
 		if c.cancel != nil {
 			c.cancel()
 		}
+		releaseCancelOnCloseReadCloser(c)
 	})
 	return c.closeErr
 }

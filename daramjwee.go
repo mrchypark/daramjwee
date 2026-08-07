@@ -126,6 +126,20 @@ func ifNoneMatchMatchesCacheTag(ifNoneMatch, cacheTag string) bool {
 	}
 
 	normalizedTag := normalizeEntityTag(cacheTag)
+
+	// Fast path: single tag, no commas — avoid slice allocation
+	if !strings.ContainsRune(ifNoneMatch, ',') {
+		candidate := strings.TrimSpace(ifNoneMatch)
+		if candidate == "*" {
+			return true
+		}
+		if normalizedTag != "" && normalizeEntityTag(candidate) == normalizedTag {
+			return true
+		}
+		return false
+	}
+
+	// Slow path: multiple tags
 	for _, candidate := range splitEntityTagList(ifNoneMatch) {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
@@ -170,9 +184,27 @@ func splitEntityTagList(header string) []string {
 }
 
 func normalizeEntityTag(tag string) string {
-	tag = strings.TrimSpace(tag)
+	// Manual trim to avoid string allocation
+	start, end := 0, len(tag)
+	for start < end && tag[start] == ' ' {
+		start++
+	}
+	for end > start && tag[end-1] == ' ' {
+		end--
+	}
+	tag = tag[start:end]
+
 	if len(tag) >= 2 && (strings.HasPrefix(tag, "W/") || strings.HasPrefix(tag, "w/")) {
-		tag = strings.TrimSpace(tag[2:])
+		tag = tag[2:]
+		// Trim again after prefix
+		start2, end2 := 0, len(tag)
+		for start2 < end2 && tag[start2] == ' ' {
+			start2++
+		}
+		for end2 > start2 && tag[end2-1] == ' ' {
+			end2--
+		}
+		tag = tag[start2:end2]
 	}
 	if len(tag) >= 2 && tag[0] == '"' && tag[len(tag)-1] == '"' {
 		tag = tag[1 : len(tag)-1]

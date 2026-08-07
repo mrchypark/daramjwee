@@ -597,10 +597,10 @@ func writeStoredMetadataEnvelope(w io.Writer, meta storedMetadata) error {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(metaBytes)))
+	var lenBuf [4]byte                                            // stack-allocated
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(metaBytes))) //nolint:gosec // G115: metadata length is bounded by practical limits
 
-	if _, err := w.Write(lenBuf); err != nil {
+	if _, err := w.Write(lenBuf[:]); err != nil {
 		return fmt.Errorf("failed to write metadata length: %w", err)
 	}
 	if _, err := w.Write(metaBytes); err != nil {
@@ -617,15 +617,15 @@ func derefMetadata(meta *daramjwee.Metadata) daramjwee.Metadata {
 }
 
 func readStoredMetadata(r io.Reader) (*daramjwee.Metadata, string, bool, int64, error) {
-	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(r, lenBuf); err != nil {
+	var lenBuf [4]byte // stack-allocated
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return nil, "", false, 0, daramjwee.ErrNotFound // Treat empty/short files as not found
 		}
 		return nil, "", false, 0, fmt.Errorf("failed to read metadata length: %w", err)
 	}
 
-	metaLen := binary.BigEndian.Uint32(lenBuf)
+	metaLen := binary.BigEndian.Uint32(lenBuf[:])
 	// Add a sanity check for metaLen to avoid allocating huge buffers
 	if metaLen > 10*1024*1024 { // 10MB limit for metadata
 		return nil, "", false, 0, fmt.Errorf("metadata size is too large: %d bytes", metaLen)
