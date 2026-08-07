@@ -2,13 +2,15 @@ package daramjwee_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func TestCache_CloseDuringRefreshQueuePressureStress(t *testing.T) {
@@ -43,7 +45,7 @@ func TestCache_CloseDuringRefreshQueuePressureStress(t *testing.T) {
 				key := "stress-key-" + string('a'+byte(id%3))
 				if err := cache.ScheduleRefresh(context.Background(), key, fetcher); err == nil {
 					accepted.Add(1)
-				} else if err != daramjwee.ErrBackgroundJobRejected {
+				} else if !errors.Is(err, daramjwee.ErrBackgroundJobRejected) {
 					t.Errorf("unexpected schedule refresh error: %v", err)
 				}
 			}(g)

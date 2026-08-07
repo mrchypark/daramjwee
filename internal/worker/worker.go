@@ -59,12 +59,12 @@ func (m *Manager) Submit(job Job) bool {
 // Shutdown safely shuts down the worker manager.
 // It calls the Shutdown method of the underlying strategy.
 func (m *Manager) Shutdown(timeout time.Duration) error {
-	level.Info(m.logger).Log("msg", "shutting down worker manager")
+	_ = level.Info(m.logger).Log("msg", "shutting down worker manager")
 	err := m.strategy.Shutdown(timeout)
 	if err != nil {
-		level.Error(m.logger).Log("msg", "error during shutdown", "err", err)
+		_ = level.Error(m.logger).Log("msg", "error during shutdown", "err", err)
 		return err
 	}
-	level.Info(m.logger).Log("msg", "worker manager shutdown complete")
+	_ = level.Info(m.logger).Log("msg", "worker manager shutdown complete")
 	return nil
 }

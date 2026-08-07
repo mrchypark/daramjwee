@@ -3,6 +3,7 @@ package daramjwee_test
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func FuzzCacheSequentialOperations(f *testing.F) {
 				got, meta, err := readCurrentValue(ctx, hot, key)
 				want, ok := expected[key]
 				if !ok {
-					if err != daramjwee.ErrNotFound {
+					if !errors.Is(err, daramjwee.ErrNotFound) {
 						t.Fatalf("get(%q): expected not found, got value=%q meta=%v err=%v", key, got, meta, err)
 					}
 					continue
@@ -98,7 +99,7 @@ func FuzzCacheSequentialOperations(f *testing.F) {
 			got, meta, err := readCurrentValue(ctx, hot, key)
 			want, ok := expected[key]
 			if !ok {
-				if err != daramjwee.ErrNotFound {
+				if !errors.Is(err, daramjwee.ErrNotFound) {
 					t.Fatalf("final state %q: expected not found, got value=%q meta=%v err=%v", key, got, meta, err)
 				}
 				continue
@@ -123,7 +124,7 @@ type sequentialFuzzFetcher struct {
 
 func (f sequentialFuzzFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	return &daramjwee.FetchResult{
-		Body:     io.NopCloser(io.Reader(io.LimitReader(&stringReader{s: f.value}, int64(len(f.value))))),
+		Body:     io.NopCloser(io.LimitReader(&stringReader{s: f.value}, int64(len(f.value)))),
 		Metadata: &daramjwee.Metadata{CacheTag: f.tag},
 	}, nil
 }

@@ -53,7 +53,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		if err != nil {
 			if errors.Is(err, ErrCacheableNotFound) {
 				c.debugLog("msg", "re-caching as negative entry during background refresh", "key", key)
-				c.handleNegativeCacheWithGeneration(refreshCtx, refreshCtx, key, nil, expectedGeneration)
+				_, _ = c.handleNegativeCacheWithGeneration(refreshCtx, refreshCtx, key, nil, expectedGeneration)
 			} else if errors.Is(err, ErrNotModified) {
 				c.debugLog("msg", "background refresh: object not modified", "key", key)
 				if fallbackSource != nil {
@@ -95,7 +95,7 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 			c.errorLog("msg", "failed to get cache writer for refresh", "key", key, "err", errors.Join(err, closeErr))
 			return
 		}
-		defer writer.Abort()
+		defer func() { _ = writer.Abort() }()
 
 		if publishErr := copyCloseSourceThenCommit(writer, result.Body); publishErr != nil {
 			if errors.Is(publishErr, ErrTopWriteInvalidated) {
@@ -153,7 +153,7 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 		if err != nil {
 			return err
 		}
-		defer writer.Abort()
+		defer func() { _ = writer.Abort() }()
 		if err := writer.Close(); err != nil {
 			return err
 		}
@@ -179,7 +179,7 @@ func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key st
 		closeErr := srcStream.Close()
 		return errors.Join(err, closeErr)
 	}
-	defer writer.Abort()
+	defer func() { _ = writer.Abort() }()
 
 	if err := copyCloseSourceThenCommit(writer, srcStream); err != nil {
 		return err
@@ -222,14 +222,14 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 	metaToRefresh.CachedAt = time.Now()
 
 	if metaToRefresh.IsNegative {
-		writer, err := c.setStreamToTopStoreBestEffortWithGeneration(ctx, key, &metaToRefresh, expectedGeneration)
+		writer, err := c.setStreamToTopStoreBestEffortWithGeneration(ctx, key, &metaToRefresh, expectedGeneration) //nolint:govet // shadow: sequential error handling in same block
 		if err != nil {
 			if errors.Is(err, ErrTopWriteInvalidated) {
 				return nil
 			}
 			return err
 		}
-		defer writer.Abort()
+		defer func() { _ = writer.Abort() }()
 		return writer.Close()
 	}
 
@@ -246,7 +246,7 @@ func (c *DaramjweeCache) refreshTopEntryCachedAt(ctx context.Context, key string
 		}
 		return errors.Join(err, closeErr)
 	}
-	defer writer.Abort()
+	defer func() { _ = writer.Abort() }()
 	_, copyErr := io.Copy(writer, srcStream)
 	sourceCloseErr := srcStream.Close()
 	if copyErr != nil || sourceCloseErr != nil {
@@ -279,7 +279,7 @@ func (c *DaramjweeCache) handleNegativeCacheWithGeneration(requestCtx, setupCtx 
 		}
 		c.warnLog("msg", "failed to get writer for negative cache entry", "key", key, "err", err)
 	} else {
-		defer writer.Abort()
+		defer func() { _ = writer.Abort() }()
 		if closeErr := writer.Close(); closeErr != nil {
 			if errors.Is(closeErr, ErrTopWriteInvalidated) {
 				c.infoLog("msg", "skipping negative cache publish because top-tier state changed", "key", key)

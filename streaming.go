@@ -363,7 +363,7 @@ func (s *topFillSink) Preempt() error {
 		// progress even if the fill Write is stalled. The actual sink cleanup
 		// stays serialized with Write because WriteSink does not promise that
 		// terminal methods are safe to call concurrently with Write.
-		go s.abortPreemptedSink(cleanup)
+		go func() { _ = s.abortPreemptedSink(cleanup) }()
 	}
 	return nil
 }
@@ -499,7 +499,7 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 	}
 	r.mu.Unlock()
 
-	tee := teeWriterPool.Get().(*streamTeeWriter)
+	tee, _ := teeWriterPool.Get().(*streamTeeWriter)
 	tee.dst = dst
 	tee.sink = r.sink
 	tee.sinkErr = nil
@@ -512,8 +512,8 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 	if wt, ok := r.src.(io.WriterTo); ok {
 		written, err = wt.WriteTo(tee)
 	} else {
-		buf := streamCopyBufferPool.Get().([]byte)
-		defer streamCopyBufferPool.Put(buf)
+		buf, _ := streamCopyBufferPool.Get().([]byte)
+		defer streamCopyBufferPool.Put(buf) //nolint:staticcheck // SA6002: []byte is acceptable for pool; pointer wrapper would add indirection
 
 		for {
 			nr, readErr := r.src.Read(buf)
@@ -676,7 +676,7 @@ func withoutError(err, target error) error {
 	if !errors.Is(err, target) {
 		return err
 	}
-	switch unwrapped := err.(type) {
+	switch unwrapped := err.(type) { //nolint:errorlint // checking interface type, not sentinel error
 	case interface{ Unwrap() []error }:
 		remaining := make([]error, 0, len(unwrapped.Unwrap()))
 		for _, child := range unwrapped.Unwrap() {

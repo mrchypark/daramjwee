@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 )
@@ -301,7 +302,7 @@ func TestRepro_AllClosedMissesPublishEveryFileStoreKey(t *testing.T) {
 			body, readErr := io.ReadAll(resp)
 			closeErr := resp.Close()
 			if readErr != nil || closeErr != nil {
-				errs <- fmt.Errorf("%s read=%v close=%v", key, readErr, closeErr)
+				errs <- fmt.Errorf("%s read=%w close=%w", key, readErr, closeErr)
 				return
 			}
 			if string(body) != value {
@@ -392,7 +393,7 @@ func TestRepro_AllClosedStaleRefreshesUpdateEveryFileStoreKey(t *testing.T) {
 			body, readErr := io.ReadAll(resp)
 			closeErr := resp.Close()
 			if readErr != nil || closeErr != nil {
-				errs <- fmt.Errorf("%s read=%v close=%v", key, readErr, closeErr)
+				errs <- fmt.Errorf("%s read=%w close=%w", key, readErr, closeErr)
 				return
 			}
 			if string(body) != fmt.Sprintf("old-value-%04d", i) {

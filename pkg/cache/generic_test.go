@@ -2,16 +2,18 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/stretchr/testify/assert"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/policy"
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
-	"github.com/stretchr/testify/assert"
 )
 
 type User struct {
@@ -291,12 +293,12 @@ func TestGenericCache_CacheableNotFoundIsCached(t *testing.T) {
 	})
 
 	_, err = stringCache.Get(ctx, "missing-key", fetcher)
-	if err != daramjwee.ErrNotFound {
+	if !errors.Is(err, daramjwee.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 
 	_, err = stringCache.Get(ctx, "missing-key", fetcher)
-	if err != daramjwee.ErrNotFound {
+	if !errors.Is(err, daramjwee.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound on second get, got %v", err)
 	}
 

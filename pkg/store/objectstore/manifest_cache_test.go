@@ -10,10 +10,11 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/goccy/go-json"
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 type countingManifestBucket struct {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
@@ -153,7 +154,7 @@ func (r *Group) submit(cacheID string, kind JobKind, job worker.Job, onDrop func
 		r.mu.Unlock()
 		return false
 	}
-	level.Debug(r.logger).Log(
+	_ = level.Debug(r.logger).Log(
 		"msg", "queued background job",
 		"cache_id", cacheID,
 		"job_kind", kind.String(),
@@ -196,7 +197,7 @@ func (r *Group) RemoveCache(cacheID string) {
 }
 
 func (r *Group) noteRejectLocked(cacheID string, kind JobKind, reason rejectReason, depth, limit int) {
-	level.Warn(r.logger).Log(
+	_ = level.Warn(r.logger).Log(
 		"msg", "rejected background job",
 		"cache_id", cacheID,
 		"job_kind", kind.String(),
@@ -241,7 +242,7 @@ func (r *Group) CloseCache(cacheID string, timeout time.Duration) error {
 		job.drop()
 	}
 
-	level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
+	_ = level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
 	return r.waitForCacheClose(cacheID, done, timeout)
 }
 
@@ -270,7 +271,7 @@ func (r *Group) Shutdown(timeout time.Duration) error {
 			droppedJobs = append(droppedJobs, <-state.queue)
 		}
 		r.cacheCloseDoneLocked(state)
-		level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
+		_ = level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
 	}
 	r.cond.Broadcast()
 	r.mu.Unlock()
@@ -289,12 +290,12 @@ func (r *Group) Shutdown(timeout time.Duration) error {
 	case <-done:
 		return nil
 	case <-time.After(timeout):
-		level.Warn(r.logger).Log("msg", "group runtime shutdown timed out", "timeout", timeout)
+		_ = level.Warn(r.logger).Log("msg", "group runtime shutdown timed out", "timeout", timeout)
 		return worker.ErrShutdownTimeout
 	}
 }
 
-func (r *Group) workerLoop(workerID int) {
+func (r *Group) workerLoop(_ int) {
 	defer r.wg.Done()
 	for {
 		cacheID, job, state, ok := r.nextJob()
@@ -311,19 +312,19 @@ func (r *Group) workerLoop(workerID int) {
 			state.active--
 			r.notifyCacheActivityLocked(state)
 			r.mu.Unlock()
-			level.Debug(r.logger).Log("msg", "dropping dequeued job for closed cache", "cache_id", cacheID, "job_kind", job.kind.String())
+			_ = level.Debug(r.logger).Log("msg", "dropping dequeued job for closed cache", "cache_id", cacheID, "job_kind", job.kind.String())
 			continue
 		}
 
 		ctx, cancel := context.WithTimeout(state.ctx, r.timeout)
-		level.Debug(r.logger).Log("msg", "starting background job", "cache_id", cacheID, "job_kind", job.kind.String())
+		_ = level.Debug(r.logger).Log("msg", "starting background job", "cache_id", cacheID, "job_kind", job.kind.String())
 		func() {
 			defer func() {
 				cancel()
 				if rec := recover(); rec != nil {
-					level.Error(r.logger).Log("msg", "background job panicked", "cache_id", cacheID, "job_kind", job.kind.String(), "panic", rec)
+					_ = level.Error(r.logger).Log("msg", "background job panicked", "cache_id", cacheID, "job_kind", job.kind.String(), "panic", rec)
 				} else {
-					level.Debug(r.logger).Log("msg", "finished background job", "cache_id", cacheID, "job_kind", job.kind.String())
+					_ = level.Debug(r.logger).Log("msg", "finished background job", "cache_id", cacheID, "job_kind", job.kind.String())
 				}
 				r.mu.Lock()
 				state.active--
@@ -422,7 +423,7 @@ func (r *Group) waitForCacheClose(cacheID string, done <-chan struct{}, timeout 
 	case <-done:
 		return nil
 	case <-time.After(timeout):
-		level.Warn(r.logger).Log("msg", "cache close timed out", "cache_id", cacheID, "timeout", timeout)
+		_ = level.Warn(r.logger).Log("msg", "cache close timed out", "cache_id", cacheID, "timeout", timeout)
 		return worker.ErrShutdownTimeout
 	}
 }

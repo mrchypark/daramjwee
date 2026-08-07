@@ -17,7 +17,7 @@ func (s *Store) loadLocalEntry(key string) (localCatalogEntry, bool, error) {
 		return localCatalogEntry{}, false, nil
 	}
 	entry, ok := s.catalog.Get(key)
-	return entry, ok, nil
+	return entry, ok, nil //nolint:unparam // error always nil; kept for interface consistency
 }
 
 func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) {
@@ -48,7 +48,7 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 		return localCatalogEntry{}, false, err
 	}
 	if !published {
-		current, ok, err := s.loadLocalEntry(key)
+		current, ok, err := s.loadLocalEntry(key) //nolint:govet // shadow: retry after lock acquisition
 		if err != nil || !ok {
 			return localCatalogEntry{}, ok, err
 		}
@@ -129,13 +129,6 @@ func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (l
 	return s.catalog.Update(key, fn)
 }
 
-func (s *Store) updateLocalEntries(entries map[string]localCatalogEntry) error {
-	if s.catalog == nil {
-		return nil
-	}
-	return s.catalog.UpdateMany(entries)
-}
-
 func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCatalogEntry) error {
 	if s.catalog == nil || len(updates) == 0 {
 		return nil
@@ -158,20 +151,6 @@ func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCata
 		if applied && expected.SegmentPath != "" && expected.SegmentPath != next.SegmentPath {
 			s.markLocalSegmentReclaimable(expected.SegmentPath)
 		}
-	}
-	return nil
-}
-
-func (s *Store) deleteLocalEntry(key string) error {
-	if s.catalog == nil {
-		return nil
-	}
-	prev, ok := s.catalog.Get(key)
-	if err := s.catalog.Delete(key); err != nil {
-		return err
-	}
-	if ok && prev.SegmentPath != "" {
-		s.markLocalSegmentReclaimable(prev.SegmentPath)
 	}
 	return nil
 }

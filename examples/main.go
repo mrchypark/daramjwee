@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 )
@@ -79,7 +81,7 @@ func ExampleOriginFetcher_Fetch() {
 	fmt.Println("\n--- Conditional Fetch (Not Modified) ---")
 	result, err = fetcher.Fetch(context.Background(), result.Metadata)
 	if err != nil {
-		if err == daramjwee.ErrNotModified {
+		if errors.Is(err, daramjwee.ErrNotModified) {
 			fmt.Println("Data not modified as expected.")
 		} else {
 			fmt.Printf("Error fetching (conditional): %v\n", err)

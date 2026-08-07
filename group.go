@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+
 	"github.com/mrchypark/daramjwee/internal/runtime"
 )
 
@@ -166,7 +167,7 @@ func (g *cacheGroup) Close() {
 
 	if g.rt != nil {
 		if err := g.rt.Shutdown(g.cfg.CloseTimeout); err != nil {
-			level.Warn(g.logger).Log("msg", "cache group shutdown failed", "err", err)
+			_ = level.Warn(g.logger).Log("msg", "cache group shutdown failed", "err", err)
 		}
 	}
 

@@ -89,7 +89,7 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 				defer cancel()
 				return c.deleteFromStore(cleanupCtx, dest, key)
 			})
-			defer destWriter.Abort()
+			defer func() { _ = destWriter.Abort() }()
 
 			if persistErr := copyCloseSourceThenCommit(destWriter, srcStream); persistErr != nil {
 				if errors.Is(persistErr, ErrTopWriteInvalidated) {

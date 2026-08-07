@@ -120,7 +120,7 @@ func TestTopTierCloseCallback(t *testing.T) {
 		cancel := func() { cancelCalled = true }
 		observedGen := &topWriteGeneration{
 			coord: &writeCoordinator{
-				manager:            &topWriteManager{},
+				manager:             &topWriteManager{},
 				committedGeneration: atomic.Uint64{},
 			},
 			generation: 1,
@@ -281,8 +281,8 @@ func TestDecideLowerTierHit(t *testing.T) {
 			if tt.canServeCond {
 				gen := &topWriteGeneration{
 					coord: &writeCoordinator{
-						manager:            &cache.topWrites,
-						key:                "key",
+						manager:             &cache.topWrites,
+						key:                 "key",
 						committedGeneration: atomic.Uint64{},
 					},
 					generation: 1,
@@ -367,7 +367,7 @@ func TestHandleStaleLowerTierHit(t *testing.T) {
 		src := io.NopCloser(strings.NewReader("data"))
 		observedGen := &topWriteGeneration{
 			coord: &writeCoordinator{
-				manager:            &topWriteManager{},
+				manager:             &topWriteManager{},
 				committedGeneration: atomic.Uint64{},
 			},
 			generation: 1,
@@ -390,7 +390,7 @@ func TestHandleStaleLowerTierHit(t *testing.T) {
 		src := io.NopCloser(strings.NewReader("data"))
 		observedGen := &topWriteGeneration{
 			coord: &writeCoordinator{
-				manager:            &topWriteManager{},
+				manager:             &topWriteManager{},
 				committedGeneration: atomic.Uint64{},
 			},
 			generation: 1,
@@ -418,8 +418,8 @@ func TestCanAttemptExpectedTopWrite(t *testing.T) {
 		cache := &DaramjweeCache{}
 		gen := &topWriteGeneration{
 			coord: &writeCoordinator{
-				manager:            &topWriteManager{},
-				key:                "key",
+				manager:             &topWriteManager{},
+				key:                 "key",
 				committedGeneration: atomic.Uint64{},
 			},
 			generation: 1,
@@ -432,8 +432,8 @@ func TestCanAttemptExpectedTopWrite(t *testing.T) {
 		cache := &DaramjweeCache{}
 		gen := &topWriteGeneration{
 			coord: &writeCoordinator{
-				manager:            &cache.topWrites,
-				key:                "other",
+				manager:             &cache.topWrites,
+				key:                 "other",
 				committedGeneration: atomic.Uint64{},
 			},
 			generation: 1,
@@ -446,8 +446,8 @@ func TestCanAttemptExpectedTopWrite(t *testing.T) {
 		cache := &DaramjweeCache{}
 		gen := &topWriteGeneration{
 			coord: &writeCoordinator{
-				manager:            &cache.topWrites,
-				key:                "key",
+				manager:             &cache.topWrites,
+				key:                 "key",
 				committedGeneration: atomic.Uint64{},
 			},
 			generation: 1,
@@ -460,8 +460,8 @@ func TestCanAttemptExpectedTopWrite(t *testing.T) {
 		cache := &DaramjweeCache{}
 		gen := &topWriteGeneration{
 			coord: &writeCoordinator{
-				manager:            &cache.topWrites,
-				key:                "key",
+				manager:             &cache.topWrites,
+				key:                 "key",
 				committedGeneration: atomic.Uint64{},
 			},
 			generation: 1,

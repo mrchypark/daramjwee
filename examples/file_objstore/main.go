@@ -12,10 +12,11 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/thanos-io/objstore/client"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
-	"github.com/thanos-io/objstore/client"
 )
 
 // SimpleFetcher is a basic implementation of daramjwee.Fetcher.

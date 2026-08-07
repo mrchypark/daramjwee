@@ -2,13 +2,15 @@ package objectstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
 
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
 	"github.com/thanos-io/objstore"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func FuzzObjectStoreSequentialOperations(f *testing.F) {
@@ -56,7 +58,7 @@ func FuzzObjectStoreSequentialOperations(f *testing.F) {
 				got, gotMeta, err := readObjectStore(ctx, store, key)
 				want, ok := expected[key]
 				if !ok {
-					if err != daramjwee.ErrNotFound {
+					if !errors.Is(err, daramjwee.ErrNotFound) {
 						t.Fatalf("get(%q): expected not found, got value=%q meta=%+v err=%v", key, got, gotMeta, err)
 					}
 					continue
@@ -71,7 +73,7 @@ func FuzzObjectStoreSequentialOperations(f *testing.F) {
 				gotMeta, err := store.Stat(ctx, key)
 				want, ok := expected[key]
 				if !ok {
-					if err != daramjwee.ErrNotFound {
+					if !errors.Is(err, daramjwee.ErrNotFound) {
 						t.Fatalf("stat(%q): expected not found, got meta=%+v err=%v", key, gotMeta, err)
 					}
 					continue

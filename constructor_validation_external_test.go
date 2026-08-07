@@ -12,10 +12,11 @@ import (
 	"github.com/go-kit/log"
 	"github.com/stretchr/testify/require"
 
+	"github.com/thanos-io/objstore"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
-	"github.com/thanos-io/objstore"
 )
 
 func TestNew_RejectsTypedNilTier(t *testing.T) {

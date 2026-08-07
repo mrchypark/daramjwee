@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
 func TestCache_MissReturnsStreamBeforeSourceEOF(t *testing.T) {
@@ -186,7 +187,7 @@ func TestCache_MissFullReadWithoutExplicitClosePublishesAndReleasesKey(t *testin
 
 	current, meta, err = readStoreValue(context.Background(), hot, "auto-close-miss-key")
 	require.NoError(t, err)
-	assert.Equal(t, "user-value", string(current))
+	assert.Equal(t, "user-value", current)
 	assert.Equal(t, "user-v2", meta.CacheTag)
 }
 
@@ -239,7 +240,7 @@ func TestCache_LowerTierFullReadWithoutExplicitClosePublishesAndReleasesKey(t *t
 
 	current, meta, err = readStoreValue(context.Background(), hot, "auto-close-lower-key")
 	require.NoError(t, err)
-	assert.Equal(t, "user-value", string(current))
+	assert.Equal(t, "user-value", current)
 	assert.Equal(t, "user-v2", meta.CacheTag)
 }
 
@@ -1776,8 +1777,6 @@ func (f *contextBoundFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.
 	}, nil
 }
 
-
-
 type blockingColdStore struct {
 	streamFactory func() io.ReadCloser
 	metadata      *daramjwee.Metadata
@@ -2076,8 +2075,6 @@ func (f *errFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata)
 	return nil, f.err
 }
 
-
-
 type statOnlyThenReadableStore struct {
 	data     []byte
 	meta     *daramjwee.Metadata
@@ -2171,8 +2168,6 @@ func (s *singleEntryCloseErrorStore) Stat(ctx context.Context, key string) (*dar
 	meta := *s.meta
 	return &meta, nil
 }
-
-
 
 var errPublishFailed = assert.AnError
 

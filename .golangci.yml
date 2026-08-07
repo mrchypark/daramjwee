@@ -42,6 +42,14 @@ linters:
           - errcheck
           - gosec
         path: examples/
+      - linters:
+          - govet
+        text: "shadow"
+        path: _test\.go
+      - linters:
+          - govet
+        text: "shadow"
+        path: examples/
     paths:
       - third_party$
       - builtin$

@@ -56,7 +56,7 @@ func (s *AllStrategy) Submit(job Job) bool {
 	defer s.submitMu.Unlock()
 
 	if s.isShutdown {
-		level.Warn(s.logger).Log("msg", "worker is shutdown, dropping job")
+		_ = level.Warn(s.logger).Log("msg", "worker is shutdown, dropping job")
 		return false
 	}
 
@@ -87,7 +87,7 @@ func (s *AllStrategy) Shutdown(timeout time.Duration) error {
 	case <-doneCh:
 		return nil
 	case <-time.After(timeout):
-		level.Error(s.logger).Log("msg", "AllStrategy shutdown timed out", "timeout", timeout)
+		_ = level.Error(s.logger).Log("msg", "AllStrategy shutdown timed out", "timeout", timeout)
 		return ErrShutdownTimeout
 	}
 }

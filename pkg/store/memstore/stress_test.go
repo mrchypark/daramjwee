@@ -7,10 +7,11 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/policy"
 )
 
 // TestMemStore_EvictionStress verifies that MemStore's memory usage remains stable

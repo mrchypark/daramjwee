@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/stretchr/testify/require"
+	"github.com/thanos-io/objstore"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
-	"github.com/stretchr/testify/require"
-	"github.com/thanos-io/objstore"
 )
 
 func TestStore_BeginSetKeepsCommittedValueVisibleUntilClose(t *testing.T) {
@@ -39,7 +40,7 @@ func TestStore_BeginSetKeepsCommittedValueVisibleUntilClose(t *testing.T) {
 			},
 		},
 		{
-			name: "filestore-copywrite",
+			name: "filestore-copyright",
 			new: func(t *testing.T) daramjwee.Store {
 				t.Helper()
 				store, err := filestore.New(t.TempDir(), log.NewNopLogger(), filestore.WithCopyWrite())
@@ -121,7 +122,7 @@ func TestStore_DeleteDoesNotWaitForPendingBeginSet(t *testing.T) {
 			},
 		},
 		{
-			name: "filestore-copywrite",
+			name: "filestore-copyright",
 			new: func(t *testing.T) daramjwee.Store {
 				t.Helper()
 				store, err := filestore.New(t.TempDir(), log.NewNopLogger(), filestore.WithCopyWrite())

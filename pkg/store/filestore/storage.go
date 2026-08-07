@@ -18,6 +18,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/goccy/go-json"
+
 	"github.com/mrchypark/daramjwee"
 )
 
@@ -73,9 +74,9 @@ func (m storedMetadata) MarshalJSON() ([]byte, error) {
 		StoredKey  *string   `json:"__stored_key,omitempty"`
 	}
 	return json.Marshal(payload{
-		CacheTag:   m.Metadata.CacheTag,
-		IsNegative: m.Metadata.IsNegative,
-		CachedAt:   m.Metadata.CachedAt,
+		CacheTag:   m.CacheTag,
+		IsNegative: m.IsNegative,
+		CachedAt:   m.CachedAt,
 		StoredKey:  m.StoredKey,
 	})
 }
@@ -97,8 +98,8 @@ func (m *storedMetadata) UnmarshalJSON(data []byte) error {
 		IsNegative: p.IsNegative,
 		CachedAt:   p.CachedAt,
 	}
-	if m.Metadata.CacheTag == "" {
-		m.Metadata.CacheTag = p.LegacyETag
+	if m.CacheTag == "" {
+		m.CacheTag = p.LegacyETag
 	}
 	m.StoredKey = p.StoredKey
 	return nil
@@ -276,7 +277,7 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 
 	cleanupTemp := func() error {
 		if err := os.Remove(tmpFile.Name()); err != nil && !os.IsNotExist(err) {
-			level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", err)
+			_ = level.Warn(fs.logger).Log("msg", "failed to remove temporary file", "file", tmpFile.Name(), "err", err)
 			return err
 		}
 		return nil
@@ -329,7 +330,7 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 
 		// Update policy and size tracking after successful write
 		if err := fs.updateAfterSet(key, path); err != nil {
-			level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
+			_ = level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
 		}
 		fs.setGenerationFloor(key, generation)
 
@@ -337,7 +338,7 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 		fs.unlockPaths(locked)
 		locked = nil
 		if err := fs.removeLegacyPathOnly(key, nil); err != nil {
-			level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
+			_ = level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
 		}
 
 		return nil
@@ -678,7 +679,7 @@ func copyFile(src, dst string) (err error) {
 		}
 	}()
 
-	bufPtr := copyFilePool.Get().(*[]byte)
+	bufPtr, _ := copyFilePool.Get().(*[]byte)
 	defer copyFilePool.Put(bufPtr)
 	buf := *bufPtr
 
@@ -1008,7 +1009,7 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 			if len(filteredCandidates) == 0 {
 				// If only the current key was a candidate, we can't evict it now.
 				// This means the cache might temporarily exceed capacity.
-				level.Warn(fs.logger).Log("msg", "eviction failed, policy only suggested evicting the key being written", "key", key)
+				_ = level.Warn(fs.logger).Log("msg", "eviction failed, policy only suggested evicting the key being written", "key", key)
 				break
 			}
 
@@ -1031,14 +1032,14 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 	}
 	for _, keyToEvict := range keysToEvict {
 		if err := fs.evictKey(keyToEvict, heldSlots); err != nil {
-			level.Warn(fs.logger).Log("msg", "failed to evict file", "key", keyToEvict, "err", err)
+			_ = level.Warn(fs.logger).Log("msg", "failed to evict file", "key", keyToEvict, "err", err)
 			fs.mu.Lock()
 			if size, exists := fs.fileSizes[keyToEvict]; exists {
 				fs.policy.Add(keyToEvict, size)
 			}
 			fs.mu.Unlock()
 		} else {
-			level.Debug(fs.logger).Log("msg", "file evicted", "key", keyToEvict)
+			_ = level.Debug(fs.logger).Log("msg", "file evicted", "key", keyToEvict)
 		}
 	}
 

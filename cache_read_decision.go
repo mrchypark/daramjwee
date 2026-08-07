@@ -26,7 +26,7 @@ const (
 
 // lowerTierDecision holds the result of deciding how to handle a lower-tier hit.
 type lowerTierDecision struct {
-	action lowerTierAction
+	action  lowerTierAction
 	isStale bool
 }
 
@@ -66,4 +66,3 @@ func (c *DaramjweeCache) decideDirectServe(p lowerTierHitParams, meta *Metadata,
 	}
 	return lowerTierDecision{action: actionServeBodyDirect, isStale: false}
 }
-

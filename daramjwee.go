@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+
 	"github.com/mrchypark/daramjwee/internal/runtime"
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
@@ -473,7 +474,7 @@ func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID st
 		}
 	}
 
-	level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", cache.config.opTimeout)
+	_ = level.Info(logger).Log("msg", "daramjwee cache initialized", "op_timeout", cache.config.opTimeout)
 	return cache, nil
 }
 
@@ -519,7 +520,7 @@ func sameStoreInstance(a, b Store) bool {
 	va := reflect.ValueOf(a)
 	vb := reflect.ValueOf(b)
 	switch va.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:
 		return va.Pointer() == vb.Pointer()
 	default:
 		return false
@@ -533,7 +534,7 @@ func isNilStore(store Store) bool {
 
 	v := reflect.ValueOf(store)
 	switch v.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
 		return v.IsNil()
 	default:
 		return false
