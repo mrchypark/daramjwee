@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func FuzzScheduleRefreshBackgroundStateMachine(f *testing.F) {
@@ -138,8 +139,6 @@ func FuzzLowerTierFanoutStateMachine(f *testing.F) {
 		}
 	})
 }
-
-
 
 type cacheableNotFoundFetcher struct{}
 

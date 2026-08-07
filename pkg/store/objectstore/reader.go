@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/goccy/go-json"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/blockcache"
 	internalshard "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/shard"
@@ -139,7 +140,8 @@ func (s *Store) loadPackedBlock(ctx context.Context, remotePath string, blockInd
 	if err != nil {
 		return nil, err
 	}
-	return value.([]byte), nil
+	val, _ := value.([]byte)
+	return val, nil
 }
 
 func readUpToSize(reader io.Reader, size int64) ([]byte, error) {

@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func TestCache_ConcurrentCloseDeleteAndScheduleRefresh(t *testing.T) {

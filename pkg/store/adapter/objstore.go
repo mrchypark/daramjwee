@@ -2,15 +2,17 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/goccy/go-json"
+	"github.com/thanos-io/objstore"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
-	"github.com/thanos-io/objstore"
 )
 
 // NewObjstoreAdapter is a deprecated compatibility shim for pkg/store/objectstore.New.
@@ -49,7 +51,7 @@ func (a *objstoreAdapter) GetStream(ctx context.Context, key string) (io.ReadClo
 		if a.bucket.IsObjNotFoundErr(err) {
 			return nil, nil, daramjwee.ErrNotFound
 		}
-		level.Warn(a.logger).Log("msg", "failed to get legacy objstore data", "key", key, "err", err)
+		_ = level.Warn(a.logger).Log("msg", "failed to get legacy objstore data", "key", key, "err", err)
 		return nil, nil, fmt.Errorf("failed to get legacy object for key %q: %w", key, err)
 	}
 	return reader, meta, nil
@@ -108,7 +110,7 @@ func (a *objstoreAdapter) legacyStat(ctx context.Context, key string) (*daramjwe
 	}
 	defer func() {
 		if closeErr := reader.Close(); closeErr != nil {
-			level.Warn(a.logger).Log("msg", "failed to close legacy metadata reader", "key", key, "err", closeErr)
+			_ = level.Warn(a.logger).Log("msg", "failed to close legacy metadata reader", "key", key, "err", closeErr)
 		}
 	}()
 
@@ -137,5 +139,5 @@ func legacyMetaPath(key string) string {
 }
 
 func isNotFound(err error) bool {
-	return err == daramjwee.ErrNotFound
+	return errors.Is(err, daramjwee.ErrNotFound)
 }

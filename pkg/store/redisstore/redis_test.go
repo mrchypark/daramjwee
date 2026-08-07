@@ -13,11 +13,12 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 )
 
 func setupMiniRedis(t *testing.T) *miniredis.Miniredis {
@@ -321,24 +322,24 @@ func TestRedisStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 
 	store := New(client, log.NewNopLogger()).(*RedisStore)
 
-	sink, err := store.BeginStagedSet(nil, "staged-nil-context", &daramjwee.Metadata{CacheTag: "v1"})
+	sink, err := store.BeginStagedSet(context.Background(), "staged-nil-context", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = sink.Write([]byte("nil context staged"))
 	require.NoError(t, err)
-	require.NoError(t, sink.Commit(nil))
+	require.NoError(t, sink.Commit(context.Background()))
 
-	reader, meta, err := store.GetStream(nil, "staged-nil-context")
+	reader, meta, err := store.GetStream(context.Background(), "staged-nil-context")
 	require.NoError(t, err)
 	defer reader.Close()
 
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	require.Equal(t, "nil context staged", string(body))
-	require.Equal(t, "v1", meta.CacheTag)
-	stat, err := store.Stat(nil, "staged-nil-context")
+	assert.Equal(t, "nil context staged", string(body))
+	assert.Equal(t, "v1", meta.CacheTag)
+	stat, err := store.Stat(context.Background(), "staged-nil-context")
 	require.NoError(t, err)
-	require.Equal(t, "v1", stat.CacheTag)
-	require.NoError(t, store.Delete(nil, "staged-nil-context"))
+	assert.Equal(t, "v1", stat.CacheTag)
+	require.NoError(t, store.Delete(context.Background(), "staged-nil-context"))
 }
 
 func TestRedisStore_StagedAbortDeletesTempKey(t *testing.T) {

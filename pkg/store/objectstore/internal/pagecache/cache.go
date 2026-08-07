@@ -53,7 +53,8 @@ func (c *Cache) Get(key Key) ([]byte, bool) {
 		return nil, false
 	}
 	c.lru.MoveToFront(elem)
-	return elem.Value.(*entry).data, true
+	entry, _ := elem.Value.(*entry)
+	return entry.data, true
 }
 
 func (c *Cache) Set(key Key, data []byte) {
@@ -70,7 +71,7 @@ func (c *Cache) Set(key Key, data []byte) {
 	defer c.mu.Unlock()
 
 	if elem, ok := c.entries[key]; ok {
-		ent := elem.Value.(*entry)
+		ent, _ := elem.Value.(*entry)
 		c.current -= ent.size
 		ent.data = data
 		ent.size = size
@@ -92,7 +93,7 @@ func (c *Cache) evict() {
 		if back == nil {
 			return
 		}
-		ent := back.Value.(*entry)
+		ent, _ := back.Value.(*entry)
 		delete(c.entries, ent.key)
 		c.current -= ent.size
 		c.lru.Remove(back)

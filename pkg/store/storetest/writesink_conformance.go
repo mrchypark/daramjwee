@@ -5,9 +5,10 @@ import (
 	"io"
 	"testing"
 
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func RunWriteSinkConformance(t *testing.T, factory func(t *testing.T) daramjwee.Store) {

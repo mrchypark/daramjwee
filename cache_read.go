@@ -84,7 +84,7 @@ func (c *DaramjweeCache) handleLowerTierHit(p lowerTierHitParams) (*GetResponse,
 
 // serveLowerTierWithoutPromotion serves data from a lower tier when higher tiers
 // are dirty and promotion is not safe.
-func (c *DaramjweeCache) serveLowerTierWithoutPromotion(p lowerTierHitParams, isStale bool) (*GetResponse, error) {
+func (c *DaramjweeCache) serveLowerTierWithoutPromotion(p lowerTierHitParams, _ bool) (*GetResponse, error) {
 	if c.isConditionalRequestSatisfied(p.req, p.meta) {
 		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(p.src, p.cancel), p.meta), nil
 	}
@@ -222,39 +222,6 @@ func (c *DaramjweeCache) promotePositiveLowerTierHit(requestCtx, setupCtx contex
 	}), meta)
 }
 
-func (c *DaramjweeCache) promoteLowerTierHitToTop(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, metadata *Metadata, expectedGeneration *topWriteGeneration) error {
-	target := c.topWriteStore()
-	writer, err := c.setStreamToTopStoreWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metadata, expectedGeneration)
-	if err != nil {
-		if errors.Is(err, ErrTopWriteInvalidated) {
-			return lowerTierPromotionInvalidatedError{preserveBody: true}
-		}
-		closeErr := src.Close()
-		return errors.Join(err, closeErr)
-	}
-	if _, copyErr := io.Copy(writer, src); copyErr != nil {
-		abortErr := writer.Abort()
-		closeErr := src.Close()
-		return errors.Join(copyErr, abortErr, closeErr)
-	}
-	srcErr := src.Close()
-	if srcErr != nil {
-		abortErr := writer.Abort()
-		return errors.Join(srcErr, abortErr)
-	}
-	closeErr := writer.Close()
-	if closeErr != nil {
-		if errors.Is(closeErr, ErrTopWriteInvalidated) {
-			return errors.Join(lowerTierPromotionInvalidatedError{preserveBody: false}, closeErr)
-		}
-		return closeErr
-	}
-	if destinations := c.regularFanoutDestinations(tierIndex); len(destinations) > 0 {
-		c.schedulePersistFromCurrentTop(requestCtx, key, destinations...)
-	}
-	return nil
-}
-
 // handleMiss processes the logic when an object is not found in any tier.
 func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration *topWriteGeneration, higherTiersClean bool) (*GetResponse, error) {
 	c.debugLog("msg", "full cache miss, fetching from origin", "key", key)
@@ -281,7 +248,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 	return c.publishMissResult(requestCtx, setupCtx, key, result, cancel, expectedGeneration), nil
 }
 
-func (c *DaramjweeCache) handleMissFetchError(requestCtx, setupCtx context.Context, key string, req GetRequest, cancel context.CancelFunc, fetcher Fetcher, fetchErr error, expectedGeneration *topWriteGeneration, higherTiersClean bool) (*GetResponse, error) {
+func (c *DaramjweeCache) handleMissFetchError(requestCtx, setupCtx context.Context, key string, req GetRequest, cancel context.CancelFunc, _ Fetcher, fetchErr error, expectedGeneration *topWriteGeneration, higherTiersClean bool) (*GetResponse, error) {
 	if errors.Is(fetchErr, ErrCacheableNotFound) {
 		if !higherTiersClean {
 			cancel()

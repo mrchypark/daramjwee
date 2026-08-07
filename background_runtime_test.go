@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/stretchr/testify/require"
+
 	"github.com/mrchypark/daramjwee/internal/runtime"
 	"github.com/mrchypark/daramjwee/internal/worker"
-	"github.com/stretchr/testify/require"
 )
 
 func TestStandaloneRuntime_CloseCacheWaitsForJobCompletion(t *testing.T) {

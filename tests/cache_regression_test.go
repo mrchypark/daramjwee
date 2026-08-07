@@ -11,9 +11,10 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func TestScheduleRefresh_ReturnsErrorWhenWorkerQueueIsFull(t *testing.T) {
@@ -753,7 +754,7 @@ func TestCache_DeleteDoesNotAllowLowerTierPromotionWhileDeleteInProgress(t *test
 	key := "delete-fence-lower-tier"
 	seedMeta := &daramjwee.Metadata{CacheTag: "seed", CachedAt: time.Now()}
 	hot.setData(key, "seed", seedMeta)
-	cold.mockStore.setData(key, "seed", seedMeta)
+	cold.setData(key, "seed", seedMeta)
 
 	cache, err := daramjwee.New(
 		nil,
@@ -1064,8 +1065,6 @@ func (f blockingFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metad
 		return nil, daramjwee.ErrCacheableNotFound
 	}
 }
-
-
 
 func (f *controlledFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
 	select {

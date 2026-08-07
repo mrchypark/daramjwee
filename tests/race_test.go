@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/cache"
 	"github.com/mrchypark/daramjwee/pkg/policy"
@@ -68,14 +69,14 @@ func TestConcurrentAccess(t *testing.T) {
 
 					_, err := stringCache.Get(ctx, key, fetcher)
 					if err != nil {
-						errors <- fmt.Errorf("goroutine %d: Get failed: %v", id, err)
+						errors <- fmt.Errorf("goroutine %d: Get failed: %w", id, err)
 					}
 				} else {
 					// Set
 					value := fmt.Sprintf("set-value-%d-%d", id, j)
 					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "test"})
 					if err != nil && !isExpectedTopWriteConflict(err) {
-						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
+						errors <- fmt.Errorf("goroutine %d: Set failed: %w", id, err)
 					}
 				}
 			}
@@ -125,7 +126,7 @@ func TestConcurrentRefresh(t *testing.T) {
 
 			err := stringCache.ScheduleRefresh(ctx, key, fetcher)
 			if err != nil {
-				errors <- fmt.Errorf("goroutine %d: ScheduleRefresh failed: %v", id, err)
+				errors <- fmt.Errorf("goroutine %d: ScheduleRefresh failed: %w", id, err)
 			}
 		}(i)
 	}
@@ -173,14 +174,14 @@ func TestConcurrentMixedOperations(t *testing.T) {
 					})
 					_, err := stringCache.Get(ctx, key, fetcher)
 					if err != nil {
-						errors <- fmt.Errorf("goroutine %d: Get failed: %v", id, err)
+						errors <- fmt.Errorf("goroutine %d: Get failed: %w", id, err)
 					}
 
 				case 1: // Set
 					value := fmt.Sprintf("set-%d-%d", id, j)
 					err := stringCache.Set(ctx, key, value, &daramjwee.Metadata{CacheTag: "test"})
 					if err != nil && !isExpectedTopWriteConflict(err) {
-						errors <- fmt.Errorf("goroutine %d: Set failed: %v", id, err)
+						errors <- fmt.Errorf("goroutine %d: Set failed: %w", id, err)
 					}
 
 				case 2: // GetOrSet
@@ -189,13 +190,13 @@ func TestConcurrentMixedOperations(t *testing.T) {
 					}
 					_, err := stringCache.GetOrSet(ctx, key, factory)
 					if err != nil {
-						errors <- fmt.Errorf("goroutine %d: GetOrSet failed: %v", id, err)
+						errors <- fmt.Errorf("goroutine %d: GetOrSet failed: %w", id, err)
 					}
 
 				case 3: // Delete
 					err := stringCache.Delete(ctx, key)
 					if err != nil {
-						errors <- fmt.Errorf("goroutine %d: Delete failed: %v", id, err)
+						errors <- fmt.Errorf("goroutine %d: Delete failed: %w", id, err)
 					}
 				}
 			}

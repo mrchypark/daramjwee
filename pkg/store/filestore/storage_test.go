@@ -14,20 +14,16 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/goccy/go-json"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/policy"
 	"github.com/mrchypark/daramjwee/pkg/store/storetest"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func writeMetadata(w io.Writer, meta *daramjwee.Metadata) error {
 	return writeStoredMetadataEnvelope(w, storedMetadata{Metadata: derefMetadata(meta)})
-}
-
-func readMetadata(r io.Reader) (*daramjwee.Metadata, int64, error) {
-	meta, _, _, dataOffset, err := readStoredMetadata(r)
-	return meta, dataOffset, err
 }
 
 // setupTestStore is a helper to create a temporary filestore for testing.
@@ -40,7 +36,7 @@ func setupTestStore(t *testing.T, opts ...Option) *FileStore {
 		// Ensure all permissions are restored before removal
 		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				return nil // Ignore errors during cleanup walk
+				return nil //nolint:nilerr // Ignore errors during cleanup walk
 			}
 			_ = os.Chmod(path, 0755)
 			return nil

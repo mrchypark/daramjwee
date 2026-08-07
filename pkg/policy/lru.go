@@ -41,7 +41,8 @@ func (p *LRU) Add(key string, size int64) {
 	if elem, ok := p.cache[key]; ok {
 		// Item already exists, update its size and move to front.
 		p.ll.MoveToFront(elem)
-		elem.Value.(*lruEntry).size = size
+		entry, _ := elem.Value.(*lruEntry)
+		entry.size = size
 		return
 	}
 
@@ -73,7 +74,7 @@ func (p *LRU) Evict() []string {
 // corresponding map entry.
 func (p *LRU) removeElement(e *list.Element) *lruEntry {
 	p.ll.Remove(e)
-	entry := e.Value.(*lruEntry)
+	entry, _ := e.Value.(*lruEntry)
 	delete(p.cache, entry.key)
 	return entry
 }

@@ -79,7 +79,7 @@ func (m *topWriteManager) acquireCoordinatorIfPresent(key string) *writeCoordina
 		if !ok {
 			return nil
 		}
-		coord := value.(*writeCoordinator)
+		coord, _ := value.(*writeCoordinator)
 		coord.refMu.Lock()
 		current, stillPresent := m.coords.Load(key)
 		if !stillPresent || current != value {
@@ -164,7 +164,7 @@ func (m *fanoutWriteManager) lock(destTierIndex int, key string) func() {
 func (m *fanoutWriteManager) acquire(lockKey fanoutLockKey) *fanoutWriteLock {
 	for {
 		if existing, ok := m.locks.Load(lockKey); ok {
-			lock := existing.(*fanoutWriteLock)
+			lock, _ := existing.(*fanoutWriteLock)
 			lock.refMu.Lock()
 			current, stillPresent := m.locks.Load(lockKey)
 			if !stillPresent || current != existing {
@@ -181,7 +181,7 @@ func (m *fanoutWriteManager) acquire(lockKey fanoutLockKey) *fanoutWriteLock {
 		if !loaded {
 			return lock
 		}
-		resolved := actual.(*fanoutWriteLock)
+		resolved, _ := actual.(*fanoutWriteLock)
 		resolved.refMu.Lock()
 		current, stillPresent := m.locks.Load(lockKey)
 		if !stillPresent || current != actual {
@@ -546,13 +546,6 @@ func (c *writeCoordinator) begin(ctx context.Context, expected *uint64) (uint64,
 	return generation, nil
 }
 
-func (c *writeCoordinator) registerActiveFill(fill *topFillSink) {
-	c.init()
-	c.stateMu.Lock()
-	c.activeFill = fill
-	c.stateMu.Unlock()
-}
-
 func (c *writeCoordinator) unregisterActiveFill(fill *topFillSink) {
 	c.init()
 	c.stateMu.Lock()
@@ -654,12 +647,12 @@ func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, 
 		defer unblockFills()
 	}
 	if staging, ok := store.(StagingStore); ok {
-		generation, err := coord.reserve(ctx, expected)
+		generation, err := coord.reserve(ctx, expected) //nolint:govet // shadow: sequential error handling in same block
 		if err != nil {
 			coord.releaseReference()
 			return nil, err
 		}
-		sink, err := staging.BeginStagedSet(ctx, key, metadata)
+		sink, err := staging.BeginStagedSet(ctx, key, metadata) //nolint:govet // shadow: sequential error handling in same block
 		if err != nil {
 			coord.unregisterReservation(generation)
 			coord.releaseReference()
@@ -702,12 +695,12 @@ func (c *DaramjweeCache) setStreamToTopStoreBestEffortWithGeneration(ctx context
 		return nil, err
 	}
 	if staging, ok := store.(StagingStore); ok {
-		generation, err := coord.reserveBestEffort(ctx, expected)
+		generation, err := coord.reserveBestEffort(ctx, expected) //nolint:govet // shadow: sequential error handling in same block
 		if err != nil {
 			coord.releaseReference()
 			return nil, err
 		}
-		sink, err := staging.BeginStagedSet(ctx, key, metadata)
+		sink, err := staging.BeginStagedSet(ctx, key, metadata) //nolint:govet // shadow: sequential error handling in same block
 		if err != nil {
 			coord.unregisterReservation(generation)
 			coord.releaseReference()
@@ -770,7 +763,7 @@ func (c *DaramjweeCache) setStreamToTopStoreForFill(ctx context.Context, key str
 			coord.releaseReference()
 			return nil, err
 		}
-		sink, err := staging.BeginStagedSet(fillCtx, key, metadata)
+		sink, err := staging.BeginStagedSet(fillCtx, key, metadata) //nolint:govet // shadow: sequential error handling in same block
 		if err != nil {
 			fill.failBeginSet(err)
 			return nil, err

@@ -48,12 +48,13 @@ func (c *DaramjweeCache) diagnosticLog(event, key string, generation uint64, key
 	if c.config.loggingDisabled || c.logger == nil || !cacheDiagnosticsEnabled() {
 		return
 	}
-	diagnostic := []any{
+	diagnostic := make([]any, 0, 8+len(keyvals))
+	diagnostic = append(diagnostic,
 		"msg", "cache diagnostic",
 		"event", event,
 		"key", key,
 		"generation", generation,
-	}
+	)
 	diagnostic = append(diagnostic, keyvals...)
 	c.debugLog(diagnostic...)
 }

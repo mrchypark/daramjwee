@@ -11,14 +11,15 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-kit/log"
+	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/require"
+	"github.com/thanos-io/objstore"
+
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
 	"github.com/mrchypark/daramjwee/pkg/store/redisstore"
-	"github.com/redis/go-redis/v9"
-	"github.com/stretchr/testify/require"
-	"github.com/thanos-io/objstore"
 )
 
 const topWriteLivenessTimeout = 500 * time.Millisecond

@@ -17,10 +17,11 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 	"github.com/thanos-io/objstore"
 	azureprovider "github.com/thanos-io/objstore/providers/azure"
+
+	"github.com/mrchypark/daramjwee"
+	"github.com/mrchypark/daramjwee/pkg/store/storetest"
 )
 
 type providerStats struct {

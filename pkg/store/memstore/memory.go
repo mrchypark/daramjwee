@@ -92,7 +92,7 @@ func (ms *MemStore) BeginStagedSet(ctx context.Context, key string, metadata *da
 }
 
 func (ms *MemStore) beginSet(key string, metadata *daramjwee.Metadata) *memStoreSink {
-	buf := bufferPool.Get().(*bytes.Buffer)
+	buf, _ := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	return &memStoreSink{
 		ms:       ms,
@@ -261,5 +261,3 @@ func (w *memStoreSink) release() {
 	w.key = ""
 	w.metadata = nil
 }
-
-

@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 // TestScheduleRefresh_PersistsToCold ensures that when ScheduleRefresh updates

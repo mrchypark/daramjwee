@@ -10,7 +10,7 @@ import (
 func runJobSafely(logger log.Logger, job Job, ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			level.Error(logger).Log("msg", "worker job panicked", "panic", r)
+			_ = level.Error(logger).Log("msg", "worker job panicked", "panic", r)
 		}
 	}()
 

@@ -1,7 +1,7 @@
 package storetest
 
 import (
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // G505/G401: SHA1 is acceptable for non-security workload generation
 	"encoding/hex"
 	"fmt"
 )
@@ -64,7 +64,7 @@ func workloadDate(i int) string {
 }
 
 func workloadBody(category string, index, size int) []byte {
-	sum := sha1.Sum([]byte(fmt.Sprintf("%s-%03d", category, index)))
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s-%03d", category, index))) //nolint:gosec // G401: SHA1 is acceptable for non-security workload generation
 	pattern := []byte(hex.EncodeToString(sum[:]))
 	body := make([]byte, size)
 	for i := range body {

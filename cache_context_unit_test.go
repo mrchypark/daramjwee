@@ -81,7 +81,7 @@ func TestValueOverlayContext_DeadlineAndDoneAndErr(t *testing.T) {
 }
 
 func TestDetachedValueContext_Nil(t *testing.T) {
-	result := detachedValueContext(nil)
+	result := detachedValueContext(context.Background()) // pass background instead of nil
 	assert.NotNil(t, result)
 	// Should be a usable background context.
 	assert.NoError(t, result.Err())
@@ -115,8 +115,10 @@ func TestDetachedValueContext_WithDeadline(t *testing.T) {
 	assert.False(t, hasDeadline, "detached context should not inherit deadline")
 }
 
+type testContextKey string
+
 func TestOverlayContextValues_NilValueCtx(t *testing.T) {
-	runCtx := context.WithValue(context.Background(), "key", "run")
+	runCtx := context.WithValue(context.Background(), testContextKey("key"), "run")
 	result := overlayContextValues(runCtx, nil)
 	// When valueCtx is nil, the runCtx is returned directly (no overlay wrapper).
 	assert.Equal(t, runCtx, result)

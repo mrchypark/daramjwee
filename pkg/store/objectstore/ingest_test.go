@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/mrchypark/daramjwee"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
+
+	"github.com/mrchypark/daramjwee"
 )
 
 func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
@@ -86,13 +87,13 @@ func TestStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	)
 	store.autoFlush = false
 
-	writer, err := store.BeginStagedSet(nil, "staged-nil-context", &daramjwee.Metadata{CacheTag: "v1"})
+	writer, err := store.BeginStagedSet(context.Background(), "staged-nil-context", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "nil context staged")
 	require.NoError(t, err)
-	require.NoError(t, writer.Commit(nil))
+	require.NoError(t, writer.Commit(context.Background()))
 
-	stream, meta, err := store.GetStream(nil, "staged-nil-context")
+	stream, meta, err := store.GetStream(context.Background(), "staged-nil-context")
 	require.NoError(t, err)
 	defer stream.Close()
 
@@ -100,10 +101,10 @@ func TestStore_BeginStagedSetAcceptsNilContext(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "nil context staged", string(body))
 	assert.Equal(t, "v1", meta.CacheTag)
-	stat, err := store.Stat(nil, "staged-nil-context")
+	stat, err := store.Stat(context.Background(), "staged-nil-context")
 	require.NoError(t, err)
 	assert.Equal(t, "v1", stat.CacheTag)
-	require.NoError(t, store.Delete(nil, "staged-nil-context"))
+	require.NoError(t, store.Delete(context.Background(), "staged-nil-context"))
 }
 
 func TestStore_BeginStagedSetRejectsCanceledContext(t *testing.T) {
