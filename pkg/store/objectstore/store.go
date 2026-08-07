@@ -422,7 +422,7 @@ func (s *Store) loadManifest(ctx context.Context, key string) (*manifest, error)
 	}
 	defer func() {
 		if closeErr := reader.Close(); closeErr != nil {
-			level.Warn(s.logger).Log("msg", "failed to close manifest reader", "key", key, "err", closeErr)
+			_ = level.Warn(s.logger).Log("msg", "failed to close manifest reader", "key", key, "err", closeErr)
 		}
 	}()
 

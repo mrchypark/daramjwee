@@ -52,7 +52,7 @@ func (s *Store) releaseLocalSegment(segmentPath string) {
 			delete(s.reclaimableSegs, segmentPath)
 		}
 	} else {
-		level.Error(s.logger).Log("msg", "invalid refcount on segment release", "path", segmentPath, "refs", refs)
+		_ = level.Error(s.logger).Log("msg", "invalid refcount on segment release", "path", segmentPath, "refs", refs)
 	}
 	s.segmentRefsMu.Unlock()
 
@@ -82,6 +82,6 @@ func (s *Store) markLocalSegmentReclaimable(segmentPath string) {
 
 func (s *Store) reclaimLocalSegmentNow(segmentPath string) {
 	if err := removeLocalSegment(segmentPath); err != nil {
-		level.Warn(s.logger).Log("msg", "failed to reclaim local segment file", "path", segmentPath, "err", err)
+		_ = level.Warn(s.logger).Log("msg", "failed to reclaim local segment file", "path", segmentPath, "err", err)
 	}
 }

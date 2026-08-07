@@ -63,7 +63,7 @@ func (s *Store) scheduleFlushLocked() {
 	s.scheduleFlushAfter(delay, func() {
 		err := s.flushPending(context.Background())
 		if err != nil {
-			level.Warn(s.logger).Log("msg", "objectstore flush failed", "err", err)
+			_ = level.Warn(s.logger).Log("msg", "objectstore flush failed", "err", err)
 		}
 		s.flushMu.Lock()
 		s.flushScheduled = false

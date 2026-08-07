@@ -12,6 +12,9 @@ import (
 	"github.com/go-kit/log"
 )
 
+// Package-level nop cancel function to avoid allocation on hot path.
+var nopCancelFunc = func() {}
+
 var ErrCacheClosed = errors.New("daramjwee: cache is closed")
 var ErrNilMetadata = errors.New("daramjwee: nil metadata encountered")
 var ErrBackgroundJobRejected = errors.New("daramjwee: background job rejected")
@@ -71,8 +74,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 		topTierStream, topTierMeta, err := c.getStreamFromStore(ctx, c.tiers[0], key)
 		if err == nil {
 			// Top tier hit — no timeout context needed for the hot path
-			nopCancel := func() {}
-			resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, topTierStream, topTierMeta, nopCancel, topGenerationAtStart)
+			resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, topTierStream, topTierMeta, nopCancelFunc, topGenerationAtStart)
 			if respErr != nil {
 				return nil, respErr
 			}
@@ -285,8 +287,8 @@ func (c *safeCloser) Close() error {
 // provided by safeCloser when EOF is reached.
 func (c *safeCloser) ReadAll() ([]byte, error) {
 	// Use a reasonable initial buffer size to minimize allocations
-	buf := make([]byte, 0, 512)
-	readBuf := make([]byte, 512)
+	buf := make([]byte, 0, 4096)
+	readBuf := make([]byte, 4096)
 
 	for {
 		n, err := c.Read(readBuf)

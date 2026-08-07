@@ -77,7 +77,7 @@ func (c *DaramjweeCache) isTierCachedStale(oldMeta *Metadata, index int) bool {
 // newCtxWithTimeout applies the operation timeout to the context if no deadline is set.
 func (c *DaramjweeCache) newCtxWithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
+		return ctx, nopCancelFunc
 	}
 	return context.WithTimeout(ctx, c.config.opTimeout)
 }
