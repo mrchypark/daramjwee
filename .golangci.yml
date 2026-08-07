@@ -1,51 +1,61 @@
+version: "2"
 run:
-  timeout: 5m
   modules-download-mode: readonly
-
 linters:
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
     - bodyclose
     - durationcheck
     - errname
     - errorlint
-    - exportloopref
+    - gosec
     - makezero
+    - misspell
     - nilerr
     - noctx
     - prealloc
     - unconvert
     - unparam
     - wastedassign
-    - gosec
-    - misspell
+  settings:
+    errcheck:
+      check-type-assertions: true
+    gosec:
+      excludes:
+        - G104
+    govet:
+      enable:
+        - shadow
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - errcheck
+          - gosec
+          - unparam
+        path: _test\.go
+      - linters:
+          - errcheck
+          - gosec
+        path: examples/
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
     - goimports
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-  govet:
-    enable:
-      - shadow
-  goimports:
-    local-prefixes: github.com/mrchypark/daramjwee
-  gosec:
-    excludes:
-      - G104  # unhandled errors - too noisy for initial adoption
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-        - unparam
-    - path: examples/
-      linters:
-        - errcheck
-        - gosec
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/mrchypark/daramjwee
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

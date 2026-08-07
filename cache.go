@@ -254,7 +254,10 @@ type safeCloser struct {
 // newSafeCloser creates a new ReadCloser that executes a closeHandler
 // after the underlying ReadCloser is closed, with automatic EOF detection and safe duplicate close handling.
 func newSafeCloser(rc io.ReadCloser, h closeHandler) *safeCloser {
-	return pooledSafeCloser(rc, h)
+	return &safeCloser{
+		ReadCloser: rc,
+		handler:    h,
+	}
 }
 
 // Read reads from the underlying ReadCloser and automatically closes when EOF is reached.
@@ -272,7 +275,6 @@ func (c *safeCloser) Read(p []byte) (n int, err error) {
 // It uses sync.Once to ensure the close operation and handler are executed only once.
 func (c *safeCloser) Close() error {
 	c.closeOnce.Do(func() {
-		defer releaseSafeCloser(c)
 		defer c.handler.handle()
 		c.closeErr = c.ReadCloser.Close()
 	})

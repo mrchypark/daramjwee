@@ -67,6 +67,9 @@ func (b *byteReadCloser) Read(p []byte) (int, error) {
 }
 
 func (b *byteReadCloser) Close() error {
+	if b.data == nil {
+		return nil // already closed
+	}
 	b.data = nil
 	b.pos = 0
 	byteReadCloserPool.Put(b)

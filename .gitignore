@@ -31,3 +31,4 @@ go.work.sum <mcreference link="https://github.com/github/gitignore/blob/main/Go.
 examples/**/config_prod.yaml
 bench_results.txt
 coverage.outtests.test
+*.test

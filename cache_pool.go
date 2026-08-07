@@ -1,78 +1,8 @@
 package daramjwee
 
-import (
-	"io"
-	"sync"
-)
-
-// Metadata pool for reducing allocations on hot path.
-var metadataPool = sync.Pool{
-	New: func() any { return &Metadata{} },
-}
-
-// pooledCloneMetadata returns a pooled Metadata copy.
-// Caller must call releaseMetadata when done.
-func pooledCloneMetadata(meta *Metadata) *Metadata {
-	if meta == nil {
-		return nil
-	}
-	m, _ := metadataPool.Get().(*Metadata)
-	*m = *meta
-	return m
-}
-
-// releaseMetadata returns a Metadata to the pool.
-func releaseMetadata(m *Metadata) {
-	if m != nil {
-		*m = Metadata{}
-		metadataPool.Put(m)
-	}
-}
-
-// safeCloser pool for reducing allocations on hot path.
-var safeCloserPool = sync.Pool{
-	New: func() any { return &safeCloser{} },
-}
-
-// pooledSafeCloser returns a pooled safeCloser.
-func pooledSafeCloser(rc io.ReadCloser, h closeHandler) *safeCloser {
-	sc, _ := safeCloserPool.Get().(*safeCloser)
-	sc.ReadCloser = rc
-	sc.handler = h
-	sc.closeOnce = sync.Once{}
-	sc.closeErr = nil
-	return sc
-}
-
-// releaseSafeCloser returns a safeCloser to the pool.
-func releaseSafeCloser(sc *safeCloser) {
-	if sc != nil {
-		sc.ReadCloser = nil
-		sc.handler = nil
-		safeCloserPool.Put(sc)
-	}
-}
-
-// cancelOnCloseReadCloser pool.
-var cancelOnClosePool = sync.Pool{
-	New: func() any { return &cancelOnCloseReadCloser{} },
-}
-
-// pooledCancelOnCloseReadCloser returns a pooled cancelOnCloseReadCloser.
-func pooledCancelOnCloseReadCloser(rc io.ReadCloser, cancel func()) *cancelOnCloseReadCloser {
-	cc, _ := cancelOnClosePool.Get().(*cancelOnCloseReadCloser)
-	cc.ReadCloser = rc
-	cc.cancel = cancel
-	cc.closeOnce = sync.Once{}
-	cc.closeErr = nil
-	return cc
-}
-
-// releaseCancelOnCloseReadCloser returns a cancelOnCloseReadCloser to the pool.
-func releaseCancelOnCloseReadCloser(cc *cancelOnCloseReadCloser) {
-	if cc != nil {
-		cc.ReadCloser = nil
-		cc.cancel = nil
-		cancelOnClosePool.Put(cc)
-	}
-}
+// Note: safeCloser and cancelOnCloseReadCloser are NOT pooled because
+// their Close() methods return errors that callers read after the call,
+// creating a use-after-free race if the object is returned to pool inside Do().
+//
+// staleRefreshCallback IS pooled because its handle() method has no return value.
+// byteReadCloser IS pooled because its Close() return value is always nil.

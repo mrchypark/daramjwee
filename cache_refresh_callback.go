@@ -40,9 +40,11 @@ func newStaleRefreshCallback(cache *DaramjweeCache, requestCtx context.Context, 
 }
 
 func (s *staleRefreshCallback) handle() {
+	cancelFn := s.cancel
+	gen := s.observedGeneration
 	defer s.releaseToPool()
-	defer s.cancel()
-	defer s.observedGeneration.release()
+	defer cancelFn()
+	defer gen.release()
 	if err := s.cache.scheduleRefreshWithMetadata(
 		detachedValueContext(s.requestCtx), s.key, s.fetcher,
 		cloneMetadata(s.meta), s.source, s.observedGeneration,
