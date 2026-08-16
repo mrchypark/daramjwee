@@ -14,18 +14,27 @@ import (
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
-func TestStandaloneRuntime_CloseCacheWaitsForJobCompletion(t *testing.T) {
-	manager, err := worker.NewManager("pool", log.NewNopLogger(), 1, 1, time.Second)
+func newTestManager(t *testing.T) *worker.Manager {
+	t.Helper()
+	m, err := worker.NewManager("pool", log.NewNopLogger(), 1, 1, time.Second)
 	require.NoError(t, err)
+	return m
+}
+
+func TestStandaloneRuntime_CloseCacheWaitsForJobCompletion(t *testing.T) {
+	manager := newTestManager(t)
 
 	rt := runtime.NewStandalone(manager)
 	jobStarted := make(chan struct{})
 	releaseJob := make(chan struct{})
 
-	require.True(t, rt.Submit("cache", JobKindRefresh, func(ctx context.Context) {
-		close(jobStarted)
-		<-releaseJob
-	}))
+	err := rt.Submit("cache", JobKindRefresh, runtime.Job{
+		Run: func(ctx context.Context) {
+			close(jobStarted)
+			<-releaseJob
+		},
+	})
+	require.NoError(t, err)
 	<-jobStarted
 
 	done := make(chan error, 1)
@@ -45,19 +54,31 @@ func TestGroupRuntime_QueueIsolationAndLimitEnforcement(t *testing.T) {
 
 	blockA := make(chan struct{})
 	releaseA := make(chan struct{})
-	require.True(t, rt.Submit("cache-a", JobKindPersist, func(ctx context.Context) {
-		close(blockA)
-		<-releaseA
-	}))
+	err := rt.Submit("cache-a", JobKindPersist, runtime.Job{
+		Run: func(ctx context.Context) {
+			close(blockA)
+			<-releaseA
+		},
+	})
+	require.NoError(t, err)
 	<-blockA
-	require.True(t, rt.Submit("cache-a", JobKindPersist, func(ctx context.Context) {}))
-	require.False(t, rt.Submit("cache-a", JobKindPersist, func(ctx context.Context) {}))
 
-	require.True(t, rt.Submit("cache-b", JobKindPersist, func(ctx context.Context) {}))
+	err = rt.Submit("cache-a", JobKindPersist, runtime.Job{Run: func(ctx context.Context) {}})
+	require.NoError(t, err)
+
+	err = rt.Submit("cache-a", JobKindPersist, runtime.Job{Run: func(ctx context.Context) {}})
+	require.ErrorIs(t, err, runtime.ErrRejected)
+
+	err = rt.Submit("cache-b", JobKindPersist, runtime.Job{Run: func(ctx context.Context) {}})
+	require.NoError(t, err)
+
 	close(releaseA)
 
 	require.NoError(t, rt.CloseCache("cache-a", time.Second))
-	require.False(t, rt.Submit("cache-a", JobKindPersist, func(ctx context.Context) {}))
+
+	err = rt.Submit("cache-a", JobKindPersist, runtime.Job{Run: func(ctx context.Context) {}})
+	require.ErrorIs(t, err, runtime.ErrRejected)
+
 	require.NoError(t, rt.Shutdown(time.Second))
 }
 
@@ -70,20 +91,22 @@ func TestGroupRuntime_WeightedDequeueProgress(t *testing.T) {
 	var mu sync.Mutex
 	order := make([]string, 0, 3)
 	done := make(chan struct{})
-	record := func(name string) worker.Job {
-		return func(ctx context.Context) {
-			mu.Lock()
-			order = append(order, name)
-			if len(order) == 3 {
-				close(done)
-			}
-			mu.Unlock()
+	record := func(name string) runtime.Job {
+		return runtime.Job{
+			Run: func(ctx context.Context) {
+				mu.Lock()
+				order = append(order, name)
+				if len(order) == 3 {
+					close(done)
+				}
+				mu.Unlock()
+			},
 		}
 	}
 
-	require.True(t, rt.Submit("cache-a", JobKindPersist, record("A")))
-	require.True(t, rt.Submit("cache-a", JobKindPersist, record("A")))
-	require.True(t, rt.Submit("cache-b", JobKindPersist, record("B")))
+	require.NoError(t, rt.Submit("cache-a", JobKindPersist, record("A")))
+	require.NoError(t, rt.Submit("cache-a", JobKindPersist, record("A")))
+	require.NoError(t, rt.Submit("cache-b", JobKindPersist, record("B")))
 
 	select {
 	case <-done:
@@ -105,10 +128,13 @@ func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
 
 	jobReady := make(chan struct{})
 	releaseJob := make(chan struct{})
-	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {
-		close(jobReady)
-		<-releaseJob
-	}))
+	err := rt.Submit(cacheID, JobKindRefresh, runtime.Job{
+		Run: func(ctx context.Context) {
+			close(jobReady)
+			<-releaseJob
+		},
+	})
+	require.NoError(t, err)
 	<-jobReady
 
 	closeDone := make(chan error, 1)
@@ -128,7 +154,7 @@ func TestGroupRuntime_CloseCacheWaitsForDequeuedJobReservation(t *testing.T) {
 	require.NoError(t, rt.Shutdown(time.Second))
 }
 
-func TestGroupRuntime_CloseCacheRunsQueuedJobDropCleanupOnce(t *testing.T) {
+func TestGroupRuntime_CloseCacheDiscardsQueuedJobs(t *testing.T) {
 	rt := runtime.NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	const cacheID = "cache-drop-cleanup"
@@ -136,21 +162,28 @@ func TestGroupRuntime_CloseCacheRunsQueuedJobDropCleanupOnce(t *testing.T) {
 
 	activeStarted := make(chan struct{})
 	releaseActive := make(chan struct{})
-	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(context.Context) {
-		close(activeStarted)
-		<-releaseActive
-	}))
+	err := rt.Submit(cacheID, JobKindRefresh, runtime.Job{
+		Run: func(context.Context) {
+			close(activeStarted)
+			<-releaseActive
+		},
+	})
+	require.NoError(t, err)
 	<-activeStarted
 
 	var cleanupCalls atomic.Int32
 	cleanupDone := make(chan struct{})
-	require.True(t, rt.SubmitWithDropCleanup(cacheID, JobKindPersist, func(context.Context) {
-		t.Fatal("queued job ran after CloseCache")
-	}, func() {
-		if cleanupCalls.Add(1) == 1 {
-			close(cleanupDone)
-		}
-	}))
+	err = rt.Submit(cacheID, JobKindPersist, runtime.Job{
+		Run: func(context.Context) {
+			t.Fatal("queued job ran after CloseCache")
+		},
+		Discard: func(reason runtime.DropReason) {
+			if cleanupCalls.Add(1) == 1 {
+				close(cleanupDone)
+			}
+		},
+	})
+	require.NoError(t, err)
 
 	closeDone := make(chan error, 1)
 	go func() {
@@ -171,10 +204,13 @@ func TestGroupRuntime_CloseCache_IdempotentWhileJobActive(t *testing.T) {
 
 	jobReady := make(chan struct{})
 	releaseJob := make(chan struct{})
-	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {
-		close(jobReady)
-		<-releaseJob
-	}))
+	err := rt.Submit(cacheID, JobKindRefresh, runtime.Job{
+		Run: func(ctx context.Context) {
+			close(jobReady)
+			<-releaseJob
+		},
+	})
+	require.NoError(t, err)
 	<-jobReady
 
 	var firstReturned atomic.Bool
@@ -208,14 +244,20 @@ func TestGroupRuntime_RecoversPanickingJobAndContinues(t *testing.T) {
 	const cacheID = "cache-panic"
 	require.NoError(t, rt.Register(cacheID, CacheRuntimeConfig{Weight: 1, QueueLimit: 4}))
 
-	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {
-		panic("boom")
-	}))
+	err := rt.Submit(cacheID, JobKindRefresh, runtime.Job{
+		Run: func(ctx context.Context) {
+			panic("boom")
+		},
+	})
+	require.NoError(t, err)
 
 	secondDone := make(chan struct{})
-	require.True(t, rt.Submit(cacheID, JobKindRefresh, func(ctx context.Context) {
-		close(secondDone)
-	}))
+	err = rt.Submit(cacheID, JobKindRefresh, runtime.Job{
+		Run: func(ctx context.Context) {
+			close(secondDone)
+		},
+	})
+	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
 		select {
