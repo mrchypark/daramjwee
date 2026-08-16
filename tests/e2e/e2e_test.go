@@ -425,11 +425,15 @@ func TestE2E_StaleWhileRevalidate(t *testing.T) {
 	require.Equal(t, 1, o.hitCount("fresh"))
 
 	o.set("fresh", "fresh-v2", "v2")
-	time.Sleep(200 * time.Millisecond) // let the entry go stale
 
-	// Stale serve: the response is the old value and a background refresh starts.
+	// Wait until the cache entry is stale, then request: the cache must serve
+	// the stale value immediately while scheduling a background refresh.
+	require.Eventually(t, func() bool {
+		status, _, _ := get(t, p.url()+"/objects/fresh")
+		return status == http.StatusOK
+	}, 2*time.Second, 10*time.Millisecond)
 	_, _, body = get(t, p.url()+"/objects/fresh")
-	require.Equal(t, "fresh-v1", body)
+	require.Equal(t, "fresh-v1", body, "stale entry must be served immediately")
 
 	// The background refresh updates the entry from the origin.
 	require.Eventually(t, func() bool {
@@ -486,27 +490,28 @@ func TestE2E_ConcurrentColdRequestsCoalesce(t *testing.T) {
 	cache := newCache(t, daramjwee.WithTiers(memstore.New(0, nil)))
 	p := newProxy(t, cache, o)
 
+	type concResult struct {
+		status int
+		body   string
+		err    error
+	}
 	const callers = 20
 	var wg sync.WaitGroup
-	var failures atomic.Int32
-	results := make([]string, callers)
+	results := make([]concResult, callers)
 	for i := 0; i < callers; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
 			status, _, body := get(t, p.url()+"/objects/hot")
-			if status != http.StatusOK || body != "shared-value" {
-				failures.Add(1)
-				return
-			}
-			results[idx] = body
+			results[idx] = concResult{status: status, body: body}
 		}(i)
 	}
 	wg.Wait()
 
-	require.Zero(t, failures.Load())
-	for _, body := range results {
-		require.Equal(t, "shared-value", body)
+	for i, r := range results {
+		require.NoError(t, r.err, "caller %d", i)
+		require.Equal(t, http.StatusOK, r.status, "caller %d", i)
+		require.Equal(t, "shared-value", r.body, "caller %d", i)
 	}
 	require.Equal(t, 1, o.hitCount("hot"), "concurrent cold requests must share one origin fetch")
 }
@@ -700,6 +705,59 @@ func TestE2E_PromotionProbation(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
 	require.Equal(t, 0, o.hitCount("probe"), "lower-tier hits must not touch the origin")
+}
+
+// TestE2E_LeaderBodyStillOpenWaiterArrives verifies that a caller arriving
+// after the leader returned its response but before the leader's body closes
+// joins as a waiter and does not trigger a duplicate origin fetch. This is
+// the E2E regression test for the "tie miss-leader lifecycle to fill
+// completion" fix.
+func TestE2E_LeaderBodyStillOpenWaiterArrives(t *testing.T) {
+	o := newOrigin(t)
+	o.delay = 300 * time.Millisecond // slow origin: leader body stays open
+	o.set("slow", "slow-value", "slow-v1")
+	cache := newCache(t,
+		daramjwee.WithTiers(memstore.New(0, nil)),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+	)
+	p := newProxy(t, cache, o)
+
+	// Leader: fetches from the slow origin — response body is streaming.
+	leaderReq, err := http.NewRequestWithContext(context.Background(), http.MethodGet, p.url()+"/objects/slow", nil)
+	require.NoError(t, err)
+	leaderResp, err := http.DefaultClient.Do(leaderReq)
+	require.NoError(t, err)
+	defer leaderResp.Body.Close()
+	require.Equal(t, http.StatusOK, leaderResp.StatusCode)
+
+	// Waiter: arrives while the leader's stream is still open.
+	waiterDone := make(chan struct {
+		status int
+		body   string
+	}, 1)
+	go func() {
+		status, _, body := get(t, p.url()+"/objects/slow")
+		waiterDone <- struct {
+			status int
+			body   string
+		}{status: status, body: body}
+	}()
+
+	// The waiter must not trigger a second origin fetch.
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, 1, o.hitCount("slow"), "waiter must not duplicate the origin fetch while the leader streams")
+
+	// Finish the leader: read the full body and close.
+	body, err := io.ReadAll(leaderResp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "slow-value", string(body))
+	require.NoError(t, leaderResp.Body.Close())
+
+	// The waiter completes — served from the top tier without an extra fetch.
+	waiter := <-waiterDone
+	require.Equal(t, http.StatusOK, waiter.status)
+	require.Equal(t, "slow-value", waiter.body)
+	require.Equal(t, 1, o.hitCount("slow"), "waiter served from top tier after leader published")
 }
 
 // TestE2E_PutThenGetRoundTrip exercises the Set API through the proxy.
