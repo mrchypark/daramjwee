@@ -547,8 +547,11 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 		}
 	}
 
+	// Copy sinkErr before returning tee to pool to avoid use-after-free.
+	sinkErr := tee.sinkErr
 	tee.dst = nil
 	tee.sink = nil
+	tee.sinkErr = nil
 	teeWriterPool.Put(tee)
 
 	r.mu.Lock()
@@ -558,10 +561,10 @@ func (r *fillReadCloser) WriteTo(dst io.Writer) (int64, error) {
 		r.mu.Unlock()
 		return written, autoFinalizeError(r.Close())
 	}
-	if tee.sinkErr != nil {
-		r.sinkErr = tee.sinkErr
-		r.traceEvent("stream_through_write_to_sink_error", "bytes", written, "err", tee.sinkErr)
-		if readErr := withoutError(err, tee.sinkErr); readErr != nil {
+	if sinkErr != nil {
+		r.sinkErr = sinkErr
+		r.traceEvent("stream_through_write_to_sink_error", "bytes", written, "err", sinkErr)
+		if readErr := withoutError(err, sinkErr); readErr != nil {
 			r.readErr = readErr
 		}
 	} else {

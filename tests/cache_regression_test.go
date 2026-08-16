@@ -794,12 +794,12 @@ func TestCache_DeleteDoesNotAllowLowerTierPromotionWhileDeleteInProgress(t *test
 }
 
 func TestCache_ConditionalLowerTierHitDoesNotReturnNotModifiedWhenPromotionInvalidated(t *testing.T) {
-	top := &blockingDeleteStore{
+	top := newMockStore()
+	lower := &blockingDeleteStore{
 		mockStore: newMockStore(),
 		started:   make(chan struct{}, 1),
 		blocker:   make(chan struct{}),
 	}
-	lower := newMockStore()
 	lower.setData("conditional-lower-race", "cached-value", &daramjwee.Metadata{
 		CacheTag: "cache-v1",
 		CachedAt: time.Now(),
@@ -820,9 +820,9 @@ func TestCache_ConditionalLowerTierHitDoesNotReturnNotModifiedWhenPromotionInval
 	}()
 
 	select {
-	case <-top.started:
+	case <-lower.started:
 	case <-time.After(2 * time.Second):
-		t.Fatal("top-tier delete did not start")
+		t.Fatal("lower-tier delete did not start")
 	}
 
 	resp, err := cache.Get(context.Background(), "conditional-lower-race", daramjwee.GetRequest{IfNoneMatch: "cache-v1"}, noopFetcher{})
@@ -833,7 +833,7 @@ func TestCache_ConditionalLowerTierHitDoesNotReturnNotModifiedWhenPromotionInval
 	require.Equal(t, "cached-value", string(body))
 	require.NoError(t, resp.Close())
 
-	close(top.blocker)
+	close(lower.blocker)
 	require.NoError(t, <-deleteDone)
 }
 

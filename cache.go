@@ -51,6 +51,9 @@ type DaramjweeCache struct {
 	config       cacheConfig
 	closeHook    func()
 	isClosed     atomic.Bool
+	closeOnce    sync.Once
+	closeDone    chan struct{}
+	closeErr     error
 	topWrites    topWriteManager
 	fanoutWrites fanoutWriteManager
 }
@@ -162,6 +165,8 @@ func (c *DaramjweeCache) Set(ctx context.Context, key string, metadata *Metadata
 }
 
 // Delete sequentially deletes an object from all tiers to prevent deadlocks.
+// Deletion order is bottom-up: lower tiers are deleted before the top tier
+// to prevent resurrection of deleted values through lower-tier promotion.
 func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 	if c.isClosed.Load() {
 		return ErrCacheClosed
@@ -182,26 +187,19 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 		coord.releaseReference()
 	}()
 	var firstErr error
-	top := c.topWriteStore()
-	startIndex := 0
-	if hasRealStore(top) {
-		topErr := c.deleteFromStore(ctx, top, key)
-		if topErr == nil || errors.Is(topErr, ErrNotFound) {
-			topDeleteSucceeded = true
-		} else {
-			c.errorLog("msg", "failed to delete from tier", "key", key, "tier_index", 0, "err", topErr)
-			firstErr = topErr
-		}
-		startIndex = 1
-	}
-
-	for i := startIndex; i < len(c.tiers); i++ {
+	// Bottom-up deletion: delete lower tiers first, then top tier last.
+	for i := len(c.tiers) - 1; i >= 0; i-- {
 		tier := c.tiers[i]
+		if !hasRealStore(tier) {
+			continue
+		}
 		if err := c.deleteFromStore(ctx, tier, key); err != nil && !errors.Is(err, ErrNotFound) {
 			c.errorLog("msg", "failed to delete from tier", "key", key, "tier_index", i, "err", err)
 			if firstErr == nil {
 				firstErr = err
 			}
+		} else if i == 0 && (err == nil || errors.Is(err, ErrNotFound)) {
+			topDeleteSucceeded = true
 		}
 	}
 
@@ -209,24 +207,34 @@ func (c *DaramjweeCache) Delete(ctx context.Context, key string) error {
 }
 
 // Close safely shuts down the worker.
+// Multiple calls are safe: the first call performs the shutdown and subsequent
+// calls block until the first shutdown completes, then return the same result.
 func (c *DaramjweeCache) Close() {
-	if c.isClosed.Swap(true) {
-		// Already closed, do nothing (prevent duplicate calls)
-		return
-	}
+	c.closeOnce.Do(func() {
+		c.closeDone = make(chan struct{})
+		defer close(c.closeDone)
 
-	if c.runtime != nil {
-		c.infoLog("msg", "shutting down daramjwee cache")
-		if err := c.runtime.CloseCache(c.cacheID, c.config.closeTimeout); err != nil {
-			c.errorLog("msg", "graceful shutdown failed", "err", err)
-		} else {
-			c.infoLog("msg", "daramjwee cache shutdown complete")
+		if !c.isClosed.Swap(true) {
+			if c.runtime != nil {
+				c.infoLog("msg", "shutting down daramjwee cache")
+				if err := c.runtime.CloseCache(c.cacheID, c.config.closeTimeout); err != nil {
+					c.errorLog("msg", "graceful shutdown failed", "err", err)
+					c.closeErr = err
+				} else {
+					c.infoLog("msg", "daramjwee cache shutdown complete")
+				}
+				c.runtime.RemoveCache(c.cacheID)
+			}
+
+			if hook := c.closeHook; hook != nil {
+				hook()
+			}
 		}
-		c.runtime.RemoveCache(c.cacheID)
-	}
+	})
 
-	if hook := c.closeHook; hook != nil {
-		hook()
+	// Wait for the first Close to complete.
+	if c.closeDone != nil {
+		<-c.closeDone
 	}
 }
 

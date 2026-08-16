@@ -111,6 +111,10 @@ type Store struct {
 	autoFlush          bool
 	now                func() time.Time
 	openSegmentWriter  func(root, shard, segmentID string) (segmentWriter, error)
+	isClosed           atomic.Bool
+	closeOnce          sync.Once
+	closeDone          chan struct{}
+	closeErr           error
 }
 
 func (s *Store) GetStreamUsesContext() bool { return true }
@@ -200,6 +204,34 @@ func (s *Store) ValidateTier(index int) error {
 		return fmt.Errorf("objectstore: initialization failed: %w", s.initErr)
 	}
 	return nil
+}
+
+// Close gracefully shuts down the objectstore, flushing any pending writes.
+// Multiple calls are safe: only the first call performs the shutdown.
+func (s *Store) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeDone = make(chan struct{})
+		defer close(s.closeDone)
+
+		if s.isClosed.Swap(true) {
+			return
+		}
+
+		s.flushMu.Lock()
+		s.autoFlush = false
+		s.flushMu.Unlock()
+
+		// Flush any pending writes.
+		if err := s.flushPending(context.Background()); err != nil {
+			s.closeErr = fmt.Errorf("objectstore: flush on close: %w", err)
+			_ = level.Warn(s.logger).Log("msg", "objectstore flush on close failed", "err", err)
+		}
+	})
+
+	if s.closeDone != nil {
+		<-s.closeDone
+	}
+	return s.closeErr
 }
 
 // GetStream returns the current published generation for a key.
