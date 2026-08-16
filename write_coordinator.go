@@ -208,6 +208,19 @@ func (m *topWriteManager) currentGeneration(key string) *topWriteGeneration {
 	return &topWriteGeneration{coord: coord, generation: coord.current()}
 }
 
+// snapshotGeneration returns a non-creating generation snapshot for key.
+// coord is nil when no write coordinator has ever existed for the key, in
+// which case the effective generation is 0. Callers that need a live
+// reference must retain the coordinator via retainReference.
+func (m *topWriteManager) snapshotGeneration(key string) (*writeCoordinator, uint64) {
+	value, ok := m.coords.Load(key)
+	if !ok {
+		return nil, 0
+	}
+	coord, _ := value.(*writeCoordinator)
+	return coord, coord.committedGeneration.Load()
+}
+
 func (c *writeCoordinator) current() uint64 {
 	c.init()
 	return c.committedGeneration.Load()

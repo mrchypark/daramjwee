@@ -99,14 +99,20 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 
 	// Fast path: try top tier without timeout context
 	if len(c.tiers) > 0 {
+		// Snapshot the top-write generation BEFORE the tier-0 read so a
+		// stale refresh scheduled from this hit keeps the eager
+		// invalidation semantics: any write committed after this snapshot
+		// invalidates the refresh. The snapshot is non-creating, so fresh
+		// hits on never-written keys stay free of coordinator overhead.
+		snapCoord, snapGen := c.topWrites.snapshotGeneration(key)
+
 		topTierStream, topTierMeta, err := c.getStreamFromStore(ctx, c.tiers[0], key)
 		if err == nil {
 			// Top tier hit — no timeout context needed for the hot path.
-			// The top-write generation snapshot is captured lazily inside
+			// The live generation reference is materialized lazily inside
 			// handleTopTierHit only when the entry is stale and a background
-			// refresh must be scheduled, keeping the fresh-hit path free of
-			// write-coordinator lookups.
-			resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, topTierStream, topTierMeta, nopCancelFunc, nil)
+			// refresh must be scheduled.
+			resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, topTierStream, topTierMeta, nopCancelFunc, nil, snapCoord, snapGen)
 			if respErr != nil {
 				return nil, respErr
 			}
@@ -131,7 +137,7 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 				// concurrent fill published between the fast-path miss and
 				// this lookup. Handle it as a proper top-tier hit instead of
 				// continuing with a canceled setup context.
-				resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart)
+				resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart, nil, 0)
 				if respErr != nil {
 					cancel()
 					return nil, respErr

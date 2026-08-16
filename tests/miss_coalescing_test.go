@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +13,83 @@ import (
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
+
+// countingBlockingFetcher returns a blocking stream and counts fetches.
+type countingBlockingFetcher struct {
+	source     *blockingReadCloser
+	metadata   *daramjwee.Metadata
+	fetchCount atomic.Int32
+}
+
+func (f *countingBlockingFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	f.fetchCount.Add(1)
+	return &daramjwee.FetchResult{
+		Body:     f.source,
+		Metadata: f.metadata,
+	}, nil
+}
+
+// TestMissCoalescing_NoDuplicateFetchWhileLeaderStreams verifies that a
+// caller arriving after the leader returned its response but before the
+// leader's stream closed joins as a waiter instead of fetching the origin
+// again, and is served from the top tier once the fill publishes.
+func TestMissCoalescing_NoDuplicateFetchWhileLeaderStreams(t *testing.T) {
+	hot := memstore.New(0, nil)
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithOpTimeout(5*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	source := newBlockingReadCloser([]byte("origin"), []byte("-value"))
+	fetcher := &countingBlockingFetcher{
+		source:   source,
+		metadata: &daramjwee.Metadata{CacheTag: "v1"},
+	}
+
+	// Leader: first read returns "origin", then the stream blocks.
+	leaderResp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, fetcher)
+	require.NoError(t, err)
+
+	first := make([]byte, len("origin"))
+	n, err := io.ReadFull(leaderResp, first)
+	require.NoError(t, err)
+	require.Equal(t, "origin", string(first[:n]))
+
+	// Waiter arrives while the leader's stream is still open.
+	type waiterResult struct {
+		resp *daramjwee.GetResponse
+		err  error
+	}
+	waiterDone := make(chan waiterResult, 1)
+	go func() {
+		resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, fetcher)
+		waiterDone <- waiterResult{resp: resp, err: err}
+	}()
+
+	// The waiter must not trigger a second fetch while the leader streams.
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(1), fetcher.fetchCount.Load())
+
+	// Finish the leader: release the source, drain and close.
+	source.Release()
+	rest, err := io.ReadAll(leaderResp)
+	require.NoError(t, err)
+	require.Equal(t, "-value", string(rest))
+	require.NoError(t, leaderResp.Close())
+
+	// The waiter completes from the top tier without an extra fetch.
+	waiter := <-waiterDone
+	require.NoError(t, waiter.err)
+	require.NotNil(t, waiter.resp)
+	body, err := io.ReadAll(waiter.resp)
+	require.NoError(t, err)
+	require.Equal(t, "origin-value", string(body))
+	require.NoError(t, waiter.resp.Close())
+	require.Equal(t, int32(1), fetcher.fetchCount.Load())
+}
 
 // TestMissCoalescing_ConcurrentMissesShareOriginFetch verifies that
 // concurrent misses for the same key coalesce into a single origin fetch

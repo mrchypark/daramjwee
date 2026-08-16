@@ -28,6 +28,19 @@ func (l *missLead) signal() {
 	l.signalOn.Do(func() { close(l.done) })
 }
 
+// finished reports whether the lead's lifecycle already ended.
+func (l *missLead) finished() bool {
+	if l == nil || l.done == nil {
+		return true
+	}
+	select {
+	case <-l.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // wait blocks until the leader finishes, the context is done, or the
 // internal wait cap elapses. It returns true when the caller should stop
 // waiting (timeout or context cancellation).
@@ -54,15 +67,24 @@ type missCoordinator struct {
 
 // tryLead attempts to become the miss leader for key. It returns the lead
 // and true when this call won the leadership, otherwise the current lead
-// and false.
+// and false. Finished leads are replaced atomically.
 func (m *missCoordinator) tryLead(key string) (*missLead, bool) {
-	lead := &missLead{done: make(chan struct{})}
-	existing, loaded := m.leads.LoadOrStore(key, lead)
-	if loaded {
-		current, _ := existing.(*missLead)
-		return current, false
+	for {
+		if existing, ok := m.leads.Load(key); ok {
+			lead, _ := existing.(*missLead)
+			if lead.finished() {
+				// Leader lifecycle ended: replace it so new callers can
+				// take over without waiting on a stale lead.
+				m.leads.CompareAndDelete(key, lead)
+				continue
+			}
+			return lead, false
+		}
+		lead := &missLead{done: make(chan struct{})}
+		if _, loaded := m.leads.LoadOrStore(key, lead); !loaded {
+			return lead, true
+		}
 	}
-	return lead, true
 }
 
 // current returns the active miss leader for key, if any.
@@ -85,17 +107,24 @@ func (m *missCoordinator) release(key string, lead *missLead) {
 
 // missSignalReadCloser signals the miss lead when the response body is
 // closed, which is the point where a streaming miss fill becomes visible
-// in the top tier (or is aborted).
+// in the top tier (or is aborted). onDone runs once after the signal and
+// is used to release the leader registration exactly at fill completion.
 type missSignalReadCloser struct {
 	io.ReadCloser
-	once sync.Once
-	done chan struct{}
+	once   sync.Once
+	done   chan struct{}
+	onDone func()
 }
 
 func (r *missSignalReadCloser) Close() error {
 	err := r.ReadCloser.Close()
 	if r.done != nil {
-		r.once.Do(func() { close(r.done) })
+		r.once.Do(func() {
+			close(r.done)
+			if r.onDone != nil {
+				r.onDone()
+			}
+		})
 	}
 	return err
 }
