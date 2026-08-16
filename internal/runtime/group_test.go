@@ -66,87 +66,90 @@ func TestGroup_Submit(t *testing.T) {
 	jobStarted := make(chan struct{})
 	releaseJob := make(chan struct{})
 
-	require.True(t, rt.Submit("cache-a", JobKindRefresh, func(ctx context.Context) {
-		close(jobStarted)
-		<-releaseJob
-	}))
+	err := rt.Submit("cache-a", JobKindRefresh, Job{
+		Run: func(ctx context.Context) {
+			close(jobStarted)
+			<-releaseJob
+		},
+	})
+	require.NoError(t, err)
 	<-jobStarted
 
 	close(releaseJob)
 	require.NoError(t, rt.Shutdown(time.Second))
 }
 
-func TestGroup_SubmitWithDropCleanup_Success(t *testing.T) {
-	rt := NewGroup(log.NewNopLogger(), 1, time.Second)
-
-	require.NoError(t, rt.Register("cache-a", Config{Weight: 1, QueueLimit: 4}))
-
-	jobStarted := make(chan struct{})
-	releaseJob := make(chan struct{})
-	onDropCalled := false
-
-	require.True(t, rt.SubmitWithDropCleanup("cache-a", JobKindRefresh, func(ctx context.Context) {
-		close(jobStarted)
-		<-releaseJob
-	}, func() {
-		onDropCalled = true
-	}))
-	<-jobStarted
-
-	close(releaseJob)
-	require.NoError(t, rt.Shutdown(time.Second))
-	require.False(t, onDropCalled, "onDrop should not be called on successful job completion")
-}
-
-func TestGroup_SubmitWithDropCleanup_ClosedCache(t *testing.T) {
+func TestGroup_Submit_DiscardOnReject(t *testing.T) {
 	rt := NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	require.NoError(t, rt.Register("cache-a", Config{Weight: 1, QueueLimit: 4}))
 	require.NoError(t, rt.CloseCache("cache-a", time.Second))
 
-	require.False(t, rt.SubmitWithDropCleanup("cache-a", JobKindRefresh, func(ctx context.Context) {
-		t.Fatal("job should not be executed")
-	}, nil))
+	discardCalled := false
+	err := rt.Submit("cache-a", JobKindRefresh, Job{
+		Run: func(ctx context.Context) {
+			t.Fatal("job should not be executed")
+		},
+		Discard: func(reason DropReason) {
+			discardCalled = true
+			require.Equal(t, DropReasonRejected, reason)
+		},
+	})
+	require.ErrorIs(t, err, ErrRejected)
+	require.True(t, discardCalled, "Discard should be called when job is rejected")
 
 	require.NoError(t, rt.Shutdown(time.Second))
 }
 
-func TestGroup_CloseCache_DropsQueuedJobs(t *testing.T) {
+func TestGroup_CloseCache_DiscardsQueuedJobs(t *testing.T) {
 	rt := NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	require.NoError(t, rt.Register("cache-a", Config{Weight: 1, QueueLimit: 4}))
 
-	onDropCalled := false
-	require.True(t, rt.SubmitWithDropCleanup("cache-a", JobKindRefresh, func(ctx context.Context) {
-		time.Sleep(10 * time.Second)
-	}, func() {
-		onDropCalled = true
-	}))
+	discardCalled := false
+	err := rt.Submit("cache-a", JobKindRefresh, Job{
+		Run: func(ctx context.Context) {
+			time.Sleep(10 * time.Second)
+		},
+		Discard: func(reason DropReason) {
+			discardCalled = true
+			require.Equal(t, DropReasonShutdown, reason)
+		},
+	})
+	require.NoError(t, err)
 
 	require.NoError(t, rt.CloseCache("cache-a", time.Second))
-	require.True(t, onDropCalled, "onDrop should be called for dropped jobs")
+	require.True(t, discardCalled, "Discard should be called for dropped jobs")
 }
 
-func TestGroup_Shutdown_DropsAllJobs(t *testing.T) {
+func TestGroup_Shutdown_DiscardsAllJobs(t *testing.T) {
 	rt := NewGroup(log.NewNopLogger(), 1, time.Second)
 
 	require.NoError(t, rt.Register("cache-a", Config{Weight: 1, QueueLimit: 4}))
 
-	onDropCalled := false
-	require.True(t, rt.SubmitWithDropCleanup("cache-a", JobKindRefresh, func(ctx context.Context) {
-		time.Sleep(10 * time.Second)
-	}, func() {
-		onDropCalled = true
-	}))
+	discardCalled := false
+	err := rt.Submit("cache-a", JobKindRefresh, Job{
+		Run: func(ctx context.Context) {
+			time.Sleep(10 * time.Second)
+		},
+		Discard: func(reason DropReason) {
+			discardCalled = true
+			require.Equal(t, DropReasonShutdown, reason)
+		},
+	})
+	require.NoError(t, err)
 
 	require.NoError(t, rt.Shutdown(time.Second))
-	require.True(t, onDropCalled, "onDrop should be called for dropped jobs")
+	require.True(t, discardCalled, "Discard should be called for dropped jobs")
 }
 
 func TestGroup_NilReceiver(t *testing.T) {
 	var rt *Group
-	require.False(t, rt.Submit("cache-a", JobKindRefresh, func(ctx context.Context) {}))
-	require.False(t, rt.SubmitWithDropCleanup("cache-a", JobKindRefresh, func(ctx context.Context) {}, nil))
+	err := rt.Submit("cache-a", JobKindRefresh, Job{
+		Run:     func(ctx context.Context) {},
+		Discard: func(reason DropReason) {},
+	})
+	require.ErrorIs(t, err, ErrRejected)
 	require.NoError(t, rt.CloseCache("cache-a", time.Second))
 	require.NoError(t, rt.Shutdown(time.Second))
 }

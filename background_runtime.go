@@ -6,6 +6,14 @@ import (
 
 type backgroundRuntime = runtime.Runtime
 
+type Job = runtime.Job
+type DropReason = runtime.DropReason
+
+const (
+	DropReasonRejected = runtime.DropReasonRejected
+	DropReasonShutdown = runtime.DropReasonShutdown
+)
+
 type JobKind = runtime.JobKind
 
 const (
