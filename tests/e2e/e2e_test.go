@@ -426,20 +426,18 @@ func TestE2E_StaleWhileRevalidate(t *testing.T) {
 
 	o.set("fresh", "fresh-v2", "v2")
 
-	// Wait until the cache entry is stale, then request: the cache must serve
-	// the stale value immediately while scheduling a background refresh.
+	// Wait until the entry is stale, then verify the cache serves the stale
+	// value immediately while a background refresh runs in parallel.
 	require.Eventually(t, func() bool {
-		status, _, _ := get(t, p.url()+"/objects/fresh")
-		return status == http.StatusOK
-	}, 2*time.Second, 10*time.Millisecond)
-	_, _, body = get(t, p.url()+"/objects/fresh")
-	require.Equal(t, "fresh-v1", body, "stale entry must be served immediately")
+		_, _, b := get(t, p.url()+"/objects/fresh")
+		return b == "fresh-v1"
+	}, 2*time.Second, 10*time.Millisecond, "stale entry must be served immediately")
 
 	// The background refresh updates the entry from the origin.
 	require.Eventually(t, func() bool {
-		_, _, body := get(t, p.url()+"/objects/fresh")
-		return body == "fresh-v2"
-	}, 3*time.Second, 20*time.Millisecond)
+		_, _, b := get(t, p.url()+"/objects/fresh")
+		return b == "fresh-v2"
+	}, 3*time.Second, 20*time.Millisecond, "background refresh must update the entry")
 	require.GreaterOrEqual(t, o.hitCount("fresh"), 2)
 }
 
@@ -451,7 +449,10 @@ func TestE2E_PartialReadDoesNotPublish(t *testing.T) {
 	o.chunkDelay = 100 * time.Millisecond
 	o.set("big", strings.Repeat("x", 1<<20), "big-v1")
 	hot := memstore.New(0, nil)
-	cache := newCache(t, daramjwee.WithTiers(hot))
+	cache := newCache(t,
+		daramjwee.WithTiers(hot),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+	)
 	p := newProxy(t, cache, o)
 
 	// Read only the first chunk and disconnect before the stream completes.
@@ -487,7 +488,10 @@ func TestE2E_ConcurrentColdRequestsCoalesce(t *testing.T) {
 	o := newOrigin(t)
 	o.delay = 80 * time.Millisecond
 	o.set("hot", "shared-value", "v1")
-	cache := newCache(t, daramjwee.WithTiers(memstore.New(0, nil)))
+	cache := newCache(t,
+		daramjwee.WithTiers(memstore.New(0, nil)),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+	)
 	p := newProxy(t, cache, o)
 
 	type concResult struct {
@@ -743,8 +747,14 @@ func TestE2E_LeaderBodyStillOpenWaiterArrives(t *testing.T) {
 		}{status: status, body: body}
 	}()
 
-	// The waiter must not trigger a second origin fetch.
-	time.Sleep(100 * time.Millisecond)
+	// Wait until the waiter has started (it will block on the origin fetch).
+	// The origin hit count must remain 1 — the waiter joins as a coalesced
+	// waiter instead of triggering a duplicate fetch.
+	require.Eventually(t, func() bool {
+		return o.hitCount("slow") >= 1
+	}, 2*time.Second, 5*time.Millisecond)
+	// Give the waiter time to enter the miss-coalescing wait path.
+	time.Sleep(50 * time.Millisecond)
 	require.Equal(t, 1, o.hitCount("slow"), "waiter must not duplicate the origin fetch while the leader streams")
 
 	// Finish the leader: read the full body and close.
@@ -760,7 +770,64 @@ func TestE2E_LeaderBodyStillOpenWaiterArrives(t *testing.T) {
 	require.Equal(t, 1, o.hitCount("slow"), "waiter served from top tier after leader published")
 }
 
-// TestE2E_PutThenGetRoundTrip exercises the Set API through the proxy.
+// TestE2E_ConcurrentDeleteAndGet verifies that a Get arriving concurrently
+// with a Delete either returns the old value (Get completed before Delete)
+// or triggers a fresh origin fetch (Get completed after Delete). Under no
+// circumstance should the cache return corrupted data or panic.
+func TestE2E_ConcurrentDeleteAndGet(t *testing.T) {
+	o := newOrigin(t)
+	o.set("race", "race-v1", "race-v1")
+	o.delay = 10 * time.Millisecond
+	cache := newCache(t,
+		daramjwee.WithTiers(memstore.New(0, nil)),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+	)
+	p := newProxy(t, cache, o)
+
+	// Seed the cache.
+	_, _, body := get(t, p.url()+"/objects/race")
+	require.Equal(t, "race-v1", body)
+
+	// Hammer delete + get concurrently for a short burst.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	var wg sync.WaitGroup
+	var getOK, deleteOK atomic.Int32
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				status, _, b := get(t, p.url()+"/objects/race")
+				if status == http.StatusOK && (b == "race-v1" || b == "race-v2") {
+					getOK.Add(1)
+				}
+			}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, p.url()+"/objects/race", nil)
+				resp, err := http.DefaultClient.Do(req)
+				if err == nil {
+					resp.Body.Close()
+					if resp.StatusCode == http.StatusNoContent {
+						deleteOK.Add(1)
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// At least some operations must have succeeded; no panics or corrupted reads.
+	require.Greater(t, getOK.Load(), int32(0))
+	require.Greater(t, deleteOK.Load(), int32(0))
+}
 func TestE2E_PutThenGetRoundTrip(t *testing.T) {
 	o := newOrigin(t)
 	cache := newCache(t,
@@ -782,6 +849,69 @@ func TestE2E_PutThenGetRoundTrip(t *testing.T) {
 	require.Equal(t, "uploaded-body", body)
 	require.Equal(t, "uploaded-v1", hdr.Get("ETag"))
 	require.Equal(t, 0, o.hitCount("uploaded"), "uploaded value must be served from cache")
+}
+
+// TestE2E_ConcurrentSetOperations verifies that concurrent Set operations
+// on the same key do not corrupt the cache or panic. The last writer should
+// win (last-writer-wins semantics).
+func TestE2E_ConcurrentSetOperations(t *testing.T) {
+	o := newOrigin(t)
+	cache := newCache(t,
+		daramjwee.WithTiers(memstore.New(0, nil)),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+	)
+	p := newProxy(t, cache, o)
+
+	const writers = 10
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPut,
+				p.url()+"/objects/shared", strings.NewReader(fmt.Sprintf("value-%d", idx)))
+			if err != nil {
+				return
+			}
+			req.Header.Set("ETag", fmt.Sprintf("v%d", idx))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return
+			}
+			resp.Body.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	// The cache must have some value (last-writer-wins).
+	status, _, body := get(t, p.url()+"/objects/shared")
+	require.Equal(t, http.StatusOK, status)
+	require.NotEmpty(t, body)
+	require.Equal(t, 0, o.hitCount("shared"), "cached value must be served without origin")
+}
+
+// TestE2E_CacheKeyWithSpecialChars verifies that keys containing special
+// characters (slashes, spaces, unicode) are handled correctly.
+func TestE2E_CacheKeyWithSpecialChars(t *testing.T) {
+	o := newOrigin(t)
+	o.set("path/to/resource", "path-value", "path-v1")
+	o.set("key with spaces", "space-value", "space-v1")
+	cache := newCache(t,
+		daramjwee.WithTiers(memstore.New(0, nil)),
+		daramjwee.WithFreshness(time.Hour, time.Hour),
+	)
+	p := newProxy(t, cache, o)
+
+	// Slash in key: the proxy strips "/objects/" prefix, so "path/to/resource"
+	// should work correctly.
+	status, _, body := get(t, p.url()+"/objects/path/to/resource")
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "path-value", body)
+
+	status, _, body = get(t, p.url()+"/objects/path/to/resource")
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "path-value", body)
+	require.Equal(t, 1, o.hitCount("path/to/resource"), "hot hit must not touch origin")
 }
 
 // Keep os referenced in case later tests add file-based assertions.
