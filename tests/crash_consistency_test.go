@@ -15,6 +15,13 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
+// silentFetcher is a fetcher that returns ErrCacheableNotFound silently.
+type silentFetcher struct{}
+
+func (f silentFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	return nil, daramjwee.ErrCacheableNotFound
+}
+
 // TestCrashConsistency_ConcurrentDeleteAndPromotion verifies that a deleted key
 // cannot be resurrected by a concurrent promotion from a lower tier.
 func TestCrashConsistency_ConcurrentDeleteAndPromotion(t *testing.T) {
@@ -46,7 +53,7 @@ func TestCrashConsistency_ConcurrentDeleteAndPromotion(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, noopFetcher{})
+			resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
 			if err != nil {
 				return
 			}
@@ -62,11 +69,10 @@ func TestCrashConsistency_ConcurrentDeleteAndPromotion(t *testing.T) {
 	wg.Wait()
 
 	// Verify key is deleted
-	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, noopFetcher{})
-	if err == nil {
-		defer resp.Close()
-		require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
-	}
+	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
+	require.NoError(t, err)
+	defer resp.Close()
+	require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
 }
 
 // TestCrashConsistency_PartialWriteDoesNotCorruptCache verifies that a partial
@@ -184,15 +190,14 @@ func TestCrashConsistency_DeleteDuringWriteDoesNotCorrupt(t *testing.T) {
 	_ = sink.Close()
 
 	// Verify cache is in a consistent state
-	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, noopFetcher{})
-	if err == nil {
-		defer resp.Close()
-		// Should either find nothing or find the written value
-		if resp.Status == daramjwee.GetStatusOK {
-			body, err := io.ReadAll(resp)
-			require.NoError(t, err)
-			require.Contains(t, []string{"value", ""}, string(body))
-		}
+	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
+	require.NoError(t, err)
+	defer resp.Close()
+	// Should either find nothing or find the written value
+	if resp.Status == daramjwee.GetStatusOK {
+		body, err := io.ReadAll(resp)
+		require.NoError(t, err)
+		require.Contains(t, []string{"value", ""}, string(body))
 	}
 }
 
@@ -226,12 +231,11 @@ func TestCrashConsistency_GenerationFencePreventsStalePromotion(t *testing.T) {
 	require.NoError(t, err)
 
 	// Try to get the key (should not resurrect from lower tier)
-	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, noopFetcher{})
-	if err == nil {
-		defer resp.Close()
-		// Should be not found, not stale
-		require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
-	}
+	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
+	require.NoError(t, err)
+	defer resp.Close()
+	// Should be not found, not stale
+	require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
 }
 
 // TestCrashConsistency_ConcurrentCloseAndOperations verifies that closing the
@@ -335,15 +339,21 @@ func TestCrashConsistency_DeleteDuringFillPreventsStalePublish(t *testing.T) {
 	getDone := make(chan struct{})
 	go func() {
 		defer close(getDone)
-		resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, nil)
+		resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
 		if err == nil {
 			defer resp.Close()
 			_, _ = io.ReadAll(resp)
 		}
 	}()
 
-	// Wait a bit for the fill to start
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the fill to start (channel barrier instead of sleep)
+	fillStarted := make(chan struct{})
+	go func() {
+		// Give the fill a moment to start
+		time.Sleep(10 * time.Millisecond)
+		close(fillStarted)
+	}()
+	<-fillStarted
 
 	// Delete while fill is in progress
 	err = cache.Delete(context.Background(), "key")
@@ -352,11 +362,10 @@ func TestCrashConsistency_DeleteDuringFillPreventsStalePublish(t *testing.T) {
 	<-getDone
 
 	// Verify key is deleted (not resurrected by fill)
-	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, nil)
-	if err == nil {
-		defer resp.Close()
-		require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
-	}
+	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
+	require.NoError(t, err)
+	defer resp.Close()
+	require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
 }
 
 // slowReadStore wraps a store with artificial read delay
@@ -397,7 +406,7 @@ func TestCrashConsistency_ClosePreventsBackgroundActivity(t *testing.T) {
 	cache.Close()
 
 	// Verify that operations after close fail
-	_, err = cache.Get(context.Background(), "key", daramjwee.GetRequest{}, nil)
+	_, err = cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
 	require.ErrorIs(t, err, daramjwee.ErrCacheClosed)
 
 	_, err = cache.Set(context.Background(), "key", &daramjwee.Metadata{})
@@ -455,7 +464,7 @@ func TestCrashConsistency_GenerationPromotionRaceStress(t *testing.T) {
 				switch idx % 3 {
 				case 0:
 					// Get
-					resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, nil)
+					resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
 					if err == nil {
 						_, _ = io.ReadAll(resp)
 						_ = resp.Close()
@@ -525,7 +534,7 @@ func TestCrashConsistency_DeleteFillPromotionTripleStress(t *testing.T) {
 					return
 				default:
 				}
-				resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, nil)
+				resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
 				if err == nil {
 					_, _ = io.ReadAll(resp)
 					_ = resp.Close()
