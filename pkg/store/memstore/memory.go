@@ -10,6 +10,10 @@ import (
 	"github.com/mrchypark/daramjwee"
 )
 
+// maxPoolBufferSize is the largest buffer capacity that is returned to the
+// pool. Larger buffers would pin large temporary allocations in memory.
+const maxPoolBufferSize = 1 << 20 // 1 MiB
+
 var (
 	bufferPool = sync.Pool{
 		New: func() any {
@@ -27,6 +31,7 @@ type entry struct {
 // MemStore is a thread-safe, in-memory implementation of the daramjwee.Store interface.
 type MemStore struct {
 	mu          sync.RWMutex
+	policyMu    sync.Mutex
 	data        map[string]entry
 	capacity    int64 // Capacity in bytes
 	currentSize int64 // Current total size of stored items in bytes
@@ -91,11 +96,11 @@ func (ms *MemStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *
 		return nil, nil, daramjwee.ErrNotFound
 	}
 
-	// Notify the policy that this key was accessed.
-	// Use a separate write lock for policy state mutation to minimize lock contention.
-	ms.mu.Lock()
+	// Notify the policy that this key was accessed. Policy mutations use a
+	// dedicated lock so concurrent map readers never contend with touches.
+	ms.policyMu.Lock()
 	ms.policy.Touch(key)
-	ms.mu.Unlock()
+	ms.policyMu.Unlock()
 
 	brc, _ := byteReadCloserPool.Get().(*byteReadCloser)
 	brc.data = e.value
@@ -148,7 +153,9 @@ func (ms *MemStore) Delete(ctx context.Context, key string) error {
 
 		delete(ms.data, key)
 		// Notify the policy that this key was removed.
+		ms.policyMu.Lock()
 		ms.policy.Remove(key)
+		ms.policyMu.Unlock()
 	}
 
 	return nil
@@ -165,10 +172,10 @@ func (ms *MemStore) Stat(ctx context.Context, key string) (*daramjwee.Metadata, 
 	}
 
 	// Access via Stat should also be considered a "touch".
-	// Use a separate write lock for policy state mutation to minimize lock contention.
-	ms.mu.Lock()
+	// Policy mutations use a dedicated lock so map readers never contend.
+	ms.policyMu.Lock()
 	ms.policy.Touch(key)
-	ms.mu.Unlock()
+	ms.policyMu.Unlock()
 
 	return daramjwee.CloneMetadata(e.metadata), nil
 }
@@ -214,7 +221,15 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 		return fmt.Errorf("memstore: commit: %w", err)
 	}
 
-	finalData := bytes.Clone(w.buf.Bytes())
+	// Large payloads are never returned to the pool, so transfer ownership
+	// of the buffer slice instead of cloning the full payload again.
+	var finalData []byte
+	if w.buf.Cap() > maxPoolBufferSize {
+		finalData = w.buf.Bytes()
+		w.buf = nil
+	} else {
+		finalData = bytes.Clone(w.buf.Bytes())
+	}
 	newItemSize := int64(len(finalData))
 	storedMeta := daramjwee.CloneMetadata(w.metadata)
 	if storedMeta == nil {
@@ -243,6 +258,10 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 	ms.data[w.key] = newEntry
 	// Add the new item's size to currentSize.
 	ms.currentSize += newItemSize
+
+	// Policy mutations use a dedicated lock, serialized consistently
+	// (map lock before policy lock) across all call sites.
+	ms.policyMu.Lock()
 	ms.policy.Add(w.key, newItemSize)
 
 	// Eviction logic: if capacity is positive and exceeded, evict items.
@@ -270,6 +289,7 @@ func (w *memStoreSink) Commit(ctx context.Context) error {
 			}
 		}
 	}
+	ms.policyMu.Unlock()
 
 	return nil
 }
@@ -290,7 +310,6 @@ func (w *memStoreSink) release() {
 	if w.buf != nil {
 		// Only return small buffers to the pool to prevent large temporary
 		// allocations from holding memory indefinitely.
-		const maxPoolBufferSize = 1 << 20 // 1 MiB
 		if w.buf.Cap() <= maxPoolBufferSize {
 			w.buf.Reset()
 			bufferPool.Put(w.buf)

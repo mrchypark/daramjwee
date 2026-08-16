@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 	"github.com/mrchypark/daramjwee/pkg/policy"
+	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 )
 
 // TestEvictionCorrectness_LRUEvictsLeastRecentlyUsed verifies that LRU

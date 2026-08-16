@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.14.1
+
+### ⚡ Performance
+
+*   **Miss coalescing**: Concurrent misses for the same key now coalesce into a single origin fetch. The first caller becomes the miss leader and fills the top tier; waiters are served from the top tier once the fill publishes, falling back to their own fetch after a bounded wait. This eliminates cold-key stampedes for fast origins while preserving stream-through latency.
+*   **Hot-hit allocation reduction**: Reduced fresh top-tier hit allocations from 13 to 5 per operation (786 B → 288 B).
+    *   Top-write generation snapshots are now captured lazily, only when a stale entry needs a background refresh. Fresh hits no longer touch the write coordinator at all.
+    *   `writeCoordinator` state (reservation map, delete-done channel) is now allocated lazily on first write/delete, keeping read-only keys allocation-free.
+    *   `safeCloser` handlers are plain functions instead of boxed interfaces; fresh hits share the no-op cancel function.
+    *   `debugLog` calls on hot paths are guarded so disabled logging causes no variadic packing allocations.
+*   **MemStore large-payload copy elimination**: Large payloads (>1 MiB) transfer buffer ownership instead of cloning the full payload again on commit, halving large-object miss allocation (~2.1 MB → ~1.05 MB for 1 MiB objects).
+*   **MemStore policy lock separation**: Eviction policy mutations now use a dedicated lock, so concurrent map readers never contend with LRU/S3-FIFO/SIEVE touches.
+*   **Refresh deduplication**: Background refreshes are deduplicated per key; while one refresh is in flight, later stale hits reuse it instead of queueing duplicate jobs.
+
+### ✨ Features
+
+*   **2-hit promotion probation** (`WithPromotionProbation(maxEntries)`): When enabled, the first lower-tier hit for a key is served without promoting to the top tier; only the second hit promotes. Prevents one-hit wonders from polluting the hot tier. Deleting a key resets its probation state.
+
+### 🔒 Correctness
+
+*   **Fixed setup-context cancellation race**: A tier-0 entry published by a concurrent fill between the fast-path miss and the slow-path retry is now handled as a proper top-tier hit instead of continuing with a canceled setup context (previously returned `context canceled` and leaked the stream).
+
+### ✅ Testing
+
+*   Added miss-coalescing tests (concurrent misses share one origin fetch, slow-leader fallback).
+*   Added promotion-probation tests (second-hit promotion, delete reset).
+*   Added refresh deduplication test (single in-flight refresh per key).
+
 ## v0.14.0
 
 ### 🔒 Correctness & Consistency

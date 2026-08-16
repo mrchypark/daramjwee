@@ -110,7 +110,7 @@ func TestTopTierCloseCallback(t *testing.T) {
 		cache := &DaramjweeCache{logger: log.NewNopLogger()}
 
 		handler := cache.topTierCloseCallback(context.Background(), "key", nil, cancel, &Metadata{}, false, nil)
-		handler.handle()
+		handler()
 
 		assert.True(t, cancelCalled)
 	})
@@ -131,7 +131,7 @@ func TestTopTierCloseCallback(t *testing.T) {
 		handler := cache.topTierCloseCallback(context.Background(), "key", nil, cancel, &Metadata{CacheTag: "v1"}, true, observedGen)
 		require.NotNil(t, handler)
 
-		handler.handle()
+		handler()
 		assert.True(t, cancelCalled)
 	})
 }

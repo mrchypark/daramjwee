@@ -240,6 +240,28 @@ need the old fire-one-goroutine-per-job behavior, set
 `"all"`; unknown strategy values now fail cache construction instead of silently
 falling back to `"pool"`.
 
+## Promotion Probation
+
+Lower-tier hits promote into the top tier by default. When the workload has
+many one-hit wonders (keys accessed exactly once), those promotions pollute
+the hot tier without benefit. Enable 2-hit probation to promote a key only
+on its second lower-tier hit:
+
+```go
+cache, err := daramjwee.New(
+    logger,
+    daramjwee.WithTiers(memTier, fileTier),
+    daramjwee.WithPromotionProbation(65536), // bounded FIFO set
+)
+```
+
+`maxEntries` bounds the probation set with FIFO eviction. Deleting a key
+resets its probation state. The cost is one extra lower-tier read per cold key.
+
+Concurrent misses for the same key are coalesced: the first caller fetches
+from the origin while filling the top tier, and concurrent waiters are served
+from the top tier once the fill publishes (bounded by their request deadline).
+
 ## Cache Groups
 
 `New(...)` constructs a self-contained cache instance with its own background

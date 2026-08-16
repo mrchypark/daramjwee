@@ -35,9 +35,23 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 	} else {
 		expectedGeneration = c.currentTopWriteGeneration(key)
 	}
+
+	// Deduplicate concurrent refreshes for the same key: while one refresh
+	// is in flight, later stale hits reuse it instead of queueing duplicate
+	// jobs. The dedup entry is released when the job completes or when the
+	// runtime rejects it.
+	if !c.acquireRefreshDedup(key) {
+		expectedGeneration.release()
+		if c.debugEnabled() {
+			c.debugLog("msg", "skipping refresh, one already in flight", "key", key)
+		}
+		return nil
+	}
+
 	valueCtx := detachedValueContext(ctx)
 	job := func(jobCtx context.Context) {
 		defer expectedGeneration.release()
+		defer c.releaseRefreshDedup(key)
 		refreshCtx := overlayContextValues(jobCtx, valueCtx)
 		c.infoLog("msg", "starting background refresh", "key", key)
 
@@ -109,16 +123,20 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		}
 	}
 
-	if !c.runtime.SubmitWithDropCleanup(c.cacheID, JobKindRefresh, job, expectedGeneration.release) {
+	onDrop := func() {
 		expectedGeneration.release()
+		c.releaseRefreshDedup(key)
+	}
+	if !c.runtime.SubmitWithDropCleanup(c.cacheID, JobKindRefresh, job, onDrop) {
+		onDrop()
 		return ErrBackgroundJobRejected
 	}
 	return nil
 }
 
-// lowerTierRefreshOnCloseCallback creates a closeHandler for lower-tier stale refresh.
-func (c *DaramjweeCache) lowerTierRefreshOnCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata, source tierDestination, observedGeneration *topWriteGeneration) closeHandler {
-	return newStaleRefreshCallback(c, requestCtx, key, fetcher, cancel, oldMetadata, &source, observedGeneration)
+// lowerTierRefreshOnCloseCallback creates a close handler for lower-tier stale refresh.
+func (c *DaramjweeCache) lowerTierRefreshOnCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, oldMetadata *Metadata, source tierDestination, observedGeneration *topWriteGeneration) func() {
+	return newStaleRefreshCallback(c, requestCtx, key, fetcher, cancel, oldMetadata, &source, observedGeneration).handle
 }
 
 func (c *DaramjweeCache) promoteRefreshFallbackToTop(ctx context.Context, key string, source tierDestination, fallbackMetadata *Metadata, expectedGeneration *topWriteGeneration) error {

@@ -150,3 +150,24 @@ func TestGroup_NilReceiver(t *testing.T) {
 	require.NoError(t, rt.CloseCache("cache-a", time.Second))
 	require.NoError(t, rt.Shutdown(time.Second))
 }
+
+func TestGroup_AdaptiveWeight(t *testing.T) {
+	rt := NewGroup(log.NewNopLogger(), 1, time.Second)
+	group := rt.(*Group)
+
+	base := &groupCacheState{weight: 2, queueLimit: 8}
+	require.Equal(t, 2, group.adaptiveWeightLocked(base))
+
+	halfFull := &groupCacheState{weight: 2, queueLimit: 8, queue: make(chan queuedJob, 8)}
+	halfFull.queue <- queuedJob{}
+	halfFull.queue <- queuedJob{}
+	halfFull.queue <- queuedJob{}
+	halfFull.queue <- queuedJob{}
+	require.Equal(t, 6, group.adaptiveWeightLocked(halfFull))
+
+	full := &groupCacheState{weight: 2, queueLimit: 8, queue: make(chan queuedJob, 8)}
+	for i := 0; i < 8; i++ {
+		full.queue <- queuedJob{}
+	}
+	require.Equal(t, 10, group.adaptiveWeightLocked(full))
+}

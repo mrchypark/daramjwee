@@ -23,6 +23,13 @@ func (c *DaramjweeCache) debugLog(keyvals ...any) {
 	_ = level.Debug(c.logger).Log(keyvals...)
 }
 
+// debugEnabled reports whether debug logging is enabled. Hot paths must
+// check this before calling debugLog to avoid variadic argument packing
+// allocations when logging is disabled.
+func (c *DaramjweeCache) debugEnabled() bool {
+	return !c.config.loggingDisabled && c.logger != nil
+}
+
 func (c *DaramjweeCache) infoLog(keyvals ...any) {
 	if c.config.loggingDisabled || c.logger == nil {
 		return
