@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.14.2
+
+### 🔒 Correctness
+
+*   **Miss-leader lifecycle fix**: Miss-leader registration now releases when the streaming fill completes (body close), not when the response is returned. Callers arriving while the leader's stream is open join as waiters instead of becoming new leaders and duplicating the origin fetch.
+*   **Eager generation semantics restored**: The top-write generation is now snapshotted before the tier-0 read (non-creating), preserving the original invalidation semantics for stale refreshes. Writes committed after the snapshot still invalidate the refresh.
+*   **Skip coalescing without fill**: Misses with `higherTiersClean=false` skip coalescing entirely, since waiting would only add latency without benefit.
+
+### ✅ Testing
+
+*   **End-to-end test suite** (`tests/e2e`): 18 scenarios exercising the public API through a real HTTP origin + HTTP front proxy + real store backends (memstore, filestore, objectstore).
+    - Basic: cold/hot hit, conditional 304, negative caching, delete invalidation, origin failure, stale-while-revalidate
+    - Streaming: partial read no-publish, leader body open waiter arrival
+    - Concurrency: concurrent cold-request coalescing (20 callers), concurrent delete+get burst, concurrent PUT same key, stale refresh coalescing
+    - Tiers: multi-tier restart promotion, file→objectstore chain with remote-durability probe
+    - Runtime: cache-group isolation and shutdown, promotion probation
+    - Edge cases: special characters in keys, PUT/GET round trip
+*   Added `TestMissCoalescing_NoDuplicateFetchWhileLeaderStreams` race test (unit)
+
 ## v0.14.1
 
 ### ⚡ Performance
