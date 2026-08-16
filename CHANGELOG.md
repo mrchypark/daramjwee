@@ -24,6 +24,7 @@
 
 ### ✅ Testing
 
+*   **End-to-end test suite** (`tests/e2e`): HTTP origin + HTTP front proxy exercising the public API with real stores. Covers cold/hot hits, conditional 304, negative caching, delete invalidation, origin failure propagation, stale-while-revalidate, partial-read no-publish, concurrent cold-request coalescing, multi-tier restart promotion, file→objectstore chains, cache-group isolation, promotion probation, and PUT/GET round trips.
 *   Added miss-coalescing tests (concurrent misses share one origin fetch, slow-leader fallback).
 *   Added promotion-probation tests (second-hit promotion, delete reset).
 *   Added refresh deduplication test (single in-flight refresh per key).

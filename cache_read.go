@@ -9,16 +9,16 @@ import (
 
 // handleTopTierHit processes the logic when an object is found in tier 0.
 // observedGeneration may be nil for fast-path hits: the generation snapshot
-// is captured lazily when the entry is stale and a background refresh must
-// be scheduled.
-func (c *DaramjweeCache) handleTopTierHit(requestCtx context.Context, key string, req GetRequest, fetcher Fetcher, stream io.ReadCloser, meta *Metadata, cancel context.CancelFunc, observedGeneration *topWriteGeneration) (*GetResponse, error) {
+// (snapCoord/snapGen, taken before the tier-0 read) is materialized lazily
+// when the entry is stale and a background refresh must be scheduled.
+func (c *DaramjweeCache) handleTopTierHit(requestCtx context.Context, key string, req GetRequest, fetcher Fetcher, stream io.ReadCloser, meta *Metadata, cancel context.CancelFunc, observedGeneration *topWriteGeneration, snapCoord *writeCoordinator, snapGen uint64) (*GetResponse, error) {
 	if c.debugEnabled() {
 		c.debugLog("msg", "top tier hit", "key", key)
 	}
 
 	isStale := c.isTierCachedStale(meta, 0)
 	if isStale && observedGeneration == nil {
-		observedGeneration = c.currentTopWriteGeneration(key)
+		observedGeneration = c.staleGenerationFromSnapshot(key, snapCoord, snapGen)
 		defer observedGeneration.release()
 	}
 	if c.isConditionalRequestSatisfied(req, meta) {
@@ -36,6 +36,21 @@ func (c *DaramjweeCache) handleTopTierHit(requestCtx context.Context, key string
 	}
 
 	return newGetResponse(GetStatusOK, streamCloser, meta), nil
+}
+
+// staleGenerationFromSnapshot materializes a live topWriteGeneration for a
+// stale-hit refresh from the pre-read generation snapshot. When the snapshot
+// coordinator still exists, it is retained and its generation is used so any
+// write committed after the snapshot invalidates the refresh. When no
+// coordinator existed at snapshot time, the refresh is gated on generation 0
+// of a newly created coordinator, which preserves the same invalidation
+// semantics against a concurrent first write.
+func (c *DaramjweeCache) staleGenerationFromSnapshot(key string, snapCoord *writeCoordinator, snapGen uint64) *topWriteGeneration {
+	if snapCoord != nil && snapCoord.retainReference() {
+		return &topWriteGeneration{coord: snapCoord, generation: snapGen}
+	}
+	coord := c.topWrites.coordinator(key)
+	return &topWriteGeneration{coord: coord, generation: 0}
 }
 
 func (c *DaramjweeCache) handleConditionalTopTierHit(requestCtx context.Context, key string, fetcher Fetcher, stream io.ReadCloser, meta *Metadata, cancel context.CancelFunc, isStale bool, observedGeneration *topWriteGeneration) (*GetResponse, error) {
@@ -261,9 +276,15 @@ func (c *DaramjweeCache) promotePositiveLowerTierHit(requestCtx, setupCtx contex
 // Waiters wait (bounded by missWaitCap or their request deadline) for the
 // leader's fill to become visible and then re-serve from the top tier,
 // falling back to their own origin fetch when the leader is too slow or
-// fails to publish.
+// fails to publish. Misses that cannot fill the top tier (higherTiersClean
+// false) skip coalescing entirely.
 func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration *topWriteGeneration, higherTiersClean bool) (*GetResponse, error) {
 	c.debugLog("msg", "full cache miss, fetching from origin", "key", key)
+
+	if !higherTiersClean {
+		// No top-tier fill can happen; coalescing would only delay waiters.
+		return c.handleMissAsLeader(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, false, nil)
+	}
 
 	for {
 		lead, ok := c.missLeads.current(key)
@@ -272,8 +293,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 			if !becameLeader {
 				continue
 			}
-			defer c.missLeads.release(key, become)
-			return c.handleMissAsLeader(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, higherTiersClean, become)
+			return c.handleMissAsLeader(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, true, become)
 		}
 
 		if lead.wait(setupCtx) {
@@ -283,7 +303,7 @@ func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key st
 			// Leader is too slow or abandoned: fall back to an unregistered
 			// leader run. Its fill attempt is rejected while the leader still
 			// owns the fill lease, so it degrades to a direct serve.
-			return c.handleMissAsLeader(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, higherTiersClean, nil)
+			return c.handleMissAsLeader(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, true, nil)
 		}
 
 		if resp, err, retry := c.serveMissWaiterFromTop(requestCtx, setupCtx, key, req, cancel); !retry {
@@ -333,21 +353,25 @@ func (c *DaramjweeCache) serveMissWaiterFromTop(requestCtx, setupCtx context.Con
 // handleMissAsLeader runs the full miss path as the miss leader. When lead is
 // non-nil the returned response signals lead completion: streaming responses
 // signal when the body is closed (the moment the top-tier fill becomes
-// visible or aborts), non-body responses and errors signal immediately.
+// visible or aborts) and release the leader registration at the same point;
+// non-body responses and errors signal and release immediately.
 func (c *DaramjweeCache) handleMissAsLeader(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration *topWriteGeneration, higherTiersClean bool, lead *missLead) (*GetResponse, error) {
 	resp, err := c.handleMissInner(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, higherTiersClean)
 	if lead == nil {
 		return resp, err
 	}
-	if err != nil || resp == nil {
+	if err != nil || resp == nil || resp.Body == nil {
 		lead.signal()
+		c.missLeads.release(key, lead)
 		return resp, err
 	}
-	if resp.Body == nil {
-		lead.signal()
-		return resp, nil
+	resp.Body = &missSignalReadCloser{
+		ReadCloser: resp.Body,
+		done:       lead.done,
+		onDone: func() {
+			c.missLeads.release(key, lead)
+		},
 	}
-	resp.Body = &missSignalReadCloser{ReadCloser: resp.Body, done: lead.done}
 	return resp, nil
 }
 
