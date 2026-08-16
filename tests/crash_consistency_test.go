@@ -46,7 +46,7 @@ func TestCrashConsistency_ConcurrentDeleteAndPromotion(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, noopFetcher{})
+			resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
 			if err != nil {
 				return
 			}
@@ -62,11 +62,10 @@ func TestCrashConsistency_ConcurrentDeleteAndPromotion(t *testing.T) {
 	wg.Wait()
 
 	// Verify key is deleted
-	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, noopFetcher{})
-	if err == nil {
-		defer resp.Close()
-		require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
-	}
+	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
+	require.NoError(t, err)
+	defer resp.Close()
+	require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
 }
 
 // TestCrashConsistency_PartialWriteDoesNotCorruptCache verifies that a partial
@@ -133,7 +132,7 @@ func TestCrashConsistency_ConcurrentWritesOnlyOneSucceeds(t *testing.T) {
 			if err != nil {
 				return
 			}
-			_, err = sink.Write([]byte(fmt.Sprintf("value-%d", idx)))
+			_, err = fmt.Fprintf(sink, "value-%d", idx)
 			if err != nil {
 				_ = sink.Abort()
 				return
@@ -184,15 +183,14 @@ func TestCrashConsistency_DeleteDuringWriteDoesNotCorrupt(t *testing.T) {
 	_ = sink.Close()
 
 	// Verify cache is in a consistent state
-	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, noopFetcher{})
-	if err == nil {
-		defer resp.Close()
-		// Should either find nothing or find the written value
-		if resp.Status == daramjwee.GetStatusOK {
-			body, err := io.ReadAll(resp)
-			require.NoError(t, err)
-			require.Contains(t, []string{"value", ""}, string(body))
-		}
+	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
+	require.NoError(t, err)
+	defer resp.Close()
+	// Should either find nothing or find the written value
+	if resp.Status == daramjwee.GetStatusOK {
+		body, err := io.ReadAll(resp)
+		require.NoError(t, err)
+		require.Contains(t, []string{"value", ""}, string(body))
 	}
 }
 
@@ -226,12 +224,11 @@ func TestCrashConsistency_GenerationFencePreventsStalePromotion(t *testing.T) {
 	require.NoError(t, err)
 
 	// Try to get the key (should not resurrect from lower tier)
-	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, noopFetcher{})
-	if err == nil {
-		defer resp.Close()
-		// Should be not found, not stale
-		require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
-	}
+	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
+	require.NoError(t, err)
+	defer resp.Close()
+	// Should be not found, not stale
+	require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
 }
 
 // TestCrashConsistency_ConcurrentCloseAndOperations verifies that closing the
@@ -265,7 +262,7 @@ func TestCrashConsistency_ConcurrentCloseAndOperations(t *testing.T) {
 			if err != nil {
 				return
 			}
-			_, _ = sink.Write([]byte(fmt.Sprintf("value-%d", idx)))
+			_, _ = fmt.Fprintf(sink, "value-%d", idx)
 			_ = sink.Close()
 		}(i)
 	}
@@ -308,7 +305,7 @@ func TestCrashConsistency_MultipleCloseCallsIsIdempotent(t *testing.T) {
 func TestCrashConsistency_DeleteDuringFillPreventsStalePublish(t *testing.T) {
 	top := memstore.New(0, nil)
 	lower := &slowReadStore{
-		inner:   memstore.New(0, nil),
+		inner:     memstore.New(0, nil),
 		readDelay: 100 * time.Millisecond,
 	}
 

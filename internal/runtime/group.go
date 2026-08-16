@@ -378,7 +378,7 @@ func (r *Group) pickNextLocked() (string, queuedJob, *groupCacheState, bool) {
 			continue
 		}
 		if state.credit <= 0 {
-			state.credit = state.weight
+			state.credit = r.adaptiveWeightLocked(state)
 		}
 		var job queuedJob
 		select {
@@ -433,4 +433,24 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// adaptiveWeightLocked returns the dequeue weight for a cache, boosted by its
+// pending queue fill ratio. Caches whose queues approach their limit drain
+// faster under load (up to 5x base weight), reducing drop rates for busy
+// caches while preserving weighted round-robin fairness.
+func (r *Group) adaptiveWeightLocked(state *groupCacheState) int {
+	if state == nil {
+		return 1
+	}
+	base := maxInt(state.weight, 1)
+	depth := len(state.queue)
+	if depth <= 0 || state.queueLimit <= 0 {
+		return base
+	}
+	boost := depth * 4 / state.queueLimit
+	if boost > 4 {
+		boost = 4
+	}
+	return base + base*boost
 }

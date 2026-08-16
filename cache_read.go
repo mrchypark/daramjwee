@@ -8,10 +8,19 @@ import (
 )
 
 // handleTopTierHit processes the logic when an object is found in tier 0.
+// observedGeneration may be nil for fast-path hits: the generation snapshot
+// is captured lazily when the entry is stale and a background refresh must
+// be scheduled.
 func (c *DaramjweeCache) handleTopTierHit(requestCtx context.Context, key string, req GetRequest, fetcher Fetcher, stream io.ReadCloser, meta *Metadata, cancel context.CancelFunc, observedGeneration *topWriteGeneration) (*GetResponse, error) {
-	c.debugLog("msg", "top tier hit", "key", key)
+	if c.debugEnabled() {
+		c.debugLog("msg", "top tier hit", "key", key)
+	}
 
 	isStale := c.isTierCachedStale(meta, 0)
+	if isStale && observedGeneration == nil {
+		observedGeneration = c.currentTopWriteGeneration(key)
+		defer observedGeneration.release()
+	}
 	if c.isConditionalRequestSatisfied(req, meta) {
 		return c.handleConditionalTopTierHit(requestCtx, key, fetcher, stream, meta, cancel, isStale, observedGeneration)
 	}
@@ -43,13 +52,13 @@ func (c *DaramjweeCache) handleConditionalTopTierHit(requestCtx context.Context,
 	return newGetResponse(GetStatusNotModified, nil, meta), nil
 }
 
-func (c *DaramjweeCache) topTierCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, meta *Metadata, isStale bool, observedGeneration *topWriteGeneration) closeHandler {
+func (c *DaramjweeCache) topTierCloseCallback(requestCtx context.Context, key string, fetcher Fetcher, cancel context.CancelFunc, meta *Metadata, isStale bool, observedGeneration *topWriteGeneration) func() {
 	if !isStale {
-		return cancelHandler{cancel: cancel}
+		return cancel
 	}
 
 	c.debugLog("msg", "top tier is stale, scheduling refresh", "key", key)
-	return newStaleRefreshCallback(c, requestCtx, key, fetcher, cancel, meta, nil, observedGeneration)
+	return newStaleRefreshCallback(c, requestCtx, key, fetcher, cancel, meta, nil, observedGeneration).handle
 }
 
 // lowerTierHitParams groups the parameters for handleLowerTierHit.
@@ -160,6 +169,20 @@ func (c *DaramjweeCache) handleStaleLowerTierHit(requestCtx context.Context, key
 }
 
 func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, meta, metaToPromote *Metadata, cancel context.CancelFunc, expectedGeneration *topWriteGeneration) (*GetResponse, error) {
+	if c.probation != nil && !c.probation.observe(key) {
+		// First lower-tier hit under 2-hit probation: serve without
+		// promoting the negative entry.
+		if c.debugEnabled() {
+			c.debugLog("msg", "deferring negative lower-tier promotion until second hit", "key", key, "tier_index", tierIndex)
+		}
+		if err := src.Close(); err != nil {
+			cancel()
+			return nil, err
+		}
+		cancel()
+		return newGetResponse(GetStatusNotFound, nil, meta), nil
+	}
+
 	target := c.topWriteStore()
 	writer, err := c.setStreamToTopStoreBestEffortWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, expectedGeneration)
 	if err != nil {
@@ -200,6 +223,15 @@ func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx contex
 }
 
 func (c *DaramjweeCache) promotePositiveLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, meta, metaToPromote *Metadata, cancel context.CancelFunc, expectedGeneration *topWriteGeneration) *GetResponse {
+	if c.probation != nil && !c.probation.observe(key) {
+		// First lower-tier hit under 2-hit probation: serve without
+		// promoting so one-hit wonders do not pollute the top tier.
+		if c.debugEnabled() {
+			c.debugLog("msg", "deferring lower-tier promotion until second hit", "key", key, "tier_index", tierIndex)
+		}
+		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta)
+	}
+
 	target := c.topWriteStore()
 	writer, err := c.setStreamToTopStoreForFill(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, expectedGeneration)
 	if err != nil {
@@ -223,9 +255,103 @@ func (c *DaramjweeCache) promotePositiveLowerTierHit(requestCtx, setupCtx contex
 }
 
 // handleMiss processes the logic when an object is not found in any tier.
+//
+// Concurrent misses for the same key are coalesced: the first caller becomes
+// the miss leader and fetches from the origin while filling the top tier.
+// Waiters wait (bounded by missWaitCap or their request deadline) for the
+// leader's fill to become visible and then re-serve from the top tier,
+// falling back to their own origin fetch when the leader is too slow or
+// fails to publish.
 func (c *DaramjweeCache) handleMiss(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration *topWriteGeneration, higherTiersClean bool) (*GetResponse, error) {
 	c.debugLog("msg", "full cache miss, fetching from origin", "key", key)
 
+	for {
+		lead, ok := c.missLeads.current(key)
+		if !ok {
+			become, becameLeader := c.missLeads.tryLead(key)
+			if !becameLeader {
+				continue
+			}
+			defer c.missLeads.release(key, become)
+			return c.handleMissAsLeader(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, higherTiersClean, become)
+		}
+
+		if lead.wait(setupCtx) {
+			if err := setupCtx.Err(); err != nil {
+				return nil, err
+			}
+			// Leader is too slow or abandoned: fall back to an unregistered
+			// leader run. Its fill attempt is rejected while the leader still
+			// owns the fill lease, so it degrades to a direct serve.
+			return c.handleMissAsLeader(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, higherTiersClean, nil)
+		}
+
+		if resp, err, retry := c.serveMissWaiterFromTop(requestCtx, setupCtx, key, req, cancel); !retry {
+			return resp, err
+		}
+	}
+}
+
+// serveMissWaiterFromTop re-serves a miss waiter from the top tier after the
+// leader's fill became visible. retry is true when the top tier is still
+// missing the key and the waiter should attempt to become the leader itself.
+func (c *DaramjweeCache) serveMissWaiterFromTop(requestCtx, setupCtx context.Context, key string, req GetRequest, cancel context.CancelFunc) (*GetResponse, error, bool) {
+	stream, meta, err := c.getStreamFromStore(c.getStreamContextForStore(requestCtx, setupCtx, c.topWriteStore()), c.topWriteStore(), key)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil, true
+		}
+		return nil, err, false
+	}
+	if meta == nil {
+		if closeErr := stream.Close(); closeErr != nil {
+			cancel()
+			return nil, errors.Join(err, closeErr), false
+		}
+		cancel()
+		return nil, ErrNilMetadata, false
+	}
+	if meta.IsNegative {
+		if err := stream.Close(); err != nil {
+			cancel()
+			return nil, err, false
+		}
+		cancel()
+		return newGetResponse(GetStatusNotFound, nil, meta), nil, false
+	}
+	if c.isConditionalRequestSatisfied(req, meta) {
+		if err := stream.Close(); err != nil {
+			cancel()
+			return nil, err, false
+		}
+		cancel()
+		return newGetResponse(GetStatusNotModified, nil, meta), nil, false
+	}
+	return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(stream, cancel), meta), nil, false
+}
+
+// handleMissAsLeader runs the full miss path as the miss leader. When lead is
+// non-nil the returned response signals lead completion: streaming responses
+// signal when the body is closed (the moment the top-tier fill becomes
+// visible or aborts), non-body responses and errors signal immediately.
+func (c *DaramjweeCache) handleMissAsLeader(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration *topWriteGeneration, higherTiersClean bool, lead *missLead) (*GetResponse, error) {
+	resp, err := c.handleMissInner(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, higherTiersClean)
+	if lead == nil {
+		return resp, err
+	}
+	if err != nil || resp == nil {
+		lead.signal()
+		return resp, err
+	}
+	if resp.Body == nil {
+		lead.signal()
+		return resp, nil
+	}
+	resp.Body = &missSignalReadCloser{ReadCloser: resp.Body, done: lead.done}
+	return resp, nil
+}
+
+func (c *DaramjweeCache) handleMissInner(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration *topWriteGeneration, higherTiersClean bool) (*GetResponse, error) {
 	var oldMetadata *Metadata
 	if meta, err := c.statFromStore(setupCtx, c.topWriteStore(), key); err == nil {
 		oldMetadata = meta

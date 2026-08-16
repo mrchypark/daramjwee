@@ -262,7 +262,9 @@ func (c *writeCoordinator) advanceCommittedLocked() {
 }
 
 func (c *writeCoordinator) removeReservationLocked(generation uint64) {
-	c.ensureReservationsLocked()
+	if c.activeReservations == nil {
+		return
+	}
 	delete(c.activeReservations, generation)
 }
 
@@ -403,17 +405,11 @@ func (c *writeCoordinator) unregisterReservation(generation uint64) {
 }
 
 func (c *writeCoordinator) init() {
-	c.initOnce.Do(func() {
-		if c.activeDeletesDone == nil {
-			c.activeDeletesDone = make(chan struct{})
-			if c.activeDeletes == 0 {
-				close(c.activeDeletesDone)
-			}
-		}
-		if c.activeReservations == nil {
-			c.activeReservations = make(map[uint64]struct{})
-		}
-	})
+	// Coordination state is created lazily: reservation maps are allocated by
+	// ensureReservationsLocked on first reservation, and activeDeletesDone is
+	// allocated by beginDelete on first delete. Read-only hot-path
+	// coordinators therefore stay allocation-free after construction.
+	c.initOnce.Do(func() {})
 }
 
 func (c *writeCoordinator) initLease() {

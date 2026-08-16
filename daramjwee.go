@@ -467,6 +467,9 @@ func newCacheFromConfig(logger log.Logger, runtime backgroundRuntime, cacheID st
 			loggingDisabled:        isNoopLogger(logger),
 		},
 	}
+	if cfg.PromotionProbationEntries > 0 {
+		cache.probation = newPromotionProbation(cfg.PromotionProbationEntries)
+	}
 
 	if runtime != nil {
 		if err := runtime.Register(cacheID, CacheRuntimeConfig{Weight: maxInt(cfg.Weight, 1), QueueLimit: maxInt(cfg.QueueLimit, 1)}); err != nil {

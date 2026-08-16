@@ -204,6 +204,14 @@ func (f *mockFetcher) getLastOldMetadata() *daramjwee.Metadata {
 
 // --- blockingReadCloser ---
 
+// silentFetcher is a fetcher that returns ErrCacheableNotFound, allowing Get
+// calls that should not need the origin to proceed without a real fetcher.
+type silentFetcher struct{}
+
+func (f silentFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
+	return nil, daramjwee.ErrCacheableNotFound
+}
+
 type blockingReadCloser struct {
 	first     []byte
 	second    []byte

@@ -1610,7 +1610,7 @@ func TestCache_PublishFailureDoesNotScheduleColdPersist(t *testing.T) {
 	}, 200*time.Millisecond, 20*time.Millisecond)
 }
 
-func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
+func TestCache_RetryLoopTierZeroHitServesAsTopTierHit(t *testing.T) {
 	hot := &statOnlyThenReadableStore{
 		data: []byte("cached-value"),
 		meta: &daramjwee.Metadata{CacheTag: "v1"},
@@ -1627,10 +1627,12 @@ func TestCache_NotModifiedKeepsHotStreamOpenUntilExplicitClose(t *testing.T) {
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
 	assert.Equal(t, "cached-value", string(body))
-	assert.Equal(t, 0, hot.closeCount(), "stream should remain open until caller closes it")
+	// A tier-0 hit discovered on the setup-context retry is served as a
+	// regular top-tier hit: the stream auto-closes at EOF (safeCloser).
+	assert.Equal(t, 1, hot.closeCount(), "stream should auto-close at EOF for a top-tier hit")
 
 	require.NoError(t, stream.Close())
-	assert.Equal(t, 1, hot.closeCount(), "explicit close should close the underlying hot stream exactly once")
+	assert.Equal(t, 1, hot.closeCount(), "explicit close must be idempotent after EOF auto-close")
 }
 
 func TestCache_MissStreamIgnoresOpTimeoutAfterFetchReturns(t *testing.T) {

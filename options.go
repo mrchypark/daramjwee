@@ -38,6 +38,8 @@ type Config struct {
 	NegativeFreshness      time.Duration
 	TierFreshnessOverrides map[int]TierFreshnessOverride
 	fillLeaseTimeout       time.Duration
+
+	PromotionProbationEntries int
 }
 
 type TierFreshnessOverride struct {
@@ -197,6 +199,21 @@ func WithTierFreshness(index int, positive, negative time.Duration) Option {
 			Positive: positive,
 			Negative: negative,
 		}
+		return nil
+	}
+}
+
+// WithPromotionProbation enables 2-hit probation for lower-tier promotion:
+// the first lower-tier hit for a key is served without promoting to the top
+// tier, and only the second hit promotes. maxEntries bounds the probation set
+// with FIFO eviction. This prevents one-hit wonders from polluting the hot
+// tier at the cost of one extra lower-tier read per cold key.
+func WithPromotionProbation(maxEntries int) Option {
+	return func(cfg *Config) error {
+		if maxEntries <= 0 {
+			return &ConfigError{"promotion probation entries must be positive"}
+		}
+		cfg.PromotionProbationEntries = maxEntries
 		return nil
 	}
 }

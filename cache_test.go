@@ -16,10 +16,8 @@ import (
 	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
-// testCloseHandler is a closeHandler for tests.
+// testCloseHandler is a close handler for tests.
 type testCloseHandler func()
-
-func (h testCloseHandler) handle() { h() }
 
 func TestSafeCloserReadAll(t *testing.T) {
 	tests := []struct {
