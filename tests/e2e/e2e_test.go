@@ -298,6 +298,33 @@ func get(t *testing.T, url string) (int, http.Header, string) {
 	return getStatus(t, url, nil)
 }
 
+// getStatusSafe is like getStatus but returns errors instead of failing the
+// test, making it safe to call from goroutines.
+func getStatusSafe(url string, hdr map[string]string) (int, http.Header, string, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	return resp.StatusCode, resp.Header, string(body), nil
+}
+
+// getSafe is like get but returns errors instead of failing the test.
+func getSafe(url string) (int, http.Header, string, error) {
+	return getStatusSafe(url, nil)
+}
+
 // --- basic cache behavior --------------------------------------------------
 
 func TestE2E_ColdMissThenHotHit(t *testing.T) {
@@ -456,6 +483,10 @@ func TestE2E_PartialReadDoesNotPublish(t *testing.T) {
 	p := newProxy(t, cache, o)
 
 	// Read only the first chunk and disconnect before the stream completes.
+	// The proxy handler streams with http.Flusher: when the client closes the
+	// body mid-stream, the proxy's write to the client fails, causing it to
+	// return. The cache stream is then closed (abort), so no partial entry is
+	// published to the top tier.
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, p.url()+"/objects/big", nil)
 	require.NoError(t, err)
 	resp, err := http.DefaultClient.Do(req)
@@ -660,6 +691,8 @@ func TestE2E_CacheGroupSharedRuntime(t *testing.T) {
 	require.Equal(t, 2, o.hitCount("posts-key"), "posts cache once, users cache miss once")
 
 	// Closing the group shuts down all caches.
+	// The group was already registered with t.Cleanup; calling Close
+	// explicitly here tests the idempotent close contract.
 	group.Close()
 	status, _, _ = get(t, up.url()+"/objects/users-key")
 	require.Equal(t, http.StatusServiceUnavailable, status)
@@ -738,13 +771,15 @@ func TestE2E_LeaderBodyStillOpenWaiterArrives(t *testing.T) {
 	waiterDone := make(chan struct {
 		status int
 		body   string
+		err    error
 	}, 1)
 	go func() {
-		status, _, body := get(t, p.url()+"/objects/slow")
+		status, _, body, err := getSafe(p.url() + "/objects/slow")
 		waiterDone <- struct {
 			status int
 			body   string
-		}{status: status, body: body}
+			err    error
+		}{status: status, body: body, err: err}
 	}()
 
 	// Wait until the waiter has started (it will block on the origin fetch).
@@ -765,6 +800,7 @@ func TestE2E_LeaderBodyStillOpenWaiterArrives(t *testing.T) {
 
 	// The waiter completes — served from the top tier without an extra fetch.
 	waiter := <-waiterDone
+	require.NoError(t, waiter.err)
 	require.Equal(t, http.StatusOK, waiter.status)
 	require.Equal(t, "slow-value", waiter.body)
 	require.Equal(t, 1, o.hitCount("slow"), "waiter served from top tier after leader published")
@@ -799,8 +835,8 @@ func TestE2E_ConcurrentDeleteAndGet(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for ctx.Err() == nil {
-				status, _, b := get(t, p.url()+"/objects/race")
-				if status == http.StatusOK && (b == "race-v1" || b == "race-v2") {
+				status, _, b, err := getSafe(p.url() + "/objects/race")
+				if err == nil && status == http.StatusOK && (b == "race-v1" || b == "race-v2") {
 					getOK.Add(1)
 				}
 			}
@@ -828,6 +864,57 @@ func TestE2E_ConcurrentDeleteAndGet(t *testing.T) {
 	require.Greater(t, getOK.Load(), int32(0))
 	require.Greater(t, deleteOK.Load(), int32(0))
 }
+
+// TestE2E_StaleRefreshCoalescing verifies that concurrent stale requests
+// trigger only one background refresh, not one per request. This is the E2E
+// test for the refresh deduplication feature.
+func TestE2E_StaleRefreshCoalescing(t *testing.T) {
+	o := newOrigin(t)
+	o.set("stale", "stale-v1", "v1")
+	o.delay = 100 * time.Millisecond // slow origin: refresh takes time
+	cache := newCache(t,
+		daramjwee.WithTiers(memstore.New(0, nil)),
+		daramjwee.WithFreshness(50*time.Millisecond, time.Hour),
+	)
+	p := newProxy(t, cache, o)
+
+	// Seed the cache.
+	_, _, body := get(t, p.url()+"/objects/stale")
+	require.Equal(t, "stale-v1", body)
+	require.Equal(t, 1, o.hitCount("stale"))
+
+	// Update origin and wait for the entry to go stale.
+	o.set("stale", "stale-v2", "v2")
+	time.Sleep(80 * time.Millisecond)
+
+	// Concurrent stale requests: all should return stale-v1 immediately.
+	const callers = 10
+	var wg sync.WaitGroup
+	results := make([]string, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, _, b, _ := getSafe(p.url() + "/objects/stale")
+			results[idx] = b
+		}(i)
+	}
+	wg.Wait()
+
+	for _, b := range results {
+		require.Equal(t, "stale-v1", b, "all callers must receive the stale value")
+	}
+
+	// The refresh deduplication ensures only one refresh runs per key.
+	// With 100ms origin delay + 10 concurrent stale requests, without dedup
+	// we'd see 10+ origin hits; with dedup we see 1 (seed) + 1 (refresh).
+	require.Eventually(t, func() bool {
+		_, _, b := get(t, p.url()+"/objects/stale")
+		return b == "stale-v2"
+	}, 3*time.Second, 20*time.Millisecond)
+	require.LessOrEqual(t, o.hitCount("stale"), 3, "refresh dedup must prevent per-request origin hits")
+}
+
 func TestE2E_PutThenGetRoundTrip(t *testing.T) {
 	o := newOrigin(t)
 	cache := newCache(t,
