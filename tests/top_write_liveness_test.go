@@ -9,9 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/go-kit/log"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
 
@@ -19,7 +17,6 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
 	"github.com/mrchypark/daramjwee/pkg/store/memstore"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
-	"github.com/mrchypark/daramjwee/pkg/store/redisstore"
 )
 
 const topWriteLivenessTimeout = 500 * time.Millisecond
@@ -293,17 +290,10 @@ func topWriteLivenessStores(t *testing.T) []topWriteLivenessStore {
 		objectstore.WithDir(objectDir),
 	)
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
-
 	return []topWriteLivenessStore{
 		{name: "memstore", store: memstore.New(0, nil)},
 		{name: "filestore", store: fileStore},
 		{name: "objectstore", store: objectStore},
-		{name: "redisstore", store: redisstore.New(client, log.NewNopLogger())},
 	}
 }
 
@@ -317,15 +307,8 @@ func contextAwareTopWriteLivenessStores(t *testing.T) []topWriteLivenessStore {
 		objectstore.WithDir(objectDir),
 	)
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
-
 	return []topWriteLivenessStore{
 		{name: "objectstore", store: objectStore},
-		{name: "redisstore", store: redisstore.New(client, log.NewNopLogger())},
 	}
 }
 

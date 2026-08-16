@@ -288,8 +288,13 @@ func (w *memStoreSink) Abort() error {
 
 func (w *memStoreSink) release() {
 	if w.buf != nil {
-		w.buf.Reset()
-		bufferPool.Put(w.buf)
+		// Only return small buffers to the pool to prevent large temporary
+		// allocations from holding memory indefinitely.
+		const maxPoolBufferSize = 1 << 20 // 1 MiB
+		if w.buf.Cap() <= maxPoolBufferSize {
+			w.buf.Reset()
+			bufferPool.Put(w.buf)
+		}
 		w.buf = nil
 	}
 	w.ms = nil
