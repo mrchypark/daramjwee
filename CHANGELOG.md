@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.14.0
+
+### 🔒 Correctness & Consistency
+
+*   **Redis store removed**: Removed Redis store and dependencies to simplify the codebase and reduce external dependencies.
+*   **streamTeeWriter pool lifetime fix**: Fixed use-after-free bug where `streamTeeWriter` was read after being returned to pool.
+*   **Multi-tier delete bottom-up order**: Changed delete order from top-down to bottom-up to prevent value resurrection.
+*   **Close/Shutdown completion barrier**: Added `sync.Once` and completion channel to ensure all callers wait for shutdown to complete.
+*   **objectstore Close method**: Added `Close()` method to flush pending writes and clean up resources.
+*   **MemStore buffer pool size limit**: Added 1 MiB limit for buffer pool returns to prevent memory retention.
+
+### 📚 Documentation
+
+*   **Consistency model**: Documented single-process, multi-process, and multi-writer consistency guarantees.
+*   **Fill coordination**: Documented loader error, context cancellation, panic, and stale result scenarios.
+*   **ObjectStore architecture**: Documented WAL/spool, segment writer, manifest/checkpoint, reader, compactor, GC, and remote adapter.
+*   **Tier promotion semantics**: Documented 3-phase model (Read Visibility → Promotion Eligibility → Promotion Commit).
+*   **Generation invariant**: Documented "observedGeneration == currentGeneration" enforcement.
+*   **Store contract**: Documented MISS/ERROR separation and cache fill failure handling.
+*   **Stampede prevention**: Documented per-key retry suppression and failure backoff strategies.
+*   **Metrics abstraction**: Documented `MetricsCollector` interface (documentation-only).
+*   **Recommended presets**: Documented configuration presets for common use cases.
+
+### ✅ Testing
+
+*   **Crash consistency tests**: Added 12 tests for concurrent delete/promotion, partial writes, generation fence, and close behavior.
+*   **Eviction correctness tests**: Added 5 tests for LRU, S3-FIFO, and SIEVE eviction policies.
+*   **Lock tuning benchmarks**: Added 9 benchmarks for concurrent read/write/delete performance.
+
+### ✅ Verification
+
+*   All unit tests pass
+*   Race detector tests pass
+*   ChatGPT Deep Reasoner review: P0-P2 all resolved
+
 ## v0.13.0
 
 ### ⚡ Performance
