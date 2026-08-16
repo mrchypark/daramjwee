@@ -17,11 +17,65 @@ import (
 // TestEvictionCorrectness_LRUEvictsLeastRecentlyUsed verifies that LRU
 // evicts the least recently used items when capacity is exceeded.
 func TestEvictionCorrectness_LRUEvictsLeastRecentlyUsed(t *testing.T) {
-	t.Skip("Skipping: eviction test needs capacity adjustment")
+	evictionPolicy := policy.NewLRU()
+	store := memstore.New(100, evictionPolicy) // 100 bytes capacity
+	cache, err := daramjwee.New(
+		nil,
+		daramjwee.WithTiers(store),
+		daramjwee.WithOpTimeout(5*time.Second),
+	)
+	require.NoError(t, err)
+	defer cache.Close()
+
+	// Fill cache with 3 items (each ~30 bytes)
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		value := fmt.Sprintf("value-%d-aaaaaaaaaaaa", i) // ~30 bytes
+		sink, err := cache.Set(context.Background(), key, &daramjwee.Metadata{CacheTag: fmt.Sprintf("v%d", i)})
+		require.NoError(t, err)
+		_, err = sink.Write([]byte(value))
+		require.NoError(t, err)
+		require.NoError(t, sink.Close())
+	}
+
+	// Access key-0 and key-1 to make them recently used
+	for i := 0; i < 2; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, nil)
+		if err == nil {
+			defer resp.Close()
+			_, _ = io.ReadAll(resp)
+		}
+	}
+
+	// Add a new item that exceeds capacity
+	sink, err := cache.Set(context.Background(), "key-new", &daramjwee.Metadata{CacheTag: "v-new"})
+	require.NoError(t, err)
+	_, err = sink.Write([]byte("value-new-aaaaaaaaaaaaaa")) // ~30 bytes
+	require.NoError(t, err)
+	require.NoError(t, sink.Close())
+
+	// key-2 should be evicted (least recently used)
+	resp, err := cache.Get(context.Background(), "key-2", daramjwee.GetRequest{}, nil)
+	if err == nil {
+		defer resp.Close()
+		require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)
+	}
+
+	// key-0 and key-1 should still exist
+	for i := 0; i < 2; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, nil)
+		if err == nil {
+			defer resp.Close()
+			require.Equal(t, daramjwee.GetStatusOK, resp.Status)
+		}
+	}
 }
 
+// TestEvictionCorrectness_S3FIFOEvictsFromSmallQueue verifies that S3-FIFO
+// evicts items from the small queue first.
 func TestEvictionCorrectness_S3FIFOEvictsFromSmallQueue(t *testing.T) {
-	t.Skip("Skipping: eviction test needs capacity adjustment")
 	evictionPolicy := policy.NewS3FIFO(100, 10) // 100 bytes capacity, 10% small queue
 	store := memstore.New(100, evictionPolicy)
 	cache, err := daramjwee.New(
@@ -45,7 +99,7 @@ func TestEvictionCorrectness_S3FIFOEvictsFromSmallQueue(t *testing.T) {
 
 	// Access key-0 multiple times to promote to main queue
 	for i := 0; i < 3; i++ {
-		resp, err := cache.Get(context.Background(), "key-0", daramjwee.GetRequest{}, silentFetcher{})
+		resp, err := cache.Get(context.Background(), "key-0", daramjwee.GetRequest{}, nil)
 		if err == nil {
 			defer resp.Close()
 			_, _ = io.ReadAll(resp)
@@ -60,7 +114,7 @@ func TestEvictionCorrectness_S3FIFOEvictsFromSmallQueue(t *testing.T) {
 	require.NoError(t, sink.Close())
 
 	// key-0 should still exist (promoted to main queue)
-	resp, err := cache.Get(context.Background(), "key-0", daramjwee.GetRequest{}, silentFetcher{})
+	resp, err := cache.Get(context.Background(), "key-0", daramjwee.GetRequest{}, nil)
 	if err == nil {
 		defer resp.Close()
 		require.Equal(t, daramjwee.GetStatusOK, resp.Status)
@@ -70,7 +124,6 @@ func TestEvictionCorrectness_S3FIFOEvictsFromSmallQueue(t *testing.T) {
 // TestEvictionCorrectness_SIEVEEvictsUnvisitedItems verifies that SIEVE
 // evicts items that have not been visited.
 func TestEvictionCorrectness_SIEVEEvictsUnvisitedItems(t *testing.T) {
-	t.Skip("Skipping: eviction test needs capacity adjustment")
 	evictionPolicy := policy.NewSieve()
 	store := memstore.New(100, evictionPolicy)
 	cache, err := daramjwee.New(
@@ -93,7 +146,7 @@ func TestEvictionCorrectness_SIEVEEvictsUnvisitedItems(t *testing.T) {
 	}
 
 	// Access key-0 to mark it as visited
-	resp, err := cache.Get(context.Background(), "key-0", daramjwee.GetRequest{}, silentFetcher{})
+	resp, err := cache.Get(context.Background(), "key-0", daramjwee.GetRequest{}, nil)
 	if err == nil {
 		defer resp.Close()
 		_, _ = io.ReadAll(resp)
@@ -107,7 +160,7 @@ func TestEvictionCorrectness_SIEVEEvictsUnvisitedItems(t *testing.T) {
 	require.NoError(t, sink.Close())
 
 	// key-0 should still exist (visited)
-	resp, err = cache.Get(context.Background(), "key-0", daramjwee.GetRequest{}, silentFetcher{})
+	resp, err = cache.Get(context.Background(), "key-0", daramjwee.GetRequest{}, nil)
 	if err == nil {
 		defer resp.Close()
 		require.Equal(t, daramjwee.GetStatusOK, resp.Status)
@@ -141,7 +194,7 @@ func TestEvictionCorrectness_NoEvictionWhenUnderCapacity(t *testing.T) {
 	// All items should still exist
 	for i := 0; i < 5; i++ {
 		key := fmt.Sprintf("key-%d", i)
-		resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, silentFetcher{})
+		resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, nil)
 		if err == nil {
 			defer resp.Close()
 			require.Equal(t, daramjwee.GetStatusOK, resp.Status)
@@ -185,7 +238,7 @@ func TestEvictionCorrectness_DeleteRemovesFromPolicy(t *testing.T) {
 	}
 
 	// The deleted key should not be resurrected
-	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, silentFetcher{})
+	resp, err := cache.Get(context.Background(), "key", daramjwee.GetRequest{}, nil)
 	if err == nil {
 		defer resp.Close()
 		require.Equal(t, daramjwee.GetStatusNotFound, resp.Status)

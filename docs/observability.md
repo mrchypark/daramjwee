@@ -62,7 +62,6 @@ daramjwee provides a metrics abstraction layer for integration with various metr
 
 ```go
 // MetricsCollector defines the interface for collecting cache metrics.
-// Implementations can integrate with Prometheus, StatsD, or other metrics systems.
 type MetricsCollector interface {
     // Cache operations
     IncrCacheHit(tier int)
@@ -87,8 +86,6 @@ type MetricsCollector interface {
     SetQueueDepth(count int)
 }
 ```
-
-**Note**: This interface is currently documentation-only. To use it, implement the interface in your application and pass it to the cache configuration. Future versions may include built-in implementations.
 
 ### Built-in Metrics
 
@@ -253,34 +250,15 @@ Implement health checks by verifying:
 
 ```go
 func healthCheck(cache daramjwee.Cache) error {
-    // Check if cache is closed
-    // Note: This is a basic check. For production, consider
-    // implementing a more comprehensive health check that
-    // verifies tier accessibility and worker pool status.
+    // Simple health check
     ctx, cancel := context.WithTimeout(context.Background(), time.Second)
     defer cancel()
     
-    // Use a dedicated health-check key that won't interfere with real data
-    resp, err := cache.Get(ctx, "__health_check__", daramjwee.GetRequest{}, &healthFetcher{})
-    if err != nil {
-        return err
-    }
-    defer resp.Close()
-    
-    if resp.Status == daramjwee.GetStatusNotFound {
+    _, err := cache.Get(ctx, "health-check", daramjwee.GetRequest{}, nil)
+    if err == daramjwee.ErrNilFetcher {
         return nil // Cache is responsive
     }
-    return nil
-}
-
-type healthFetcher struct{}
-
-func (f *healthFetcher) Fetch(ctx context.Context, oldMetadata *daramjwee.Metadata) (*daramjwee.FetchResult, error) {
-    // Return a simple health check response
-    return &daramjwee.FetchResult{
-        Body:     io.NopCloser(strings.NewReader("ok")),
-        Metadata: &daramjwee.Metadata{CacheTag: "health"},
-    }, nil
+    return err
 }
 ```
 

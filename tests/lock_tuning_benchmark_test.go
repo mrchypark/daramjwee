@@ -47,7 +47,7 @@ func BenchmarkConcurrentGet_HotHit(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			key := fmt.Sprintf("key-%d", i%100)
-			resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, noopFetcher{})
+			resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, nil)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -114,7 +114,7 @@ func BenchmarkConcurrentMixed(b *testing.B) {
 			} else {
 				// Read
 				key := fmt.Sprintf("key-%d", i%100)
-				resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, noopFetcher{})
+				resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, nil)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -166,7 +166,7 @@ func BenchmarkConcurrentGetSetDelete(b *testing.B) {
 			key := fmt.Sprintf("key-%d", i%100)
 			switch i % 10 {
 			case 0, 1, 2, 3, 4: // 50% reads
-				resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, noopFetcher{})
+				resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, nil)
 				if err != nil {
 					continue
 				}
@@ -211,7 +211,7 @@ func BenchmarkLockContention_HighContention(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			resp, err := cache.Get(context.Background(), "hot-key", daramjwee.GetRequest{}, noopFetcher{})
+			resp, err := cache.Get(context.Background(), "hot-key", daramjwee.GetRequest{}, nil)
 			if err != nil {
 				continue
 			}
@@ -265,7 +265,7 @@ func BenchmarkLockContention_ReadHeavy(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			key := fmt.Sprintf("key-%d", i%100)
-			resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, noopFetcher{})
+			resp, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, nil)
 			if err != nil {
 				continue
 			}
