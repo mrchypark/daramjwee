@@ -140,12 +140,15 @@ func TestGroup_Shutdown_DiscardsAllJobs(t *testing.T) {
 
 	// Submit a blocking job to occupy the worker
 	blocker := make(chan struct{})
+	jobStarted := make(chan struct{})
 	err := rt.Submit("cache-a", JobKindRefresh, Job{
 		Run: func(ctx context.Context) {
+			close(jobStarted)
 			<-blocker
 		},
 	})
 	require.NoError(t, err)
+	<-jobStarted
 
 	// Submit a job that will stay in the queue
 	discardCalled := false
@@ -159,6 +162,12 @@ func TestGroup_Shutdown_DiscardsAllJobs(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+
+	// Release the blocking job so Shutdown can complete
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(blocker)
+	}()
 
 	require.NoError(t, rt.Shutdown(time.Second))
 	require.True(t, discardCalled, "Discard should be called for dropped jobs")
