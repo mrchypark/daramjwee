@@ -32,9 +32,9 @@ func (r *Standalone) Submit(_ string, _ JobKind, job Job) error {
 	wrappedJob := func(ctx context.Context) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				if job.Discard != nil {
-					job.Discard(DropReasonShutdown)
-				}
+				// On panic, the job is considered incomplete.
+				// We re-panic to let the worker recover, but do NOT call Discard
+				// to maintain exact-once semantics (Run was called, so Discard must not be).
 				panic(rec)
 			}
 		}()

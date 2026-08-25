@@ -101,9 +101,56 @@ func (c *DaramjweeCache) handleLowerTierHit(p lowerTierHitParams) (*GetResponse,
 	}
 
 	isStale := c.isTierCachedStale(p.meta, p.tierIndex)
+
+	// Run pure Planner for observation/logging (does not affect decision).
+	c.observeLowerTierPlan(p, p.meta, isStale)
+
 	decision := c.decideLowerTierHit(p, p.meta, isStale)
 
 	return c.executeLowerTierDecision(p, decision, metaToPromote, isStale)
+}
+
+// buildLowerTierObservation creates an Observation from the current lookup state.
+// This is used by the Planner for policy decisions.
+func (c *DaramjweeCache) buildLowerTierObservation(p lowerTierHitParams, meta *Metadata, isStale bool) Observation {
+	obs := Observation{
+		Source:      SourceLower,
+		SourceTier:  p.tierIndex,
+		Freshness:   FreshnessFresh,
+		HasTopStore: hasRealStore(c.topWriteStore()),
+	}
+	if isStale {
+		obs.Freshness = FreshnessStale
+	}
+	if meta != nil {
+		obs.EntryNegative = meta.IsNegative
+	}
+	if p.higherTiersClean {
+		obs.UpperTiersHealth = UpperTiersClean
+	} else {
+		obs.UpperTiersHealth = UpperTiersDirty
+	}
+	if c.isConditionalRequestSatisfied(p.req, meta) {
+		obs.ConditionalMatched = true
+	}
+	if c.probation != nil && c.probation.isAdmissible(p.key) {
+		obs.Admission = AdmissionAllowed
+	} else if c.probation == nil {
+		obs.Admission = AdmissionAllowed
+	} else {
+		obs.Admission = AdmissionDeferred
+	}
+	return obs
+}
+
+// observeLowerTierPlan uses the pure Planner to compute a ReadPlan for validation.
+// The result is logged at debug level but does not override the existing decision logic.
+func (c *DaramjweeCache) observeLowerTierPlan(p lowerTierHitParams, meta *Metadata, isStale bool) {
+	obs := c.buildLowerTierObservation(p, meta, isStale)
+	plan := (&Planner{}).Plan(obs)
+	c.debugLog("msg", "planner observation", "key", p.key, "tier_index", p.tierIndex,
+		"source", obs.Source, "freshness", obs.Freshness, "admission", obs.Admission,
+		"reply", plan.Reply, "body", plan.Body, "publish", plan.Publish, "refresh", plan.Refresh)
 }
 
 // serveLowerTierWithoutPromotion serves data from a lower tier when higher tiers

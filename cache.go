@@ -125,24 +125,20 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 
 	// Slow path: need timeout context for lower tiers and origin fetch
 	topGenerationAtStart := c.currentTopWriteGeneration(key)
-	defer topGenerationAtStart.release()
 	setupCtx, cancel := c.newCtxWithTimeout(ctx)
+	session := newReadSession(nil, cancel, topGenerationAtStart)
 	higherTiersClean := true
 
 	for i, tier := range c.tiers {
 		tierStream, tierMeta, err := c.getStreamFromStore(c.getStreamContextForStore(ctx, setupCtx, tier), tier, key)
 		if err == nil {
 			if i == 0 {
-				// The tier-0 retry under the setup context can hit when a
-				// concurrent fill published between the fast-path miss and
-				// this lookup. Handle it as a proper top-tier hit instead of
-				// continuing with a canceled setup context.
 				resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart, nil, 0)
 				if respErr != nil {
-					cancel()
+					_ = session.Finish(OutcomeReadError)
 					return nil, respErr
 				}
-				return resp, nil
+				return c.attachSession(resp, session)
 			}
 			resp, respErr := c.handleLowerTierHit(lowerTierHitParams{
 				requestCtx:         ctx,
@@ -158,13 +154,13 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 				higherTiersClean:   higherTiersClean,
 			})
 			if respErr != nil {
-				cancel()
+				_ = session.Finish(OutcomeReadError)
 				return nil, respErr
 			}
-			return resp, nil
+			return c.attachSession(resp, session)
 		}
 		if errors.Is(err, ErrNilMetadata) {
-			cancel()
+			_ = session.Finish(OutcomeReadError)
 			return nil, err
 		}
 		if !errors.Is(err, ErrNotFound) {
@@ -173,11 +169,21 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 		}
 	}
 
-	// 3. Fetch from Origin
 	resp, respErr := c.handleMiss(ctx, setupCtx, key, req, fetcher, cancel, topGenerationAtStart, higherTiersClean)
 	if respErr != nil {
-		cancel()
+		_ = session.Finish(OutcomeReadError)
 		return nil, respErr
+	}
+	return c.attachSession(resp, session)
+}
+
+// attachSession wraps the response body with outcomeReader for session cleanup,
+// or finishes the session immediately for non-body responses.
+func (c *DaramjweeCache) attachSession(resp *GetResponse, session *ReadSession) (*GetResponse, error) {
+	if resp != nil && resp.Body != nil {
+		resp.Body = newOutcomeReader(resp.Body, session)
+	} else {
+		_ = session.Finish(OutcomeEOF)
 	}
 	return resp, nil
 }

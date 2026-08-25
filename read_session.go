@@ -142,6 +142,6 @@ func newOutcomeReader(source io.ReadCloser, session *ReadSession) io.ReadCloser 
 // Close closes the underlying reader and finishes the session with OutcomeEOF.
 func (r *outcomeReader) Close() error {
 	err := r.ReadCloser.Close()
-	r.session.Finish(OutcomeEOF)
+	_ = r.session.Finish(OutcomeEOF)
 	return err
 }

@@ -266,9 +266,9 @@ func TestPlanner_Plan_AllOutcomeCombinations(t *testing.T) {
 	hasTopStore := []bool{true, false}
 
 	validReplies := map[ReplySpec]bool{
-		ReplyOK:         true,
+		ReplyOK:          true,
 		ReplyNotModified: true,
-		ReplyNotFound:   true,
+		ReplyNotFound:    true,
 	}
 
 	for _, src := range sources {
