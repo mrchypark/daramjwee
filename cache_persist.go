@@ -108,7 +108,6 @@ func (c *DaramjweeCache) schedulePersistFromTop(ctx context.Context, key string,
 			jobGeneration.release()
 			c.warnLog("msg", "background set rejected", "key", key, "dest_tier", destTierIndex)
 		}}); err != nil {
-			jobGeneration.release()
 			c.warnLog("msg", "background set rejected", "key", key, "dest_tier", destTierIndex)
 		}
 	}

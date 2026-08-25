@@ -130,7 +130,6 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		c.releaseRefreshDedup(key)
 	}
 	if err := c.runtime.Submit(c.cacheID, JobKindRefresh, runtime.Job{Run: job, Discard: onDrop}); err != nil {
-		onDrop(runtime.DropReasonRejected)
 		return ErrBackgroundJobRejected
 	}
 	return nil
