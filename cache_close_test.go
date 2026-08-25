@@ -1,13 +1,13 @@
 package daramjwee
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/go-kit/log"
 	"github.com/stretchr/testify/require"
-
-	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
 type cacheCloseStubRuntime struct {
@@ -19,11 +19,9 @@ type cacheCloseStubRuntime struct {
 }
 
 func (s *cacheCloseStubRuntime) Register(cacheID string, cfg CacheRuntimeConfig) error { return nil }
-func (s *cacheCloseStubRuntime) Submit(cacheID string, kind JobKind, job worker.Job) bool {
-	return true
-}
-func (s *cacheCloseStubRuntime) SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
-	return true
+func (s *cacheCloseStubRuntime) Submit(cacheID string, kind JobKind, job Job) error {
+	job.Run(context.Background())
+	return nil
 }
 func (s *cacheCloseStubRuntime) CloseCache(cacheID string, timeout time.Duration) error {
 	s.closeCalls++
@@ -38,7 +36,8 @@ func (s *cacheCloseStubRuntime) RemoveCache(cacheID string) {
 func (s *cacheCloseStubRuntime) Shutdown(timeout time.Duration) error { return nil }
 
 func TestDaramjweeCache_Close_RemovesRuntimeStateAfterTimeout(t *testing.T) {
-	rt := &cacheCloseStubRuntime{closeErr: worker.ErrShutdownTimeout}
+	errShutdownTimeout := errors.New("worker: shutdown timed out")
+	rt := &cacheCloseStubRuntime{closeErr: errShutdownTimeout}
 	hookCalls := 0
 
 	cache := &DaramjweeCache{

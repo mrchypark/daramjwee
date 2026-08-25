@@ -43,6 +43,17 @@ func (p *promotionProbation) observe(key string) bool {
 	return false
 }
 
+// isAdmissible checks whether a key would be admitted without side effects.
+func (p *promotionProbation) isAdmissible(key string) bool {
+	if p == nil {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.seen[key]
+	return ok
+}
+
 // forget removes a key from the probation set, resetting its promotion
 // state. Called when a key is deleted.
 func (p *promotionProbation) forget(key string) {

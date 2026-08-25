@@ -139,7 +139,7 @@ func TestConcurrentRefresh(t *testing.T) {
 		t.Error(err)
 	}
 
-	// 잠시 대기하여 백그라운드 작업 완료
+	// Wait for background operations to complete
 	time.Sleep(100 * time.Millisecond)
 }
 

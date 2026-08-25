@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"time"
+
+	"github.com/mrchypark/daramjwee/internal/runtime"
 )
 
 // ScheduleRefresh submits a background cache refresh job to the worker.
@@ -123,12 +125,11 @@ func (c *DaramjweeCache) scheduleRefreshWithMetadata(ctx context.Context, key st
 		}
 	}
 
-	onDrop := func() {
+	onDrop := func(_ runtime.DropReason) {
 		expectedGeneration.release()
 		c.releaseRefreshDedup(key)
 	}
-	if !c.runtime.SubmitWithDropCleanup(c.cacheID, JobKindRefresh, job, onDrop) {
-		onDrop()
+	if err := c.runtime.Submit(c.cacheID, JobKindRefresh, runtime.Job{Run: job, Discard: onDrop}); err != nil {
 		return ErrBackgroundJobRejected
 	}
 	return nil

@@ -8,8 +8,6 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-
-	"github.com/mrchypark/daramjwee/internal/worker"
 )
 
 type rejectReason string
@@ -53,8 +51,7 @@ type groupCacheState struct {
 type queuedJob struct {
 	cacheID string
 	kind    JobKind
-	job     worker.Job
-	onDrop  func()
+	job     Job
 }
 
 func NewGroup(logger log.Logger, workers int, timeout time.Duration) Runtime {
@@ -111,17 +108,16 @@ func (r *Group) Register(cacheID string, cfg Config) error {
 	return nil
 }
 
-func (r *Group) Submit(cacheID string, kind JobKind, job worker.Job) bool {
-	return r.submit(cacheID, kind, job, nil)
+func (r *Group) Submit(cacheID string, kind JobKind, job Job) error {
+	return r.submit(cacheID, kind, job)
 }
 
-func (r *Group) SubmitWithDropCleanup(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
-	return r.submit(cacheID, kind, job, onDrop)
-}
-
-func (r *Group) submit(cacheID string, kind JobKind, job worker.Job, onDrop func()) bool {
+func (r *Group) submit(cacheID string, kind JobKind, job Job) error {
 	if r == nil {
-		return false
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
+		}
+		return ErrRejected
 	}
 
 	r.mu.Lock()
@@ -129,30 +125,45 @@ func (r *Group) submit(cacheID string, kind JobKind, job worker.Job, onDrop func
 	if !ok {
 		r.noteRejectLocked(cacheID, kind, rejectReasonCacheClosed, 0, 0)
 		r.mu.Unlock()
-		return false
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
+		}
+		return ErrRejected
 	}
 	if r.closing {
 		r.noteRejectLocked(cacheID, kind, rejectReasonGroupClosing, len(state.queue), state.queueLimit)
 		r.mu.Unlock()
-		return false
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
+		}
+		return ErrRejected
 	}
 	if state.closed {
 		r.noteRejectLocked(cacheID, kind, rejectReasonCacheClosed, len(state.queue), state.queueLimit)
 		r.mu.Unlock()
-		return false
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
+		}
+		return ErrRejected
 	}
 	depth := len(state.queue)
 	if depth >= state.queueLimit {
 		r.noteRejectLocked(cacheID, kind, rejectReasonQueueFull, depth, state.queueLimit)
 		r.mu.Unlock()
-		return false
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
+		}
+		return ErrRejected
 	}
 	select {
-	case state.queue <- queuedJob{cacheID: cacheID, kind: kind, job: job, onDrop: onDrop}:
+	case state.queue <- queuedJob{cacheID: cacheID, kind: kind, job: job}:
 	default:
 		r.noteRejectLocked(cacheID, kind, rejectReasonQueueFull, len(state.queue), state.queueLimit)
 		r.mu.Unlock()
-		return false
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
+		}
+		return ErrRejected
 	}
 	_ = level.Debug(r.logger).Log(
 		"msg", "queued background job",
@@ -163,13 +174,7 @@ func (r *Group) submit(cacheID string, kind JobKind, job worker.Job, onDrop func
 	)
 	r.cond.Signal()
 	r.mu.Unlock()
-	return true
-}
-
-func (j queuedJob) drop() {
-	if j.onDrop != nil {
-		j.onDrop()
-	}
+	return nil
 }
 
 func (r *Group) RemoveCache(cacheID string) {
@@ -239,7 +244,9 @@ func (r *Group) CloseCache(cacheID string, timeout time.Duration) error {
 	r.mu.Unlock()
 
 	for _, job := range droppedJobs {
-		job.drop()
+		if job.job.Discard != nil {
+			job.job.Discard(DropReasonShutdown)
+		}
 	}
 
 	_ = level.Info(r.logger).Log("msg", "closing cache runtime", "cache_id", cacheID, "dropped_jobs", dropped, "timeout", timeout)
@@ -277,7 +284,9 @@ func (r *Group) Shutdown(timeout time.Duration) error {
 	r.mu.Unlock()
 
 	for _, job := range droppedJobs {
-		job.drop()
+		if job.job.Discard != nil {
+			job.job.Discard(DropReasonShutdown)
+		}
 	}
 
 	done := make(chan struct{})
@@ -291,7 +300,7 @@ func (r *Group) Shutdown(timeout time.Duration) error {
 		return nil
 	case <-time.After(timeout):
 		_ = level.Warn(r.logger).Log("msg", "group runtime shutdown timed out", "timeout", timeout)
-		return worker.ErrShutdownTimeout
+		return ErrShutdownTimeout
 	}
 }
 
@@ -307,7 +316,9 @@ func (r *Group) workerLoop(_ int) {
 		closed := state.closed
 		r.mu.Unlock()
 		if closed {
-			job.drop()
+			if job.job.Discard != nil {
+				job.job.Discard(DropReasonShutdown)
+			}
 			r.mu.Lock()
 			state.active--
 			r.notifyCacheActivityLocked(state)
@@ -331,7 +342,7 @@ func (r *Group) workerLoop(_ int) {
 				r.notifyCacheActivityLocked(state)
 				r.mu.Unlock()
 			}()
-			job.job(ctx)
+			job.job.Run(ctx)
 		}()
 	}
 }
@@ -424,7 +435,7 @@ func (r *Group) waitForCacheClose(cacheID string, done <-chan struct{}, timeout 
 		return nil
 	case <-time.After(timeout):
 		_ = level.Warn(r.logger).Log("msg", "cache close timed out", "cache_id", cacheID, "timeout", timeout)
-		return worker.ErrShutdownTimeout
+		return ErrShutdownTimeout
 	}
 }
 

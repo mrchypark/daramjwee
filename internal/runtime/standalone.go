@@ -21,36 +21,33 @@ func (r *Standalone) Register(string, Config) error {
 	return nil
 }
 
-func (r *Standalone) Submit(_ string, _ JobKind, job worker.Job) bool {
+func (r *Standalone) Submit(_ string, _ JobKind, job Job) error {
 	if r == nil || r.manager == nil {
-		return false
-	}
-	return r.manager.Submit(job)
-}
-
-func (r *Standalone) SubmitWithDropCleanup(_ string, _ JobKind, job worker.Job, onDrop func()) bool {
-	if r == nil || r.manager == nil {
-		if onDrop != nil {
-			onDrop()
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
 		}
-		return false
+		return ErrRejected
 	}
+
 	wrappedJob := func(ctx context.Context) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				if onDrop != nil {
-					onDrop()
-				}
+				// On panic, the job is considered incomplete.
+				// We re-panic to let the worker recover, but do NOT call Discard
+				// to maintain exact-once semantics (Run was called, so Discard must not be).
 				panic(rec)
 			}
 		}()
-		job(ctx)
+		job.Run(ctx)
 	}
-	submitted := r.manager.Submit(wrappedJob)
-	if !submitted && onDrop != nil {
-		onDrop()
+
+	if !r.manager.Submit(wrappedJob) {
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
+		}
+		return ErrRejected
 	}
-	return submitted
+	return nil
 }
 
 func (r *Standalone) CloseCache(_ string, timeout time.Duration) error {

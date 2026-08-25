@@ -215,10 +215,11 @@ func newPanicTestRuntime(t *testing.T) backgroundRuntime {
 	return runtime.NewStandalone(manager)
 }
 
-func waitForRuntimeRecovery(t *testing.T, runtime backgroundRuntime, cacheID string, kind JobKind) {
+func waitForRuntimeRecovery(t *testing.T, rt backgroundRuntime, cacheID string, kind JobKind) {
 	t.Helper()
 	recovered := make(chan struct{})
-	require.True(t, runtime.Submit(cacheID, kind, func(context.Context) { close(recovered) }))
+	err := rt.Submit(cacheID, kind, Job{Run: func(context.Context) { close(recovered) }})
+	require.NoError(t, err)
 	select {
 	case <-recovered:
 	case <-time.After(2 * time.Second):

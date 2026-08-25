@@ -48,7 +48,7 @@ func TestSafeCloserReadAll(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 콜백 실행 확인용
+			// callbackExecuted tracks whether the callback was called
 			callbackExecuted := false
 
 			// strings.NewReader로 ReadCloser 생성
@@ -72,7 +72,7 @@ func TestSafeCloserReadAll(t *testing.T) {
 				t.Errorf("ReadAll() = %q, want %q", string(result), tt.expected)
 			}
 
-			// 콜백 실행 확인
+			// Verify callback was executed as expected
 			if callbackExecuted != tt.callback {
 				t.Errorf("callback executed = %v, want %v", callbackExecuted, tt.callback)
 			}
@@ -81,11 +81,11 @@ func TestSafeCloserReadAll(t *testing.T) {
 }
 
 func TestSafeCloserReadAllAutoClose(t *testing.T) {
-	// 콜백 실행 확인
+	// Verify callback execution
 	callbackExecuted := false
 	closeCount := 0
 
-	// 커스텀 ReadCloser로 Close 호출 횟수 확인
+	// Track close call count with custom ReadCloser
 	reader := &testReadCloser{
 		Reader: strings.NewReader("test data"),
 		onClose: func() {
@@ -113,12 +113,12 @@ func TestSafeCloserReadAllAutoClose(t *testing.T) {
 		t.Errorf("close count = %d, want 1", closeCount)
 	}
 
-	// 콜백이 실행되어야 함
+	// Callback should have been executed
 	if !callbackExecuted {
 		t.Error("callback should be executed")
 	}
 
-	// 다시 Close 호출해도 중복 실행되지 않아야 함
+	// Duplicate Close should not trigger callback again
 	sc.Close()
 	if closeCount != 1 {
 		t.Errorf("close count after second Close() = %d, want 1", closeCount)
