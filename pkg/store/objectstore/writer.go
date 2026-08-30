@@ -77,7 +77,11 @@ func (w *writer) Commit(ctx context.Context) error {
 		Metadata:    metadata,
 	})
 	if err != nil {
-		_ = removeLocalSegment(sealedPath)
+		if published {
+			w.store.enqueueFlush(w.key)
+		} else {
+			_ = removeLocalSegment(sealedPath)
+		}
 		return err
 	}
 	if !published {

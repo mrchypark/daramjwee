@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/go-kit/log/level"
-
 	internalcatalog "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/catalog"
 )
 
@@ -104,7 +102,7 @@ func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) (bool, er
 		applied   bool
 		staleSeen bool
 	)
-	if err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+	committed, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		prev, ok = current, exists
 		if exists && current.Generation > entry.Generation {
 			staleSeen = true
@@ -112,28 +110,19 @@ func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) (bool, er
 		}
 		applied = true
 		return entry, true
-	}); err != nil {
-		return false, err
-	}
-	if staleSeen || !applied {
-		return false, nil
-	}
-	if ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
+	})
+	published := committed && applied && !staleSeen
+	if published && ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
 		s.markLocalSegmentReclaimable(prev.SegmentPath)
 	}
-	return true, nil
+	return published, err
 }
 
-func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) error {
-	if s.catalog == nil {
-		return nil
+func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error) {
+	if s.updateCatalog == nil {
+		return true, nil
 	}
-	committed, err := s.catalog.Update(key, fn)
-	if err != nil && committed {
-		_ = level.Warn(s.logger).Log("msg", "objectstore catalog directory sync failed after commit", "err", err)
-		return nil
-	}
-	return err
+	return s.updateCatalog(key, fn)
 }
 
 func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCatalogEntry) error {
@@ -146,17 +135,18 @@ func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCata
 			continue
 		}
 		applied := false
-		if err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		committed, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 			if !exists || current != expected {
 				return current, exists
 			}
 			applied = true
 			return next, true
-		}); err != nil {
-			return err
-		}
-		if applied && expected.SegmentPath != "" && expected.SegmentPath != next.SegmentPath {
+		})
+		if committed && applied && expected.SegmentPath != "" && expected.SegmentPath != next.SegmentPath {
 			s.markLocalSegmentReclaimable(expected.SegmentPath)
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -172,7 +162,7 @@ func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, err
 		applied         bool
 		staleSeen       bool
 	)
-	if err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+	committed, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		if exists && current.Generation > generation {
 			staleSeen = true
 			return current, true
@@ -187,16 +177,12 @@ func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, err
 			Metadata:   current.Metadata,
 		}
 		return tombstone, true
-	}); err != nil {
-		return false, err
-	}
-	if staleSeen || !applied {
-		return false, nil
-	}
-	if previousSegment != "" {
+	})
+	published := committed && applied && !staleSeen
+	if published && previousSegment != "" {
 		s.markLocalSegmentReclaimable(previousSegment)
 	}
-	return true, nil
+	return published, err
 }
 
 func removeLocalSegment(path string) error {

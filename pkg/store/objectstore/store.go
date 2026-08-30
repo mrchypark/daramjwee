@@ -90,6 +90,7 @@ type Store struct {
 	pageCache           *blockcache.Cache
 	checkpointCache     *checkpointCache
 	catalog             *internalcatalog.Catalog
+	updateCatalog       func(string, func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error)
 	lockManager         *stripedlock.Manager
 	blockLoads          singleflight.Group
 	pageLoads           singleflight.Group
@@ -188,6 +189,9 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	store.checkpointCache = newCheckpointCache(cfg.checkpointCacheBytes, cfg.checkpointTTL, func() time.Time {
 		return store.now()
 	})
+	if cat != nil {
+		store.updateCatalog = cat.Update
+	}
 	if store.initErr == nil {
 		if err := store.recoverLocalState(); err != nil {
 			store.initErr = fmt.Errorf("failed to recover local objectstore state: %w", err)
@@ -402,6 +406,9 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	generation := s.nextGeneration()
 	applied, err := s.publishDeleteTombstone(key, generation)
 	if err != nil {
+		if applied {
+			s.enqueueFlush(key)
+		}
 		return err
 	}
 	if !applied {

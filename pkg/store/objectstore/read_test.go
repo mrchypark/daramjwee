@@ -276,12 +276,13 @@ func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *
 			Metadata:    entry.Metadata,
 		},
 	}))
-	require.NoError(t, store.updateLocalEntry("local-disappears-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+	_, updateErr := store.updateLocalEntry("local-disappears-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		require.True(t, exists)
 		current.RemotePath = remotePath
 		current.RemoteOffset = 0
 		return current, true
-	}))
+	})
+	require.NoError(t, updateErr)
 
 	origOpen := openLocalSegmentFile
 	openLocalSegmentFile = func(path string) (*os.File, error) {
@@ -366,14 +367,15 @@ func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *
 		if first {
 			first = false
 			require.NoError(t, os.Remove(path))
-			require.NoError(t, store.updateLocalEntry("local-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			_, updateErr := store.updateLocalEntry("local-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 				require.True(t, exists)
 				current.SegmentPath = newSegmentPath
 				current.Offset = 0
 				current.Length = int64(len("newest local body"))
 				current.Metadata.CacheTag = "v3"
 				return current, true
-			}))
+			})
+			require.NoError(t, updateErr)
 		}
 		return origOpen(path)
 	}
@@ -424,24 +426,26 @@ func TestStore_GetStream_FinalRecheckUsesNewestLocalGenerationBeforeRemoteFallba
 		switch openCount {
 		case 1:
 			require.NoError(t, os.Remove(path))
-			require.NoError(t, store.updateLocalEntry("local-final-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			_, updateErr := store.updateLocalEntry("local-final-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 				require.True(t, exists)
 				current.SegmentPath = secondSegmentPath
 				current.Offset = 0
 				current.Length = int64(len("second local body"))
 				current.Metadata.CacheTag = "v3"
 				return current, true
-			}))
+			})
+			require.NoError(t, updateErr)
 		case 2:
 			require.NoError(t, os.Remove(path))
-			require.NoError(t, store.updateLocalEntry("local-final-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			_, updateErr := store.updateLocalEntry("local-final-recheck-newer-local", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 				require.True(t, exists)
 				current.SegmentPath = thirdSegmentPath
 				current.Offset = 0
 				current.Length = int64(len("third local body"))
 				current.Metadata.CacheTag = "v4"
 				return current, true
-			}))
+			})
+			require.NoError(t, updateErr)
 		}
 		return origOpen(path)
 	}

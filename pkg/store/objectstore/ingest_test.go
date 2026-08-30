@@ -496,12 +496,13 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 			Metadata:    entry.Metadata,
 		},
 	}))
-	require.NoError(t, store.updateLocalEntry("missing-segment-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+	_, updateErr := store.updateLocalEntry("missing-segment-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		require.True(t, exists)
 		current.RemotePath = remotePath
 		current.RemoteOffset = 0
 		return current, true
-	}))
+	})
+	require.NoError(t, updateErr)
 
 	segments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
 	require.NoError(t, err)
@@ -882,6 +883,40 @@ func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 	segments, globErr := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
 	require.NoError(t, globErr)
 	require.Empty(t, segments)
+}
+
+func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
+	ctx := context.Background()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(t.TempDir()),
+	)
+	store.autoFlush = false
+
+	updateCatalog := store.updateCatalog
+	store.updateCatalog = func(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error) {
+		committed, err := updateCatalog(key, fn)
+		if err != nil || !committed {
+			return committed, err
+		}
+		return true, errors.New("sync dir failed")
+	}
+
+	writer, err := store.BeginSet(ctx, "postrename-failure", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.ErrorContains(t, writer.Close(), "sync dir failed")
+
+	entry, ok := store.catalog.Get("postrename-failure")
+	require.True(t, ok)
+	require.FileExists(t, entry.SegmentPath)
+
+	store.flushMu.Lock()
+	_, pending := store.pendingShards[shardForKey("postrename-failure")]
+	store.flushMu.Unlock()
+	require.True(t, pending)
 }
 
 func TestStore_CloseWaitsForActiveWriterAndFlushesIt(t *testing.T) {
