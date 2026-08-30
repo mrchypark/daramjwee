@@ -220,11 +220,11 @@ func (s *Store) Close() error {
 			return
 		}
 		s.writersMu.Unlock()
-		s.writers.Wait()
 
 		s.flushMu.Lock()
 		s.autoFlush = false
 		s.flushMu.Unlock()
+		s.writers.Wait()
 
 		// Flush any pending writes.
 		if err := s.flushPending(context.Background()); err != nil {
