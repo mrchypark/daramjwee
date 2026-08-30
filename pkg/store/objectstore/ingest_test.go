@@ -946,6 +946,7 @@ func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
 	clear(store.pendingShards)
 	store.flushMu.Unlock()
 
+	updateCatalog := store.updateCatalog
 	failCatalogAfterCommit(store)
 
 	writer, err := store.BeginSet(ctx, "postrename-failure", &daramjwee.Metadata{CacheTag: "v2"})
@@ -966,6 +967,10 @@ func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
 	_, pending := store.pendingShards[shardForKey("postrename-failure")]
 	store.flushMu.Unlock()
 	require.True(t, pending)
+
+	store.updateCatalog = updateCatalog
+	require.NoError(t, store.flushPending(ctx))
+	require.NoFileExists(t, previous.SegmentPath)
 }
 
 func TestStore_DeletePostRenameFailurePreservesPreviousSegment(t *testing.T) {

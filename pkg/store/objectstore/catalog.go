@@ -117,8 +117,12 @@ func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) (bool, er
 		return entry, true
 	})
 	published := committed && applied && !staleSeen
-	if err == nil && published && ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
-		s.markLocalSegmentReclaimable(prev.SegmentPath)
+	if published && ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
+		if err == nil {
+			s.markLocalSegmentReclaimable(prev.SegmentPath)
+		} else {
+			s.deferLocalSegmentReclaim(prev.SegmentPath)
+		}
 	}
 	return published, err
 }
@@ -147,8 +151,12 @@ func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCata
 			applied = true
 			return next, true
 		})
-		if err == nil && committed && applied && expected.SegmentPath != "" && expected.SegmentPath != next.SegmentPath {
-			s.markLocalSegmentReclaimable(expected.SegmentPath)
+		if committed && applied && expected.SegmentPath != "" && expected.SegmentPath != next.SegmentPath {
+			if err == nil {
+				s.markLocalSegmentReclaimable(expected.SegmentPath)
+			} else {
+				s.deferLocalSegmentReclaim(expected.SegmentPath)
+			}
 		}
 		if err != nil {
 			return err
@@ -184,8 +192,12 @@ func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, err
 		return tombstone, true
 	})
 	published := committed && applied && !staleSeen
-	if err == nil && published && previousSegment != "" {
-		s.markLocalSegmentReclaimable(previousSegment)
+	if published && previousSegment != "" {
+		if err == nil {
+			s.markLocalSegmentReclaimable(previousSegment)
+		} else {
+			s.deferLocalSegmentReclaim(previousSegment)
+		}
 	}
 	return published, err
 }

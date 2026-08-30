@@ -122,6 +122,7 @@ func (s *Store) flushPendingAcquired(ctx context.Context) error {
 			if err := s.syncCatalog(); err != nil {
 				return err
 			}
+			s.reclaimDurableLocalSegments()
 		}
 		shards := s.takePendingShards()
 		if len(shards) == 0 {

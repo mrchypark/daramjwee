@@ -102,6 +102,7 @@ type Store struct {
 	segmentRefsMu       sync.Mutex
 	segmentRefs         map[string]int
 	reclaimableSegs     map[string]struct{}
+	pendingDurableSegs  map[string]struct{}
 	flushMu             sync.Mutex
 	flushRun            contextSemaphore
 	remoteState         contextSemaphore
@@ -159,26 +160,27 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		cat, initErr = openCatalog(filepath.Join(dataDir, "catalog"))
 	}
 	store := &Store{
-		bucket:          bucket,
-		logger:          logger,
-		dataDir:         dataDir,
-		prefix:          trimSlashes(cfg.prefix),
-		gcGrace:         cfg.gcGrace,
-		packThreshold:   cfg.packThreshold,
-		pagedThreshold:  cfg.pagedThreshold,
-		pageSize:        cfg.pageSize,
-		blockCache:      blockcache.New(cfg.blockCacheBytes),
-		pageCache:       blockcache.New(cfg.pageCacheBytes),
-		catalog:         cat,
-		lockManager:     stripedlock.New(2048),
-		initErr:         initErr,
-		segmentRefs:     make(map[string]int),
-		reclaimableSegs: make(map[string]struct{}),
-		pendingShards:   make(map[string]struct{}),
-		flushRun:        newContextSemaphore(),
-		remoteState:     newContextSemaphore(),
-		autoFlush:       true,
-		now:             time.Now,
+		bucket:             bucket,
+		logger:             logger,
+		dataDir:            dataDir,
+		prefix:             trimSlashes(cfg.prefix),
+		gcGrace:            cfg.gcGrace,
+		packThreshold:      cfg.packThreshold,
+		pagedThreshold:     cfg.pagedThreshold,
+		pageSize:           cfg.pageSize,
+		blockCache:         blockcache.New(cfg.blockCacheBytes),
+		pageCache:          blockcache.New(cfg.pageCacheBytes),
+		catalog:            cat,
+		lockManager:        stripedlock.New(2048),
+		initErr:            initErr,
+		segmentRefs:        make(map[string]int),
+		reclaimableSegs:    make(map[string]struct{}),
+		pendingDurableSegs: make(map[string]struct{}),
+		pendingShards:      make(map[string]struct{}),
+		flushRun:           newContextSemaphore(),
+		remoteState:        newContextSemaphore(),
+		autoFlush:          true,
+		now:                time.Now,
 		scheduleFlushAfter: func(delay time.Duration, run func()) {
 			time.AfterFunc(delay, run)
 		},
