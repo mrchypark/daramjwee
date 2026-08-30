@@ -884,6 +884,38 @@ func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 	require.Empty(t, segments)
 }
 
+func TestStore_CloseWaitsForActiveWriterAndFlushesIt(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "close-active-writer", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- store.Close() }()
+	require.Eventually(t, store.isClosed.Load, time.Second, time.Millisecond)
+	select {
+	case err := <-closeDone:
+		require.FailNow(t, "Close returned while a writer was active", "err: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	require.NoError(t, writer.Close())
+	require.NoError(t, <-closeDone)
+
+	reopened := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	stream, _, err := reopened.GetStream(ctx, "close-active-writer")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, stream.Close()) })
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.Equal(t, "payload", string(body))
+}
+
 func TestStore_CommitSealFailureCleansStagingSegment(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

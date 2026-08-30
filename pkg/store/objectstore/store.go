@@ -111,6 +111,8 @@ type Store struct {
 	now                func() time.Time
 	openSegmentWriter  func(root, shard, segmentID string) (segmentWriter, error)
 	isClosed           atomic.Bool
+	writersMu          sync.Mutex
+	writers            sync.WaitGroup
 	closeOnce          sync.Once
 	closeDone          chan struct{}
 	closeErr           error
@@ -212,9 +214,13 @@ func (s *Store) Close() error {
 		s.closeDone = make(chan struct{})
 		defer close(s.closeDone)
 
+		s.writersMu.Lock()
 		if s.isClosed.Swap(true) {
+			s.writersMu.Unlock()
 			return
 		}
+		s.writersMu.Unlock()
+		s.writers.Wait()
 
 		s.flushMu.Lock()
 		s.autoFlush = false
@@ -354,11 +360,19 @@ func (s *Store) beginSet(ctx context.Context, key string, metadata *daramjwee.Me
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
+	s.writersMu.Lock()
+	if s.isClosed.Load() {
+		s.writersMu.Unlock()
+		return nil, errors.New("objectstore: store is closed")
+	}
+	s.writers.Add(1)
+	s.writersMu.Unlock()
 
 	generation := s.nextGeneration()
 	segmentID := s.nextVersion()
 	segmentWriter, err := s.openSegmentWriter(s.dataDir, shardForKey(key), segmentID) //nolint:govet // shadow: intentional variable reuse
 	if err != nil {
+		s.writers.Done()
 		return nil, err
 	}
 

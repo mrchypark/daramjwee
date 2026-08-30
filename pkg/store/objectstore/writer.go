@@ -53,6 +53,7 @@ func (w *writer) Commit(ctx context.Context) error {
 	if !w.markDone() {
 		return nil
 	}
+	defer w.store.writers.Done()
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("objectstore: commit: %w", w.abortWith(err))
 	}
@@ -91,6 +92,7 @@ func (w *writer) Abort() error {
 	if !w.markDone() {
 		return nil
 	}
+	defer w.store.writers.Done()
 	return w.segment.Abort()
 }
 
