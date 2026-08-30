@@ -34,8 +34,9 @@ func TestPlannerPlans(t *testing.T) {
 		{"lower promote negative", lower(Observation{EntryNegative: true, HasTopStore: true}), ReadPlan{Reply: ReplyNotFound, Publish: PublishOnEOF, Fanout: FanoutAfterPublish}},
 		{"lower defer negative", lower(Observation{EntryNegative: true, HasTopStore: true, Admission: AdmissionDeferred}), ReadPlan{Reply: ReplyNotFound}},
 		{"lower stale negative", lower(Observation{EntryNegative: true, Freshness: FreshnessStale, HasTopStore: true}), ReadPlan{Reply: ReplyNotFound, Refresh: RefreshOnClose}},
-		{"lower conditional legacy default", lower(Observation{ConditionalMatched: true, HasTopStore: true}), ReadPlan{Reply: ReplyNotModified}},
+		{"lower conditional legacy default", lower(Observation{ConditionalMatched: true, HasTopStore: true}), ReadPlan{Reply: ReplyNotModified, Refresh: RefreshOnClose}},
 		{"lower conditional without top", lower(Observation{ConditionalMatched: true}), ReadPlan{Reply: ReplyNotModified}},
+		{"lower stale conditional without top", lower(Observation{ConditionalMatched: true, Freshness: FreshnessStale}), ReadPlan{Reply: ReplyNotModified}},
 		{"dirty lower positive", lower(Observation{UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyDirect}},
 		{"dirty lower stale", lower(Observation{Freshness: FreshnessStale, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose}},
 		{"dirty lower negative", lower(Observation{EntryNegative: true, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyNotFound}},
@@ -50,6 +51,7 @@ func TestPlannerPlans(t *testing.T) {
 	}
 
 	conditional := Observation{Source: SourceLower, ConditionalMatched: true, HasTopStore: true}
+	require.Equal(t, ReadPlan{Reply: ReplyNotModified}, planner.plan(conditional, generationValid))
 	require.Equal(t, ReadPlan{Reply: ReplyNotModified, Refresh: RefreshOnClose}, planner.plan(Observation{
 		Source: SourceLower, ConditionalMatched: true, Freshness: FreshnessStale, HasTopStore: true,
 	}, generationValid))

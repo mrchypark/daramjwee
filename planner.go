@@ -145,7 +145,14 @@ func (p *Planner) planLowerTierHit(obs Observation, topGeneration generationVali
 		return p.planDirectServe(obs)
 	}
 	if obs.ConditionalMatched {
-		if topGeneration != generationUnspecified && topGeneration != generationValid {
+		if topGeneration == generationUnspecified {
+			plan.Reply = ReplyNotModified
+			if obs.HasTopStore {
+				plan.Refresh = RefreshOnClose
+			}
+			return plan
+		}
+		if topGeneration != generationValid {
 			return p.planDirectServe(obs)
 		}
 		plan.Reply = ReplyNotModified
