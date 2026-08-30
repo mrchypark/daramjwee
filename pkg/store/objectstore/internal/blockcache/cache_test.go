@@ -16,23 +16,23 @@ func TestCache_SetGetAndEvictLeastRecentlyUsed(t *testing.T) {
 	cache := New(4)
 	require.NotNil(t, cache)
 
-	cache.Set(Key{Path: "blob", Index: 1}, []byte("aa"))
-	cache.Set(Key{Path: "blob", Index: 2}, []byte("bb"))
+	cache.Set(Key{ID: "blob", Index: 1}, []byte("aa"))
+	cache.Set(Key{ID: "blob", Index: 2}, []byte("bb"))
 
-	got, ok := cache.Get(Key{Path: "blob", Index: 1})
+	got, ok := cache.Get(Key{ID: "blob", Index: 1})
 	require.True(t, ok)
 	assert.Equal(t, []byte("aa"), got)
 
-	cache.Set(Key{Path: "blob", Index: 3}, []byte("cc"))
+	cache.Set(Key{ID: "blob", Index: 3}, []byte("cc"))
 
-	_, ok = cache.Get(Key{Path: "blob", Index: 2})
+	_, ok = cache.Get(Key{ID: "blob", Index: 2})
 	assert.False(t, ok, "least recently used block should be evicted")
 
-	got, ok = cache.Get(Key{Path: "blob", Index: 1})
+	got, ok = cache.Get(Key{ID: "blob", Index: 1})
 	require.True(t, ok)
 	assert.Equal(t, []byte("aa"), got)
 
-	got, ok = cache.Get(Key{Path: "blob", Index: 3})
+	got, ok = cache.Get(Key{ID: "blob", Index: 3})
 	require.True(t, ok)
 	assert.Equal(t, []byte("cc"), got)
 }
@@ -41,14 +41,14 @@ func TestCache_IgnoresOversizedAndEmptyEntriesAndUpdatesExisting(t *testing.T) {
 	cache := New(3)
 	require.NotNil(t, cache)
 
-	cache.Set(Key{Path: "blob", Index: 1}, []byte{})
-	cache.Set(Key{Path: "blob", Index: 2}, []byte("toolarge"))
-	_, ok := cache.Get(Key{Path: "blob", Index: 1})
+	cache.Set(Key{ID: "blob", Index: 1}, []byte{})
+	cache.Set(Key{ID: "blob", Index: 2}, []byte("toolarge"))
+	_, ok := cache.Get(Key{ID: "blob", Index: 1})
 	assert.False(t, ok)
-	_, ok = cache.Get(Key{Path: "blob", Index: 2})
+	_, ok = cache.Get(Key{ID: "blob", Index: 2})
 	assert.False(t, ok)
 
-	key := Key{Path: "blob", Index: 3}
+	key := Key{ID: "blob", Index: 3}
 	cache.Set(key, []byte("ab"))
 	cache.Set(key, []byte("xyz"))
 

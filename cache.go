@@ -19,18 +19,6 @@ var ErrCacheClosed = errors.New("daramjwee: cache is closed")
 var ErrNilMetadata = errors.New("daramjwee: nil metadata encountered")
 var ErrBackgroundJobRejected = errors.New("daramjwee: background job rejected")
 
-type lowerTierPromotionInvalidatedError struct {
-	preserveBody bool
-}
-
-func (e lowerTierPromotionInvalidatedError) Error() string {
-	return ErrTopWriteInvalidated.Error()
-}
-
-func (e lowerTierPromotionInvalidatedError) Is(target error) bool {
-	return target == ErrTopWriteInvalidated
-}
-
 // cacheConfig holds the immutable configuration for a DaramjweeCache instance.
 type cacheConfig struct {
 	opTimeout              time.Duration

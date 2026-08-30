@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -29,19 +28,7 @@ func (r *Standalone) Submit(_ string, _ JobKind, job Job) error {
 		return ErrRejected
 	}
 
-	wrappedJob := func(ctx context.Context) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				// On panic, the job is considered incomplete.
-				// We re-panic to let the worker recover, but do NOT call Discard
-				// to maintain exact-once semantics (Run was called, so Discard must not be).
-				panic(rec)
-			}
-		}()
-		job.Run(ctx)
-	}
-
-	if !r.manager.Submit(wrappedJob) {
+	if !r.manager.Submit(job.Run) {
 		if job.Discard != nil {
 			job.Discard(DropReasonRejected)
 		}

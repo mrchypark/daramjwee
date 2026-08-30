@@ -27,7 +27,6 @@ import (
 	"github.com/mrchypark/daramjwee/internal/stripedlock"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/blockcache"
 	internalcatalog "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/catalog"
-	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/pagecache"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/rangeio"
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/segment"
 	internalshard "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/shard"
@@ -88,7 +87,7 @@ type Store struct {
 	pagedThreshold     int64
 	pageSize           int64
 	blockCache         *blockcache.Cache
-	pageCache          *pagecache.Cache
+	pageCache          *blockcache.Cache
 	checkpointCache    *checkpointCache
 	catalog            *internalcatalog.Catalog
 	lockManager        *stripedlock.Manager
@@ -161,7 +160,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		pagedThreshold:  cfg.pagedThreshold,
 		pageSize:        cfg.pageSize,
 		blockCache:      blockcache.New(cfg.blockCacheBytes),
-		pageCache:       pagecache.New(cfg.pageCacheBytes),
+		pageCache:       blockcache.New(cfg.pageCacheBytes),
 		catalog:         cat,
 		lockManager:     stripedlock.New(2048),
 		initErr:         initErr,
@@ -498,7 +497,7 @@ func (s *Store) publishManifest(ctx context.Context, key, blobPath string, size 
 }
 
 func (s *Store) loadPage(ctx context.Context, m *manifest, pageIndex int64) ([]byte, error) {
-	key := pagecache.Key{Version: m.Version, Index: pageIndex}
+	key := blockcache.Key{ID: m.Version, Index: pageIndex}
 	if page, ok := s.pageCache.Get(key); ok {
 		return page, nil
 	}

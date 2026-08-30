@@ -21,7 +21,7 @@ type coordinatedTopWriteSink struct {
 
 func (s *coordinatedTopWriteSink) Close() error {
 	s.once.Do(func() {
-		err := closeCore(context.Background(), closeCoreParams{
+		err := closeCore(closeCoreParams{
 			generation:    s.generation,
 			coord:         s.coord,
 			waitTimeout:   s.waitTimeout,
@@ -207,7 +207,7 @@ func newConditionalGenerationWriteSink(sink WriteSink, coord *writeCoordinator, 
 
 func (s *conditionalGenerationWriteSink) Close() error {
 	s.once.Do(func() {
-		err := closeCore(context.Background(), closeCoreParams{
+		err := closeCore(closeCoreParams{
 			generation:    s.generation,
 			coord:         s.coord,
 			waitTimeout:   s.waitTimeout,

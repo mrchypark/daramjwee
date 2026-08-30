@@ -16,48 +16,32 @@ import (
 	"github.com/mrchypark/daramjwee/pkg/store/objectstore"
 )
 
+type storeFactory struct {
+	name string
+	new  func(t *testing.T) daramjwee.Store
+}
+
+func storeFactories() []storeFactory {
+	return []storeFactory{
+		{name: "memstore", new: func(*testing.T) daramjwee.Store { return memstore.New(0, nil) }},
+		{name: "filestore-rename", new: func(t *testing.T) daramjwee.Store {
+			store, err := filestore.New(t.TempDir(), log.NewNopLogger())
+			require.NoError(t, err)
+			return store
+		}},
+		{name: "filestore-copyright", new: func(t *testing.T) daramjwee.Store {
+			store, err := filestore.New(t.TempDir(), log.NewNopLogger(), filestore.WithCopyWrite())
+			require.NoError(t, err)
+			return store
+		}},
+		{name: "objectstore", new: func(t *testing.T) daramjwee.Store {
+			return objectstore.New(objstore.NewInMemBucket(), log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+		}},
+	}
+}
+
 func TestStore_BeginSetKeepsCommittedValueVisibleUntilClose(t *testing.T) {
-	type factory struct {
-		name string
-		new  func(t *testing.T) daramjwee.Store
-	}
-
-	cases := []factory{
-		{
-			name: "memstore",
-			new: func(t *testing.T) daramjwee.Store {
-				t.Helper()
-				return memstore.New(0, nil)
-			},
-		},
-		{
-			name: "filestore-rename",
-			new: func(t *testing.T) daramjwee.Store {
-				t.Helper()
-				store, err := filestore.New(t.TempDir(), log.NewNopLogger())
-				require.NoError(t, err)
-				return store
-			},
-		},
-		{
-			name: "filestore-copyright",
-			new: func(t *testing.T) daramjwee.Store {
-				t.Helper()
-				store, err := filestore.New(t.TempDir(), log.NewNopLogger(), filestore.WithCopyWrite())
-				require.NoError(t, err)
-				return store
-			},
-		},
-		{
-			name: "objectstore",
-			new: func(t *testing.T) daramjwee.Store {
-				t.Helper()
-				return objectstore.New(objstore.NewInMemBucket(), log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
-			},
-		},
-	}
-
-	for _, tc := range cases {
+	for _, tc := range storeFactories() {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			store := tc.new(t)
@@ -99,47 +83,7 @@ func TestStore_BeginSetKeepsCommittedValueVisibleUntilClose(t *testing.T) {
 }
 
 func TestStore_DeleteDoesNotWaitForPendingBeginSet(t *testing.T) {
-	type factory struct {
-		name string
-		new  func(t *testing.T) daramjwee.Store
-	}
-
-	cases := []factory{
-		{
-			name: "memstore",
-			new: func(t *testing.T) daramjwee.Store {
-				t.Helper()
-				return memstore.New(0, nil)
-			},
-		},
-		{
-			name: "filestore-rename",
-			new: func(t *testing.T) daramjwee.Store {
-				t.Helper()
-				store, err := filestore.New(t.TempDir(), log.NewNopLogger())
-				require.NoError(t, err)
-				return store
-			},
-		},
-		{
-			name: "filestore-copyright",
-			new: func(t *testing.T) daramjwee.Store {
-				t.Helper()
-				store, err := filestore.New(t.TempDir(), log.NewNopLogger(), filestore.WithCopyWrite())
-				require.NoError(t, err)
-				return store
-			},
-		},
-		{
-			name: "objectstore",
-			new: func(t *testing.T) daramjwee.Store {
-				t.Helper()
-				return objectstore.New(objstore.NewInMemBucket(), log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
-			},
-		},
-	}
-
-	for _, tc := range cases {
+	for _, tc := range storeFactories() {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			store := tc.new(t)

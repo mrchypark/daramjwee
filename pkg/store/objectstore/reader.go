@@ -112,7 +112,7 @@ func (s *Store) isPackedRemotePath(remotePath string) bool {
 }
 
 func (s *Store) loadPackedBlock(ctx context.Context, remotePath string, blockIndex int64) ([]byte, error) {
-	key := blockcache.Key{Path: remotePath, Index: blockIndex}
+	key := blockcache.Key{ID: remotePath, Index: blockIndex}
 	if block, ok := s.blockCache.Get(key); ok {
 		return block, nil
 	}

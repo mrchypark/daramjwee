@@ -152,7 +152,7 @@ func TestCloseCorePanicReleasesCoordinatorReferenceAndWriteLease(t *testing.T) {
 			}
 			func() {
 				defer func() { recovered = recover() }()
-				_ = closeCore(context.Background(), closeCoreParams{
+				_ = closeCore(closeCoreParams{
 					generation: generation,
 					coord:      coord,
 				}, func(context.Context) error {
@@ -1053,7 +1053,6 @@ func TestSetStreamToTopStoreWithGenerationHonorsCanceledContextWhileDeleteInProg
 
 func TestConditionalGenerationWriteSinkWaitingForDeleteTimesOut(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 	if err := coord.beginDelete(context.Background()); err != nil {
 		t.Fatalf("beginDelete failed: %v", err)
 	}
@@ -1385,7 +1384,6 @@ func TestFanoutWriteManagerOrdersStaleCleanupBeforeNewerWrite(t *testing.T) {
 
 func TestWaitForNoActiveDeletesUnblocksAfterDeleteCompletes(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	require.NoError(t, coord.beginDelete(context.Background()))
 
@@ -1412,7 +1410,6 @@ func TestWaitForNoActiveDeletesUnblocksAfterDeleteCompletes(t *testing.T) {
 
 func TestWaitForNoActiveDeletesRespectsContextCancellation(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 	require.NoError(t, coord.beginDelete(context.Background()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
@@ -1426,7 +1423,6 @@ func TestWaitForNoActiveDeletesRespectsContextCancellation(t *testing.T) {
 
 func TestWaitForNoActiveDeletesReturnsImmediatelyWhenNoDeletes(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	err := coord.waitForNoActiveDeletes(context.Background())
 	require.NoError(t, err)
@@ -1542,7 +1538,6 @@ func TestLockCommitWhenNoActiveDeletesRespectsContextCancellation(t *testing.T) 
 
 func TestReserveBestEffortFailsWhenActiveFillIsSet(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	coord.stateMu.Lock()
 	coord.activeFill = &topFillSink{}
@@ -1554,7 +1549,6 @@ func TestReserveBestEffortFailsWhenActiveFillIsSet(t *testing.T) {
 
 func TestReserveBestEffortFailsWhenActiveDeletesGreaterThanZero(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	require.NoError(t, coord.beginDelete(context.Background()))
 
@@ -1566,7 +1560,6 @@ func TestReserveBestEffortFailsWhenActiveDeletesGreaterThanZero(t *testing.T) {
 
 func TestReserveBestEffortFailsWhenFillPreemptionsPositive(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	coord.stateMu.Lock()
 	coord.fillPreemptions = 1
@@ -1578,7 +1571,6 @@ func TestReserveBestEffortFailsWhenFillPreemptionsPositive(t *testing.T) {
 
 func TestReserveBestEffortSucceedsWhenIdle(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	gen, err := coord.reserveBestEffort(context.Background(), nil)
 	require.NoError(t, err)
@@ -1588,7 +1580,6 @@ func TestReserveBestEffortSucceedsWhenIdle(t *testing.T) {
 
 func TestReserveBestEffortFailsOnStaleExpectedGeneration(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	coord.stateMu.Lock()
 	coord.committedGeneration.Store(2)
@@ -1601,7 +1592,6 @@ func TestReserveBestEffortFailsOnStaleExpectedGeneration(t *testing.T) {
 
 func TestReserveBestEffortFailsOnCancelledContext(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1612,7 +1602,6 @@ func TestReserveBestEffortFailsOnCancelledContext(t *testing.T) {
 
 func TestReserveWithFillRegistersFillOnCoordinator(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	fill := &topFillSink{}
 	gen, err := coord.reserveWithFill(context.Background(), 0, fill)
@@ -1632,7 +1621,6 @@ func TestReserveWithFillRegistersFillOnCoordinator(t *testing.T) {
 
 func TestReserveWithFillFailsWhenActiveFillAlreadySet(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	coord.stateMu.Lock()
 	coord.activeFill = &topFillSink{}
@@ -1644,7 +1632,6 @@ func TestReserveWithFillFailsWhenActiveFillAlreadySet(t *testing.T) {
 
 func TestReserveWithFillFailsWhenActiveDeletesPositive(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	require.NoError(t, coord.beginDelete(context.Background()))
 
@@ -1656,7 +1643,6 @@ func TestReserveWithFillFailsWhenActiveDeletesPositive(t *testing.T) {
 
 func TestReserveWithFillFailsWhenFillPreemptionsPositive(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	coord.stateMu.Lock()
 	coord.fillPreemptions = 1
@@ -1668,7 +1654,6 @@ func TestReserveWithFillFailsWhenFillPreemptionsPositive(t *testing.T) {
 
 func TestReserveWithFillNilFillDoesNotSetActiveFill(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	gen, err := coord.reserveWithFill(context.Background(), 0, nil)
 	require.NoError(t, err)
@@ -1683,7 +1668,6 @@ func TestReserveWithFillNilFillDoesNotSetActiveFill(t *testing.T) {
 
 func TestReserveWithFillFailsOnStaleExpectedGeneration(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	_, err := coord.reserveWithFill(context.Background(), 1, &topFillSink{})
 	require.ErrorIs(t, err, ErrTopWriteInvalidated)
@@ -1880,18 +1864,8 @@ func TestFanoutWriteManagerDifferentTiersAreIndependent(t *testing.T) {
 	unlock1()
 }
 
-func TestWriteCoordinatorInitIdempotent(t *testing.T) {
-	coord := &writeCoordinator{}
-	coord.init()
-	ch1 := coord.activeDeletesDone
-	coord.init()
-	ch2 := coord.activeDeletesDone
-	require.Equal(t, ch1, ch2, "init should be idempotent via sync.Once")
-}
-
 func TestWriteCoordinatorReserveMonotonicGenerations(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	g1, err := coord.reserve(context.Background(), nil)
 	require.NoError(t, err)
@@ -1912,7 +1886,6 @@ func TestWriteCoordinatorReserveMonotonicGenerations(t *testing.T) {
 
 func TestWriteCoordinatorCanAttemptExpectedTopWrite(t *testing.T) {
 	coord := &writeCoordinator{}
-	coord.init()
 
 	require.True(t, coord.canAttemptExpectedTopWrite(0))
 

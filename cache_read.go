@@ -102,17 +102,13 @@ func (c *DaramjweeCache) handleLowerTierHit(p lowerTierHitParams) (*GetResponse,
 
 	isStale := c.isTierCachedStale(p.meta, p.tierIndex)
 
-	// Run pure Planner for observation/logging (does not affect decision).
-	c.observeLowerTierPlan(p, p.meta, isStale)
-
-	decision := c.decideLowerTierHit(p, p.meta, isStale)
-
-	return c.executeLowerTierDecision(p, decision, metaToPromote, isStale)
+	plan := c.planLowerTierHit(p, p.meta, isStale)
+	return c.executeLowerTierPlan(p, plan, metaToPromote)
 }
 
 // buildLowerTierObservation creates an Observation from the current lookup state.
 // This is used by the Planner for policy decisions.
-func (c *DaramjweeCache) buildLowerTierObservation(p lowerTierHitParams, meta *Metadata, isStale bool) Observation {
+func (c *DaramjweeCache) buildLowerTierObservation(p lowerTierHitParams, meta *Metadata, isStale bool) (Observation, generationValidity) {
 	obs := Observation{
 		Source:      SourceLower,
 		SourceTier:  p.tierIndex,
@@ -133,24 +129,24 @@ func (c *DaramjweeCache) buildLowerTierObservation(p lowerTierHitParams, meta *M
 	if c.isConditionalRequestSatisfied(p.req, meta) {
 		obs.ConditionalMatched = true
 	}
-	if c.probation != nil && c.probation.isAdmissible(p.key) {
-		obs.Admission = AdmissionAllowed
-	} else if c.probation == nil {
-		obs.Admission = AdmissionAllowed
-	} else {
+	if c.probation != nil && p.higherTiersClean && !isStale && !obs.ConditionalMatched && obs.HasTopStore && !c.probation.observe(p.key) {
 		obs.Admission = AdmissionDeferred
 	}
-	return obs
+	validity := generationInvalid
+	if p.higherTiersClean && c.canServeConditionalLowerHit(p.key, p.expectedGeneration) {
+		validity = generationValid
+	}
+	return obs, validity
 }
 
-// observeLowerTierPlan uses the pure Planner to compute a ReadPlan for validation.
-// The result is logged at debug level but does not override the existing decision logic.
-func (c *DaramjweeCache) observeLowerTierPlan(p lowerTierHitParams, meta *Metadata, isStale bool) {
-	obs := c.buildLowerTierObservation(p, meta, isStale)
-	plan := (&Planner{}).Plan(obs)
+func (c *DaramjweeCache) planLowerTierHit(p lowerTierHitParams, meta *Metadata, isStale bool) ReadPlan {
+	obs, validity := c.buildLowerTierObservation(p, meta, isStale)
+	plan := (&Planner{}).plan(obs, validity)
 	c.debugLog("msg", "planner observation", "key", p.key, "tier_index", p.tierIndex,
 		"source", obs.Source, "freshness", obs.Freshness, "admission", obs.Admission,
-		"reply", plan.Reply, "body", plan.Body, "publish", plan.Publish, "refresh", plan.Refresh)
+		"generation_validity", validity, "reply", plan.Reply, "body", plan.Body,
+		"publish", plan.Publish, "refresh", plan.Refresh)
+	return plan
 }
 
 // serveLowerTierWithoutPromotion serves data from a lower tier when higher tiers
@@ -200,23 +196,6 @@ func (c *DaramjweeCache) canAttemptExpectedTopWrite(key string, expectedGenerati
 		expectedGeneration.coord.canAttemptExpectedTopWrite(expectedGeneration.generation)
 }
 
-func (c *DaramjweeCache) handleConditionalLowerTierPromotionError(key string, tierIndex int, err error, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc) *GetResponse {
-	var invalidated lowerTierPromotionInvalidatedError
-	if errors.As(err, &invalidated) {
-		if invalidated.preserveBody {
-			return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta)
-		}
-		cancel()
-		return newGetResponse(GetStatusNotFound, nil, nil)
-	}
-	if errors.Is(err, ErrTopWriteInvalidated) {
-		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta)
-	}
-	c.warnLog("msg", "failed to promote conditional lower-tier hit to top tier", "key", key, "tier_index", tierIndex, "err", err)
-	cancel()
-	return newGetResponse(GetStatusNotModified, nil, meta)
-}
-
 func (c *DaramjweeCache) handleStaleLowerTierHit(requestCtx context.Context, key string, tierIndex int, fetcher Fetcher, src io.ReadCloser, meta *Metadata, cancel context.CancelFunc, expectedGeneration *topWriteGeneration) (*GetResponse, error) {
 	c.debugLog("msg", "lower tier is stale, serving stale and scheduling refresh", "key", key, "tier_index", tierIndex)
 	source := tierDestination{tierIndex: tierIndex, store: c.tiers[tierIndex]}
@@ -231,20 +210,6 @@ func (c *DaramjweeCache) handleStaleLowerTierHit(requestCtx context.Context, key
 }
 
 func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, meta, metaToPromote *Metadata, cancel context.CancelFunc, expectedGeneration *topWriteGeneration) (*GetResponse, error) {
-	if c.probation != nil && !c.probation.observe(key) {
-		// First lower-tier hit under 2-hit probation: serve without
-		// promoting the negative entry.
-		if c.debugEnabled() {
-			c.debugLog("msg", "deferring negative lower-tier promotion until second hit", "key", key, "tier_index", tierIndex)
-		}
-		if err := src.Close(); err != nil {
-			cancel()
-			return nil, err
-		}
-		cancel()
-		return newGetResponse(GetStatusNotFound, nil, meta), nil
-	}
-
 	target := c.topWriteStore()
 	writer, err := c.setStreamToTopStoreBestEffortWithGeneration(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, expectedGeneration)
 	if err != nil {
@@ -285,15 +250,6 @@ func (c *DaramjweeCache) promoteNegativeLowerTierHit(requestCtx, setupCtx contex
 }
 
 func (c *DaramjweeCache) promotePositiveLowerTierHit(requestCtx, setupCtx context.Context, key string, tierIndex int, src io.ReadCloser, meta, metaToPromote *Metadata, cancel context.CancelFunc, expectedGeneration *topWriteGeneration) *GetResponse {
-	if c.probation != nil && !c.probation.observe(key) {
-		// First lower-tier hit under 2-hit probation: serve without
-		// promoting so one-hit wonders do not pollute the top tier.
-		if c.debugEnabled() {
-			c.debugLog("msg", "deferring lower-tier promotion until second hit", "key", key, "tier_index", tierIndex)
-		}
-		return newGetResponse(GetStatusOK, newCancelOnCloseReadCloser(src, cancel), meta)
-	}
-
 	target := c.topWriteStore()
 	writer, err := c.setStreamToTopStoreForFill(c.beginSetContextForStore(requestCtx, setupCtx, target), key, metaToPromote, expectedGeneration)
 	if err != nil {
@@ -412,13 +368,10 @@ func (c *DaramjweeCache) handleMissAsLeader(requestCtx, setupCtx context.Context
 		c.missLeads.release(key, lead)
 		return resp, err
 	}
-	resp.Body = &missSignalReadCloser{
-		ReadCloser: resp.Body,
-		done:       lead.done,
-		onDone: func() {
-			c.missLeads.release(key, lead)
-		},
-	}
+	resp.Body = newCancelOnCloseReadCloser(resp.Body, func() {
+		lead.signal()
+		c.missLeads.release(key, lead)
+	})
 	return resp, nil
 }
 

@@ -23,7 +23,6 @@ type writeCoordinator struct {
 	key         string
 	refMu       sync.Mutex
 	references  int
-	initOnce    sync.Once
 	leaseOnce   sync.Once
 	writeLease  chan struct{}
 	commitLease chan struct{}
@@ -66,7 +65,6 @@ func (m *topWriteManager) coordinator(key string) *writeCoordinator {
 			key:        key,
 			references: 1,
 		}
-		coord.init()
 		if _, loaded := m.coords.LoadOrStore(key, coord); !loaded {
 			return coord
 		}
@@ -222,12 +220,10 @@ func (m *topWriteManager) snapshotGeneration(key string) (*writeCoordinator, uin
 }
 
 func (c *writeCoordinator) current() uint64 {
-	c.init()
 	return c.committedGeneration.Load()
 }
 
 func (c *writeCoordinator) canAttemptExpectedTopWrite(expectedGeneration uint64) bool {
-	c.init()
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 	return c.activeDeletes == 0 &&
@@ -295,7 +291,6 @@ func (c *writeCoordinator) reserve(ctx context.Context, expected *uint64) (uint6
 		ctx = context.Background()
 	}
 
-	c.init()
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if expected == nil {
@@ -320,7 +315,6 @@ func (c *writeCoordinator) reserveBestEffort(ctx context.Context, expected *uint
 		ctx = context.Background()
 	}
 
-	c.init()
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.activeFill != nil || c.activeDeletes > 0 || c.fillPreemptions > 0 {
@@ -340,7 +334,6 @@ func (c *writeCoordinator) reserveWithFill(ctx context.Context, expected uint64,
 		ctx = context.Background()
 	}
 
-	c.init()
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.activeFill != nil || c.activeDeletes > 0 || c.fillPreemptions > 0 {
@@ -364,7 +357,6 @@ func (c *writeCoordinator) waitForNoActiveDeletes(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	c.init()
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.waitForNoActiveDeletesLocked(ctx)
@@ -411,22 +403,12 @@ func newCoordinatorWaitContext(timeout time.Duration) (context.Context, context.
 }
 
 func (c *writeCoordinator) unregisterReservation(generation uint64) {
-	c.init()
 	c.stateMu.Lock()
 	c.removeReservationLocked(generation)
 	c.stateMu.Unlock()
 }
 
-func (c *writeCoordinator) init() {
-	// Coordination state is created lazily: reservation maps are allocated by
-	// ensureReservationsLocked on first reservation, and activeDeletesDone is
-	// allocated by beginDelete on first delete. Read-only hot-path
-	// coordinators therefore stay allocation-free after construction.
-	c.initOnce.Do(func() {})
-}
-
 func (c *writeCoordinator) initLease() {
-	c.init()
 	c.leaseOnce.Do(func() {
 		c.writeLease = make(chan struct{}, 1)
 		c.writeLease <- struct{}{}
@@ -522,41 +504,18 @@ func (c *writeCoordinator) beginWithFill(ctx context.Context, expected uint64, f
 // It reserves a generation while holding the write lease for the writer
 // lifetime, preserving the legacy compatibility path for external stores.
 func (c *writeCoordinator) begin(ctx context.Context, expected *uint64) (uint64, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := c.acquireWrite(ctx); err != nil {
 		return 0, err
 	}
-	c.stateMu.Lock()
-	if expected == nil {
-		if err := c.waitForNoActiveDeletesLocked(ctx); err != nil {
-			c.stateMu.Unlock()
-			c.releaseWrite()
-			return 0, err
-		}
-	} else if c.activeDeletes > 0 {
-		c.stateMu.Unlock()
-		c.releaseWrite()
-		return 0, ErrTopWriteInvalidated
-	}
-	if err := ctx.Err(); err != nil {
-		c.stateMu.Unlock()
+	generation, err := c.reserve(ctx, expected)
+	if err != nil {
 		c.releaseWrite()
 		return 0, err
 	}
-	if expected != nil && c.latestGenerationLocked() != *expected {
-		c.stateMu.Unlock()
-		c.releaseWrite()
-		return 0, ErrTopWriteInvalidated
-	}
-	generation := c.reserveGenerationLocked()
-	c.stateMu.Unlock()
 	return generation, nil
 }
 
 func (c *writeCoordinator) unregisterActiveFill(fill *topFillSink) {
-	c.init()
 	c.stateMu.Lock()
 	if c.activeFill == fill {
 		c.activeFill = nil
@@ -565,7 +524,6 @@ func (c *writeCoordinator) unregisterActiveFill(fill *topFillSink) {
 }
 
 func (c *writeCoordinator) preemptActiveFill() {
-	c.init()
 	c.stateMu.Lock()
 	fill := c.activeFill
 	c.stateMu.Unlock()
@@ -575,7 +533,6 @@ func (c *writeCoordinator) preemptActiveFill() {
 }
 
 func (c *writeCoordinator) preemptActiveFillForWrite() func() {
-	c.init()
 	c.stateMu.Lock()
 	fill := c.activeFill
 	if fill != nil {
@@ -606,7 +563,6 @@ func (c *writeCoordinator) beginDelete(ctx context.Context) error {
 	if err := c.acquireCommit(ctx); err != nil {
 		return err
 	}
-	c.init()
 	c.stateMu.Lock()
 	if c.activeDeletes == 0 {
 		c.activeDeletesDone = make(chan struct{})
@@ -618,7 +574,6 @@ func (c *writeCoordinator) beginDelete(ctx context.Context) error {
 }
 
 func (c *writeCoordinator) finishDelete(success bool) {
-	c.init()
 	c.stateMu.Lock()
 	if success {
 		c.advanceCommittedLocked()
@@ -646,70 +601,35 @@ func (c *DaramjweeCache) noteTopWriteGeneration(key string) {
 }
 
 func (c *DaramjweeCache) setStreamToTopStoreWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *topWriteGeneration) (WriteSink, error) {
-	store := c.topWriteStore()
-	coord, expected, err := c.topWrites.coordinatorForWrite(key, expectedGeneration)
-	if err != nil {
-		return nil, err
-	}
-	if expectedGeneration == nil {
-		unblockFills := coord.preemptActiveFillForWrite()
-		defer unblockFills()
-	}
-	if staging, ok := store.(StagingStore); ok {
-		generation, err := coord.reserve(ctx, expected) //nolint:govet // shadow: sequential error handling in same block
-		if err != nil {
-			coord.releaseReference()
-			return nil, err
-		}
-		sink, err := staging.BeginStagedSet(ctx, key, metadata) //nolint:govet // shadow: sequential error handling in same block
-		if err != nil {
-			coord.unregisterReservation(generation)
-			coord.releaseReference()
-			return nil, err
-		}
-		return &coordinatedStagedTopWriteSink{
-			sink:          sink,
-			coord:         coord,
-			generation:    generation,
-			waitTimeout:   c.config.closeTimeout,
-			onInvalidated: func() error { return c.deleteTopStoreKey(key) },
-		}, nil
-	}
-	generation, err := coord.begin(ctx, expected)
-	if err != nil {
-		coord.releaseReference()
-		return nil, err
-	}
-
-	sink, err := store.BeginSet(ctx, key, metadata)
-	if err != nil {
-		coord.rollbackAndUnlock(generation)
-		coord.releaseReference()
-		return nil, err
-	}
-
-	return &coordinatedTopWriteSink{
-		WriteSink:     sink,
-		coord:         coord,
-		generation:    generation,
-		waitTimeout:   c.config.closeTimeout,
-		onInvalidated: func() error { return c.deleteTopStoreKey(key) },
-	}, nil
+	return c.openTopWrite(ctx, key, metadata, expectedGeneration, false)
 }
 
 func (c *DaramjweeCache) setStreamToTopStoreBestEffortWithGeneration(ctx context.Context, key string, metadata *Metadata, expectedGeneration *topWriteGeneration) (WriteSink, error) {
+	return c.openTopWrite(ctx, key, metadata, expectedGeneration, true)
+}
+
+func (c *DaramjweeCache) openTopWrite(ctx context.Context, key string, metadata *Metadata, expectedGeneration *topWriteGeneration, bestEffort bool) (WriteSink, error) {
 	store := c.topWriteStore()
 	coord, expected, err := c.topWrites.coordinatorForWrite(key, expectedGeneration)
 	if err != nil {
 		return nil, err
 	}
+	if !bestEffort && expectedGeneration == nil {
+		unblockFills := coord.preemptActiveFillForWrite()
+		defer unblockFills()
+	}
+
+	reserve, begin := coord.reserve, coord.begin
+	if bestEffort {
+		reserve, begin = coord.reserveBestEffort, coord.beginBestEffort
+	}
 	if staging, ok := store.(StagingStore); ok {
-		generation, err := coord.reserveBestEffort(ctx, expected) //nolint:govet // shadow: sequential error handling in same block
+		generation, err := reserve(ctx, expected)
 		if err != nil {
 			coord.releaseReference()
 			return nil, err
 		}
-		sink, err := staging.BeginStagedSet(ctx, key, metadata) //nolint:govet // shadow: sequential error handling in same block
+		sink, err := staging.BeginStagedSet(ctx, key, metadata)
 		if err != nil {
 			coord.unregisterReservation(generation)
 			coord.releaseReference()
@@ -724,7 +644,7 @@ func (c *DaramjweeCache) setStreamToTopStoreBestEffortWithGeneration(ctx context
 		}, nil
 	}
 
-	generation, err := coord.beginBestEffort(ctx, expected)
+	generation, err := begin(ctx, expected)
 	if err != nil {
 		coord.releaseReference()
 		return nil, err
