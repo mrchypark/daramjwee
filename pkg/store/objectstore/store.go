@@ -128,6 +128,8 @@ func (s *Store) BeginSetUsesContext() bool { return true }
 var _ daramjwee.Store = (*Store)(nil)
 var _ daramjwee.TierValidator = (*Store)(nil)
 
+var openCatalog = internalcatalog.Open
+
 // New creates a new object storage backend.
 func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	if logger == nil {
@@ -153,7 +155,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 
 	var cat *internalcatalog.Catalog
 	if initErr == nil {
-		cat, initErr = internalcatalog.Open(filepath.Join(dataDir, "catalog"))
+		cat, initErr = openCatalog(filepath.Join(dataDir, "catalog"))
 	}
 	store := &Store{
 		bucket:          bucket,

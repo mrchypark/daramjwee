@@ -51,10 +51,12 @@ func Open(dir string) (*Catalog, error) {
 		}
 		return nil, err
 	}
-	if len(data) == 0 {
-		return c, nil
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &c.entries); err != nil {
+			return nil, err
+		}
 	}
-	if err := json.Unmarshal(data, &c.entries); err != nil {
+	if err := syncDirFn(dir); err != nil {
 		return nil, err
 	}
 	return c, nil

@@ -118,11 +118,29 @@ func TestCatalogSetKeepsCommittedStateOnPostRenameFailure(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, entry, current)
 
+	_, err = Open(dir)
+	require.ErrorContains(t, err, "sync dir failed")
+
+	syncDirFn = restoreSyncDir
 	reopened, err := Open(dir)
 	require.NoError(t, err)
 	reloaded, ok := reopened.Get("postrename")
 	require.True(t, ok)
 	assert.Equal(t, entry, reloaded)
+}
+
+func TestOpenFailsWhenExistingSnapshotDirectoryCannotSync(t *testing.T) {
+	dir := t.TempDir()
+	cat, err := Open(dir)
+	require.NoError(t, err)
+	require.NoError(t, cat.Set("key", Entry{Metadata: daramjwee.Metadata{CacheTag: "v1"}}))
+
+	restoreSyncDir := syncDirFn
+	syncDirFn = func(string) error { return errors.New("sync dir failed") }
+	t.Cleanup(func() { syncDirFn = restoreSyncDir })
+
+	_, err = Open(dir)
+	require.ErrorContains(t, err, "sync dir failed")
 }
 
 func TestCatalogUpdateReportsPostRenameCommit(t *testing.T) {

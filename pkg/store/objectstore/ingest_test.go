@@ -16,6 +16,7 @@ import (
 	"github.com/thanos-io/objstore"
 
 	"github.com/mrchypark/daramjwee"
+	internalcatalog "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/catalog"
 )
 
 func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
@@ -765,6 +766,30 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "live payload", string(body))
 	assert.Equal(t, "v1", meta.CacheTag)
+}
+
+func TestStore_ReopenCatalogSyncFailureDoesNotSweepSegments(t *testing.T) {
+	dataDir := t.TempDir()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(dataDir))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(context.Background(), "preserved-key", nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	entry, ok := store.catalog.Get("preserved-key")
+	require.True(t, ok)
+
+	open := openCatalog
+	openCatalog = func(string) (*internalcatalog.Catalog, error) {
+		return nil, errors.New("sync dir failed")
+	}
+	t.Cleanup(func() { openCatalog = open })
+
+	reopened := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(dataDir))
+	require.ErrorContains(t, reopened.ensureReady(), "sync dir failed")
+	require.FileExists(t, entry.SegmentPath)
 }
 
 func TestStore_ReopenSweepsAbandonedActiveSegments(t *testing.T) {
