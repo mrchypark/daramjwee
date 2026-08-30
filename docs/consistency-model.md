@@ -143,8 +143,8 @@ caller and the partial promotion is aborted.
 4. **Concurrent Delete and Get**: Verify in-progress gets can return old value
 5. **Fill then Delete**: Verify fill is discarded after delete
 6. **Generation Fence**: Verify stale fills are discarded
-7. **Loader Error**: Verify all waiters receive error
-8. **Loader Panic**: Verify fill state is released
+7. **Fetcher Error**: Verify the leader receives its error while waiters are released, re-read the top tier, and independently fetch when no publication occurred; the leader error is not broadcast
+8. **Fetcher Panic**: Verify fill state is released
 
 ### Stress Testing
 
