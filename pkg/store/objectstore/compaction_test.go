@@ -155,7 +155,18 @@ func TestStore_CompactReclaimsSupersededRemoteObjects(t *testing.T) {
 	}
 
 	writeAndFlush(strings.Repeat("a", 128), "v1")
+	v1, ok := store.catalog.Get("compact-large")
+	require.True(t, ok)
 	writeAndFlush(strings.Repeat("b", 128), "v2")
+	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("compact-large"), map[string]checkpointEntry{
+		"compact-large": {
+			SegmentPath: v1.RemotePath,
+			Offset:      v1.RemoteOffset,
+			Length:      v1.Length,
+			Generation:  v1.Generation,
+			Metadata:    v1.Metadata,
+		},
+	}))
 
 	before := listObjectNames(t, bucket, joinPath(store.prefix, "blobs"))
 	require.Len(t, before, 2)

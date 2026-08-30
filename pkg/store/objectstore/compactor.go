@@ -47,6 +47,7 @@ func (s *Store) CompactStale(ctx context.Context) (SweepStats, error) {
 
 func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepStats) (map[string]struct{}, error) {
 	reachable := make(map[string]struct{})
+	remoteEntryKeys := make(map[string]struct{})
 
 	if s.catalog != nil {
 		for _, entry := range s.catalog.Entries() {
@@ -90,6 +91,46 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 		return nil, err
 	}
 
+	err = s.bucket.Iter(ctx, ensureDir(joinPath(s.prefix, "entries")), func(name string) error {
+		if strings.HasSuffix(name, "/") {
+			return nil
+		}
+		stats.Scanned++
+		reader, err := s.bucket.Get(ctx, name)
+		if err != nil {
+			if s.bucket.IsObjNotFoundErr(err) {
+				return nil
+			}
+			return err
+		}
+		defer reader.Close()
+		var entry checkpointEntry
+		if _, err := decodeCheckpointEntry(reader, &entry); err != nil {
+			return err
+		}
+		base := path.Base(name)
+		if !strings.HasSuffix(base, ".json") {
+			return fmt.Errorf("objectstore: remote entry %q has an invalid name", name)
+		}
+		key, err := decodeKey(strings.TrimSuffix(base, ".json"))
+		if err != nil {
+			return fmt.Errorf("objectstore: decode remote entry key %q: %w", name, err)
+		}
+		remoteEntryKeys[key] = struct{}{}
+		if entry.Missing {
+			return nil
+		}
+		if entry.SegmentPath == "" {
+			return fmt.Errorf("objectstore: compact: remote entry %q is missing segment_path", name)
+		}
+		reachable[entry.SegmentPath] = struct{}{}
+		stats.Reachable++
+		return nil
+	}, objstore.WithRecursiveIter())
+	if err != nil {
+		return nil, err
+	}
+
 	err = s.bucket.Iter(ctx, ensureDir(joinPath(s.prefix, "checkpoints")), func(name string) error {
 		if path.Base(name) != "latest.json" {
 			return nil
@@ -112,6 +153,9 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 			return fmt.Errorf("objectstore: compact: checkpoint %q is missing entries", name)
 		}
 		for key, entry := range cp.Entries {
+			if _, authoritative := remoteEntryKeys[key]; authoritative {
+				continue
+			}
 			if entry.SegmentPath == "" {
 				return fmt.Errorf("objectstore: compact: checkpoint %q entry %q is missing segment_path", name, key)
 			}

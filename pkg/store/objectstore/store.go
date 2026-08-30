@@ -3,7 +3,9 @@ package objectstore
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -96,6 +98,7 @@ type Store struct {
 	blockLoads          singleflight.Group
 	pageLoads           singleflight.Group
 	manifestCache       *manifestCache
+	instanceID          string
 	versionSeq          atomic.Uint64
 	generationSeq       atomic.Uint64
 	initErr             error
@@ -172,6 +175,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		pageCache:          blockcache.New(cfg.pageCacheBytes),
 		catalog:            cat,
 		lockManager:        stripedlock.New(2048),
+		instanceID:         newInstanceID(),
 		initErr:            initErr,
 		segmentRefs:        make(map[string]int),
 		reclaimableSegs:    make(map[string]struct{}),
@@ -426,11 +430,20 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		return err
 	}
 
-	err = s.bucket.Delete(ctx, s.manifestPath(key))
-	if err == nil || s.bucket.IsObjNotFoundErr(err) {
-		return nil
+	tombstone := checkpointEntry{Missing: true, Generation: generation}
+	data, err := json.Marshal(tombstone)
+	if err != nil {
+		return err
 	}
-	return err
+	if err := s.bucket.Upload(ctx, s.remoteEntryPath(key), bytes.NewReader(data)); err != nil {
+		return err
+	}
+	s.checkpointCache.SetEntry(key, &tombstone, int64(len(data)))
+	err = s.bucket.Delete(ctx, s.manifestPath(key))
+	if err != nil && !s.bucket.IsObjNotFoundErr(err) {
+		return err
+	}
+	return nil
 }
 
 // Stat returns metadata for the published generation.
@@ -573,6 +586,10 @@ func (s *Store) manifestPath(key string) string {
 	return joinPath(s.prefix, "manifests", shardForKey(key), encodeKey(key)+".json")
 }
 
+func (s *Store) remoteEntryPath(key string) string {
+	return joinPath(s.prefix, "entries", shardForKey(key), encodeKey(key)+".json")
+}
+
 func (s *Store) blobDir(key string) string {
 	return joinPath(s.prefix, "blobs", shardForKey(key), encodeKey(key))
 }
@@ -586,11 +603,26 @@ func (s *Store) blobPath(key, version string) string {
 }
 
 func (s *Store) nextVersion() string {
-	return fmt.Sprintf("%020d-%06d", s.now().UnixNano(), s.versionSeq.Add(1))
+	return fmt.Sprintf("%020d-%s-%06d", s.now().UnixNano(), s.instanceID, s.versionSeq.Add(1))
+}
+
+var instanceSeq atomic.Uint64
+
+func newInstanceID() string {
+	var id [8]byte
+	if _, err := rand.Read(id[:]); err == nil {
+		return hex.EncodeToString(id[:])
+	}
+	return fmt.Sprintf("%x-%x-%x", time.Now().UnixNano(), os.Getpid(), instanceSeq.Add(1))
 }
 
 func encodeKey(key string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(key))
+}
+
+func decodeKey(encoded string) (string, error) {
+	key, err := base64.RawURLEncoding.DecodeString(encoded)
+	return string(key), err
 }
 
 func shardForKey(key string) string {
@@ -642,7 +674,7 @@ func (s *Store) OwnsObjectPath(name string) bool {
 		name = strings.TrimPrefix(name, prefix+"/")
 	}
 
-	for _, root := range []string{"manifests", "blobs", "segments", "checkpoints"} {
+	for _, root := range []string{"manifests", "entries", "blobs", "segments", "checkpoints"} {
 		if name == root || strings.HasPrefix(name, root+"/") {
 			return true
 		}

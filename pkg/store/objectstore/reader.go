@@ -63,6 +63,32 @@ func decodeCheckpoint(reader io.Reader, cp *checkpoint) error {
 }
 
 func (s *Store) loadRemoteEntry(ctx context.Context, key string) (*checkpointEntry, error) {
+	if entry, exists, cached := s.checkpointCache.GetEntry(key); cached {
+		if exists {
+			return validateRemoteEntry(key, entry)
+		}
+		return s.loadCheckpointEntry(ctx, key)
+	}
+
+	reader, err := s.bucket.Get(ctx, s.remoteEntryPath(key))
+	if err == nil {
+		defer reader.Close()
+		var entry checkpointEntry
+		size, err := decodeCheckpointEntry(reader, &entry)
+		if err != nil {
+			return nil, fmt.Errorf("objectstore: decode remote entry for %q: %w", key, err)
+		}
+		s.checkpointCache.SetEntry(key, &entry, size)
+		return validateRemoteEntry(key, entry)
+	}
+	if !s.bucket.IsObjNotFoundErr(err) {
+		return nil, err
+	}
+	s.checkpointCache.SetEntry(key, nil, 1)
+	return s.loadCheckpointEntry(ctx, key)
+}
+
+func (s *Store) loadCheckpointEntry(ctx context.Context, key string) (*checkpointEntry, error) {
 	cp, err := s.loadCheckpointSnapshot(ctx, shardForKey(key))
 	if err != nil {
 		return nil, err
@@ -72,6 +98,24 @@ func (s *Store) loadRemoteEntry(ctx context.Context, key string) (*checkpointEnt
 		return nil, daramjwee.ErrNotFound
 	}
 	return &entry, nil
+}
+
+func validateRemoteEntry(key string, entry checkpointEntry) (*checkpointEntry, error) {
+	if entry.Missing {
+		return nil, daramjwee.ErrNotFound
+	}
+	if entry.SegmentPath == "" {
+		return nil, fmt.Errorf("objectstore: remote entry for %q is missing segment_path", key)
+	}
+	return &entry, nil
+}
+
+func decodeCheckpointEntry(reader io.Reader, entry *checkpointEntry) (int64, error) {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(data)), json.Unmarshal(data, entry)
 }
 
 func (s *Store) openRemoteEntry(ctx context.Context, entry checkpointEntry) (io.ReadCloser, error) {

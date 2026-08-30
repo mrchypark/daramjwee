@@ -21,14 +21,37 @@ func (c *checkpointCache) Get(key string) (*checkpoint, bool) {
 	if c == nil {
 		return nil, false
 	}
-	return c.ttlCache.Get(key)
+	return c.ttlCache.Get("checkpoint:" + key)
 }
 
 func (c *checkpointCache) Set(key string, value *checkpoint, sizeBytes int64) {
 	if c == nil || value == nil {
 		return
 	}
-	c.ttlCache.Set(key, value, sizeBytes)
+	c.ttlCache.Set("checkpoint:"+key, value, sizeBytes)
+}
+
+func (c *checkpointCache) GetEntry(key string) (checkpointEntry, bool, bool) {
+	if c == nil {
+		return checkpointEntry{}, false, false
+	}
+	value, cached := c.ttlCache.Get("entry:" + key)
+	if !cached {
+		return checkpointEntry{}, false, false
+	}
+	entry, exists := value.Entries[key]
+	return entry, exists, true
+}
+
+func (c *checkpointCache) SetEntry(key string, entry *checkpointEntry, sizeBytes int64) {
+	if c == nil {
+		return
+	}
+	entries := make(map[string]checkpointEntry, 1)
+	if entry != nil {
+		entries[key] = *entry
+	}
+	c.ttlCache.Set("entry:"+key, &checkpoint{Entries: entries}, sizeBytes)
 }
 
 func cloneCheckpoint(value *checkpoint) *checkpoint {

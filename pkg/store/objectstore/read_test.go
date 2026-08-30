@@ -95,7 +95,7 @@ func TestStore_GetStream_RemoteOnlyHitResolvesThroughShardCheckpoint(t *testing.
 	assert.Equal(t, "v1", meta.CacheTag)
 }
 
-func TestStore_GetStream_RemoteCheckpointCacheAvoidsRepeatedCheckpointFetch(t *testing.T) {
+func TestStore_GetStream_RemoteEntryCacheAvoidsRepeatedFetch(t *testing.T) {
 	ctx := context.Background()
 	bucket := &countingCheckpointBucket{Bucket: objstore.NewInMemBucket()}
 	flushed := New(bucket, log.NewNopLogger(),
@@ -127,10 +127,10 @@ func TestStore_GetStream_RemoteCheckpointCacheAvoidsRepeatedCheckpointFetch(t *t
 		require.NoError(t, stream.Close())
 	}
 
-	assert.Equal(t, 1, bucket.checkpointCalls())
+	assert.Equal(t, 1, bucket.remoteEntryCalls())
 }
 
-func TestStore_GetStream_RemoteCheckpointCacheReloadsAfterTTL(t *testing.T) {
+func TestStore_GetStream_RemoteEntryCacheReloadsAfterTTL(t *testing.T) {
 	ctx := context.Background()
 	bucket := &countingCheckpointBucket{Bucket: objstore.NewInMemBucket()}
 	flushed := New(bucket, log.NewNopLogger(),
@@ -161,7 +161,7 @@ func TestStore_GetStream_RemoteCheckpointCacheReloadsAfterTTL(t *testing.T) {
 	_, err = io.ReadAll(stream)
 	require.NoError(t, err)
 	require.NoError(t, stream.Close())
-	assert.Equal(t, 1, bucket.checkpointCalls())
+	assert.Equal(t, 1, bucket.remoteEntryCalls())
 
 	now = now.Add(2 * time.Second)
 	stream, _, err = remoteOnly.GetStream(ctx, "remote-ttl")
@@ -169,7 +169,7 @@ func TestStore_GetStream_RemoteCheckpointCacheReloadsAfterTTL(t *testing.T) {
 	_, err = io.ReadAll(stream)
 	require.NoError(t, err)
 	require.NoError(t, stream.Close())
-	assert.Equal(t, 2, bucket.checkpointCalls())
+	assert.Equal(t, 2, bucket.remoteEntryCalls())
 }
 
 func TestStore_PublishCheckpointRefreshesCheckpointCache(t *testing.T) {
@@ -488,8 +488,9 @@ func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T)
 
 type countingCheckpointBucket struct {
 	objstore.Bucket
-	mu             sync.Mutex
-	checkpointGets int
+	mu              sync.Mutex
+	checkpointGets  int
+	remoteEntryGets int
 }
 
 func (b *countingCheckpointBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
@@ -501,6 +502,10 @@ func (b *countingCheckpointBucket) Get(ctx context.Context, name string) (io.Rea
 		b.mu.Lock()
 		b.checkpointGets++
 		b.mu.Unlock()
+	} else if strings.Contains(name, "/entries/") || strings.HasPrefix(name, "entries/") {
+		b.mu.Lock()
+		b.remoteEntryGets++
+		b.mu.Unlock()
 	}
 	return reader, nil
 }
@@ -509,6 +514,12 @@ func (b *countingCheckpointBucket) checkpointCalls() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.checkpointGets
+}
+
+func (b *countingCheckpointBucket) remoteEntryCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.remoteEntryGets
 }
 
 func TestStore_DeleteTombstoneHidesOlderPackedRecord(t *testing.T) {

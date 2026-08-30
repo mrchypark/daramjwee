@@ -65,6 +65,57 @@ func TestStore_FlushUsesFreshCheckpointBaseWhenMemoryCacheIsEnabled(t *testing.T
 	require.Contains(t, checkpoint.Entries, keyC)
 }
 
+func TestStore_ConcurrentInstancesKeepDifferentKeysInSameShard(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	base := objstore.NewInMemBucket()
+	bucket := &checkpointRaceBucket{Bucket: base, release: make(chan struct{})}
+	keyA := "concurrent-a"
+	keyB := ""
+	for i := 0; ; i++ {
+		candidate := "concurrent-b-" + strconv.Itoa(i)
+		if shardForKey(candidate) == shardForKey(keyA) {
+			keyB = candidate
+			break
+		}
+	}
+
+	stores := []*Store{
+		New(bucket, log.NewNopLogger(), WithDir(t.TempDir())),
+		New(bucket, log.NewNopLogger(), WithDir(t.TempDir())),
+	}
+	for i, key := range []string{keyA, keyB} {
+		stores[i].autoFlush = false
+		writer, err := stores[i].BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: key})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, key)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+	}
+
+	errs := make(chan error, 2)
+	for _, store := range stores {
+		go func() { errs <- store.flushPending(ctx) }()
+	}
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+
+	remote := New(base, log.NewNopLogger(), WithDir(t.TempDir()))
+	for _, key := range []string{keyA, keyB} {
+		stream, meta, err := remote.GetStream(ctx, key)
+		require.NoError(t, err)
+		body, err := io.ReadAll(stream)
+		require.NoError(t, err)
+		require.NoError(t, stream.Close())
+		require.Equal(t, key, string(body))
+		require.Equal(t, key, meta.CacheTag)
+	}
+
+	require.NoError(t, stores[0].Delete(ctx, keyA))
+	_, _, err := remote.GetStream(ctx, keyA)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
 func TestStore_FlushUploadsSealedLocalSegmentAsRemoteSegmentObject(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
@@ -576,6 +627,31 @@ type failingUploadBucket struct {
 	objstore.Bucket
 	mu           sync.Mutex
 	failuresLeft map[string]int
+}
+
+type checkpointRaceBucket struct {
+	objstore.Bucket
+	mu      sync.Mutex
+	waiters int
+	release chan struct{}
+}
+
+func (b *checkpointRaceBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+	if strings.HasSuffix(name, "/latest.json") {
+		b.mu.Lock()
+		b.waiters++
+		if b.waiters == 2 {
+			close(b.release)
+		}
+		release := b.release
+		b.mu.Unlock()
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return b.Bucket.Upload(ctx, name, r, opts...)
 }
 
 func (b *failingUploadBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {

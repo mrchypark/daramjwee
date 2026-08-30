@@ -33,6 +33,7 @@ type checkpointEntry struct {
 	Offset      int64              `json:"offset"`
 	Length      int64              `json:"length"`
 	Generation  uint64             `json:"generation,omitempty"`
+	Missing     bool               `json:"missing,omitempty"`
 	Metadata    daramjwee.Metadata `json:"metadata"`
 }
 
@@ -204,6 +205,9 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 			return err
 		}
 	}
+	if err := s.publishRemoteEntries(ctx, updates); err != nil {
+		return err
+	}
 
 	if err := s.publishCheckpoint(ctx, shardID, mergedEntries); err != nil {
 		return err
@@ -212,6 +216,33 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 		return nil
 	}
 	return s.commitFlushUpdates(currentEntries, updates)
+}
+
+func (s *Store) publishRemoteEntries(ctx context.Context, entries map[string]localCatalogEntry) error {
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		entry := entries[key]
+		remoteEntry := checkpointEntry{
+			SegmentPath: entry.RemotePath,
+			Offset:      entry.RemoteOffset,
+			Length:      entry.Length,
+			Generation:  entry.Generation,
+			Metadata:    entry.Metadata,
+		}
+		data, err := json.Marshal(remoteEntry)
+		if err != nil {
+			return err
+		}
+		if err := s.bucket.Upload(ctx, s.remoteEntryPath(key), bytes.NewReader(data)); err != nil {
+			return err
+		}
+		s.checkpointCache.SetEntry(key, &remoteEntry, int64(len(data)))
+	}
+	return nil
 }
 
 func (s *Store) pendingRecordsForShard(shardID string, entries map[string]localCatalogEntry) ([]pendingFlushRecord, error) {

@@ -223,6 +223,23 @@ func TestStagedClosePreservesCommitPanicWhenAbortPanics(t *testing.T) {
 	coord.releaseCommit()
 }
 
+func TestStagedCloseAdvancesGenerationWhenFailedCommitWasApplied(t *testing.T) {
+	manager := &topWriteManager{}
+	coord := manager.coordinator("key")
+	generation, err := coord.reserve(context.Background(), nil)
+	require.NoError(t, err)
+	commitErr := errors.New("durability ambiguous")
+	underlying := &failingCommitStagedWriteSink{commitErr: commitErr, applied: true}
+	sink := &coordinatedStagedTopWriteSink{sink: underlying, coord: coord, generation: generation}
+
+	require.ErrorIs(t, sink.Close(), commitErr)
+	require.Equal(t, generation, coord.current())
+	require.False(t, underlying.aborted)
+	expected := uint64(0)
+	_, err = coord.reserve(context.Background(), &expected)
+	require.ErrorIs(t, err, ErrTopWriteInvalidated)
+}
+
 func TestSetStreamToStoreWithTopGenerationRejectsStaleWriterBeforeBeginSet(t *testing.T) {
 	store := &destructiveReservationStore{
 		data: []byte("live-body"),
@@ -2294,6 +2311,7 @@ func (s *failingCommitStagingStore) Stat(ctx context.Context, key string) (*Meta
 type failingCommitStagedWriteSink struct {
 	commitErr error
 	aborted   bool
+	applied   bool
 }
 
 func (s *failingCommitStagedWriteSink) Write(p []byte) (int, error) { return len(p), nil }
@@ -2304,6 +2322,7 @@ func (s *failingCommitStagedWriteSink) Abort() error {
 	s.aborted = true
 	return nil
 }
+func (s *failingCommitStagedWriteSink) CommitApplied() bool { return s.applied }
 
 type blockingAbortAfterCommitFailureStagingStore struct {
 	mu           sync.Mutex
