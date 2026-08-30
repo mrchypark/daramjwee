@@ -384,7 +384,7 @@ func TestStore_ReopenRecoversPublishedLocalEntries(t *testing.T) {
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 
 	stream, meta, err := reopened.GetStream(ctx, "recover-key")
 	require.NoError(t, err)
@@ -461,7 +461,7 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 	_, reopenErr := reopened.Stat(ctx, "missing-segment-remote-fallback")
 	require.ErrorIs(t, reopenErr, daramjwee.ErrNotFound)
 }
@@ -522,7 +522,7 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 
 	reopenedStream, reopenedMeta, err := reopened.GetStream(ctx, "missing-segment-remote-live")
 	require.NoError(t, err)
@@ -750,7 +750,7 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 	require.NoError(t, reopened.ensureReady())
 
 	_, err = os.Stat(orphanPath)
@@ -795,7 +795,7 @@ func TestStore_ReopenSweepsAbandonedActiveSegments(t *testing.T) {
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 	require.NoError(t, reopened.ensureReady())
 
 	_, err = os.Stat(abandonedPath)
@@ -980,6 +980,12 @@ type failingSealSegmentWriter struct {
 	sealedPath string
 	sealErr    error
 	cleanupErr error
+}
+
+func disableAutoFlush(store *Store) {
+	store.flushMu.Lock()
+	store.autoFlush = false
+	store.flushMu.Unlock()
 }
 
 func newFailingSealSegmentWriter(root, shard, segmentID string, sealErr, cleanupErr error) (*failingSealSegmentWriter, error) {
