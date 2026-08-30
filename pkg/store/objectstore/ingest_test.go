@@ -893,7 +893,87 @@ func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
 		WithDir(t.TempDir()),
 	)
 	store.autoFlush = false
+	first, err := store.BeginSet(ctx, "postrename-failure", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(first, "first payload")
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+	previous, ok := store.catalog.Get("postrename-failure")
+	require.True(t, ok)
 
+	store.flushMu.Lock()
+	clear(store.pendingShards)
+	store.flushMu.Unlock()
+
+	failCatalogAfterCommit(store)
+
+	writer, err := store.BeginSet(ctx, "postrename-failure", &daramjwee.Metadata{CacheTag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "second payload")
+	require.NoError(t, err)
+	require.ErrorContains(t, writer.Close(), "sync dir failed")
+
+	entry, ok := store.catalog.Get("postrename-failure")
+	require.True(t, ok)
+	require.FileExists(t, entry.SegmentPath)
+	require.FileExists(t, previous.SegmentPath)
+
+	store.flushMu.Lock()
+	_, pending := store.pendingShards[shardForKey("postrename-failure")]
+	store.flushMu.Unlock()
+	require.True(t, pending)
+}
+
+func TestStore_DeletePostRenameFailurePreservesPreviousSegment(t *testing.T) {
+	ctx := context.Background()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "postrename-delete", nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	previous, ok := store.catalog.Get("postrename-delete")
+	require.True(t, ok)
+
+	store.flushMu.Lock()
+	clear(store.pendingShards)
+	store.flushMu.Unlock()
+	failCatalogAfterCommit(store)
+
+	require.ErrorContains(t, store.Delete(ctx, "postrename-delete"), "sync dir failed")
+	require.FileExists(t, previous.SegmentPath)
+
+	store.flushMu.Lock()
+	_, pending := store.pendingShards[shardForKey("postrename-delete")]
+	store.flushMu.Unlock()
+	require.True(t, pending)
+}
+
+func TestStore_FlushUpdatePostRenameFailurePreservesPreviousSegment(t *testing.T) {
+	ctx := context.Background()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "postrename-flush", nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	expected := store.catalog.Entries()
+	previous := expected["postrename-flush"]
+	next := previous
+	next.RemotePath = "remote/postrename-flush.seg"
+	next.SegmentPath = ""
+	failCatalogAfterCommit(store)
+
+	err = store.commitFlushUpdates(expected, map[string]localCatalogEntry{"postrename-flush": next})
+	require.ErrorContains(t, err, "sync dir failed")
+	require.FileExists(t, previous.SegmentPath)
+}
+
+func failCatalogAfterCommit(store *Store) {
 	updateCatalog := store.updateCatalog
 	store.updateCatalog = func(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error) {
 		committed, err := updateCatalog(key, fn)
@@ -902,21 +982,6 @@ func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
 		}
 		return true, errors.New("sync dir failed")
 	}
-
-	writer, err := store.BeginSet(ctx, "postrename-failure", &daramjwee.Metadata{CacheTag: "v1"})
-	require.NoError(t, err)
-	_, err = io.WriteString(writer, "payload")
-	require.NoError(t, err)
-	require.ErrorContains(t, writer.Close(), "sync dir failed")
-
-	entry, ok := store.catalog.Get("postrename-failure")
-	require.True(t, ok)
-	require.FileExists(t, entry.SegmentPath)
-
-	store.flushMu.Lock()
-	_, pending := store.pendingShards[shardForKey("postrename-failure")]
-	store.flushMu.Unlock()
-	require.True(t, pending)
 }
 
 func TestStore_CloseWaitsForActiveWriterAndFlushesIt(t *testing.T) {
