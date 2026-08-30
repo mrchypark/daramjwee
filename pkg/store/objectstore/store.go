@@ -272,6 +272,9 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 
 	entry, err := s.loadRemoteEntry(ctx, key)
 	if err != nil {
+		if errors.Is(err, errRemoteEntryTombstone) {
+			return nil, nil, daramjwee.ErrNotFound
+		}
 		if !errors.Is(err, daramjwee.ErrNotFound) {
 			return nil, nil, err
 		}
@@ -429,20 +432,6 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := s.flushPending(ctx); err != nil { //nolint:govet // shadow: sequential error handling
 		return err
 	}
-
-	tombstone := checkpointEntry{Missing: true, Generation: generation}
-	data, err := json.Marshal(tombstone)
-	if err != nil {
-		return err
-	}
-	if err := s.bucket.Upload(ctx, s.remoteEntryPath(key), bytes.NewReader(data)); err != nil {
-		return err
-	}
-	s.checkpointCache.SetEntry(key, &tombstone, int64(len(data)))
-	err = s.bucket.Delete(ctx, s.manifestPath(key))
-	if err != nil && !s.bucket.IsObjNotFoundErr(err) {
-		return err
-	}
 	return nil
 }
 
@@ -466,6 +455,9 @@ func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, erro
 
 	entry, err := s.loadRemoteEntry(ctx, key)
 	if err != nil {
+		if errors.Is(err, errRemoteEntryTombstone) {
+			return nil, daramjwee.ErrNotFound
+		}
 		if !errors.Is(err, daramjwee.ErrNotFound) {
 			return nil, err
 		}
@@ -596,6 +588,18 @@ func (s *Store) remoteEntryPath(key string) string {
 	return joinPath(s.prefix, "entries", shardForKey(key), encodeKey(key)+".json")
 }
 
+func (s *Store) uploadIntentPath(remotePath string) string {
+	return joinPath(s.prefix, "uploads", encodeKey(remotePath)+".json")
+}
+
+func (s *Store) publishUploadIntent(ctx context.Context, remotePath string) error {
+	data, err := json.Marshal(uploadIntent{RemotePath: remotePath})
+	if err != nil {
+		return err
+	}
+	return s.bucket.Upload(ctx, s.uploadIntentPath(remotePath), bytes.NewReader(data))
+}
+
 func (s *Store) blobDir(key string) string {
 	return joinPath(s.prefix, "blobs", shardForKey(key), encodeKey(key))
 }
@@ -680,7 +684,7 @@ func (s *Store) OwnsObjectPath(name string) bool {
 		name = strings.TrimPrefix(name, prefix+"/")
 	}
 
-	for _, root := range []string{"manifests", "entries", "blobs", "segments", "checkpoints"} {
+	for _, root := range []string{"manifests", "entries", "uploads", "blobs", "segments", "checkpoints"} {
 		if name == root || strings.HasPrefix(name, root+"/") {
 			return true
 		}

@@ -12,7 +12,11 @@ func (s *Store) recoverLocalState() error {
 
 	for key, entry := range s.catalog.Entries() {
 		s.observeGeneration(entry.Generation)
-		if entry.Missing || entry.SegmentPath == "" {
+		if entry.Missing {
+			s.pendingShards[shardForKey(key)] = struct{}{}
+			continue
+		}
+		if entry.SegmentPath == "" {
 			continue
 		}
 		if _, err := os.Stat(entry.SegmentPath); err == nil {

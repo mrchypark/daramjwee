@@ -14,6 +14,8 @@ import (
 	internalshard "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/shard"
 )
 
+var errRemoteEntryTombstone = errors.New("objectstore: remote entry is a tombstone")
+
 func (s *Store) loadCheckpointSnapshot(ctx context.Context, shardID string) (*checkpoint, error) {
 	return s.loadCheckpointSnapshotMode(ctx, shardID, true)
 }
@@ -67,7 +69,6 @@ func (s *Store) loadRemoteEntry(ctx context.Context, key string) (*checkpointEnt
 		if exists {
 			return validateRemoteEntry(key, entry)
 		}
-		return s.loadCheckpointEntry(ctx, key)
 	}
 
 	reader, err := s.bucket.Get(ctx, s.remoteEntryPath(key))
@@ -84,7 +85,6 @@ func (s *Store) loadRemoteEntry(ctx context.Context, key string) (*checkpointEnt
 	if !s.bucket.IsObjNotFoundErr(err) {
 		return nil, err
 	}
-	s.checkpointCache.SetEntry(key, nil, 1)
 	return s.loadCheckpointEntry(ctx, key)
 }
 
@@ -102,7 +102,7 @@ func (s *Store) loadCheckpointEntry(ctx context.Context, key string) (*checkpoin
 
 func validateRemoteEntry(key string, entry checkpointEntry) (*checkpointEntry, error) {
 	if entry.Missing {
-		return nil, daramjwee.ErrNotFound
+		return nil, errors.Join(daramjwee.ErrNotFound, errRemoteEntryTombstone)
 	}
 	if entry.SegmentPath == "" {
 		return nil, fmt.Errorf("objectstore: remote entry for %q is missing segment_path", key)

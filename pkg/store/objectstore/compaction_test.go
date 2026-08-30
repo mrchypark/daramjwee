@@ -85,6 +85,127 @@ func TestStore_CompactWaitsForFlushCheckpointPublication(t *testing.T) {
 	assert.Equal(t, "v1", meta.CacheTag)
 }
 
+func TestStore_CompactProtectsAnotherInstanceUpload(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	base := objstore.NewInMemBucket()
+	uploadBucket := &blockingPayloadUploadBucket{
+		Bucket:   base,
+		uploaded: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	uploader := New(uploadBucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	uploader.autoFlush = false
+	compactBucket := &candidateScanGateBucket{
+		Bucket:  base,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	compactor := New(compactBucket, log.NewNopLogger(), WithDir(t.TempDir()))
+
+	writer, err := uploader.BeginSet(ctx, "cross-instance-upload", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	compactDone := make(chan error, 1)
+	go func() {
+		_, err := compactor.Compact(ctx, 0)
+		compactDone <- err
+	}()
+	select {
+	case <-compactBucket.started:
+	case <-ctx.Done():
+		t.Fatal("compaction did not reach candidate scan")
+	}
+
+	flushDone := make(chan error, 1)
+	go func() { flushDone <- uploader.flushPending(ctx) }()
+	select {
+	case <-uploadBucket.uploaded:
+	case <-ctx.Done():
+		t.Fatal("payload upload did not reach the publication gate")
+	}
+
+	compactBucket.releaseScan()
+	require.NoError(t, <-compactDone)
+	uploadBucket.releaseUpload()
+	require.NoError(t, <-flushDone)
+
+	remote := New(base, log.NewNopLogger(), WithDir(t.TempDir()))
+	stream, _, err := remote.GetStream(ctx, "cross-instance-upload")
+	require.NoError(t, err)
+	defer stream.Close()
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "payload", string(body))
+	assert.Empty(t, listObjectNames(t, base, joinPath(uploader.prefix, "uploads")))
+}
+
+type candidateScanGateBucket struct {
+	objstore.Bucket
+	started     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func (b *candidateScanGateBucket) Iter(ctx context.Context, dir string, f func(name string) error, opts ...objstore.IterOption) error {
+	blocked := false
+	if strings.Contains(dir, "/segments/") || strings.HasPrefix(dir, "segments/") {
+		b.once.Do(func() {
+			blocked = true
+			close(b.started)
+		})
+	}
+	if blocked {
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return b.Bucket.Iter(ctx, dir, f, opts...)
+}
+
+func (b *candidateScanGateBucket) releaseScan() {
+	b.releaseOnce.Do(func() { close(b.release) })
+}
+
+type blockingPayloadUploadBucket struct {
+	objstore.Bucket
+	uploaded    chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func (b *blockingPayloadUploadBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+	if err := b.Bucket.Upload(ctx, name, r, opts...); err != nil {
+		return err
+	}
+	blocked := false
+	if strings.Contains(name, "/segments/") || strings.Contains(name, "/blobs/") || strings.HasPrefix(name, "segments/") || strings.HasPrefix(name, "blobs/") {
+		b.once.Do(func() {
+			blocked = true
+			close(b.uploaded)
+		})
+	}
+	if blocked {
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (b *blockingPayloadUploadBucket) releaseUpload() {
+	b.releaseOnce.Do(func() { close(b.release) })
+}
+
 func TestStore_RemotePublicationWaitHonorsContext(t *testing.T) {
 	tests := []struct {
 		name string

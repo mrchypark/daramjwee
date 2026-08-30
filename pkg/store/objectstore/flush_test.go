@@ -116,6 +116,80 @@ func TestStore_ConcurrentInstancesKeepDifferentKeysInSameShard(t *testing.T) {
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestStore_DeleteTombstoneIsRetriedAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	bucket := &failFirstEntryUploadBucket{Bucket: base}
+	dataDir := t.TempDir()
+	store := New(bucket, log.NewNopLogger(), WithDir(dataDir))
+	store.autoFlush = false
+
+	key := "delete-recovery"
+	blobPath := store.blobPath(key, store.nextVersion())
+	require.NoError(t, base.Upload(ctx, blobPath, strings.NewReader("legacy")))
+	require.NoError(t, store.publishManifest(ctx, key, blobPath, int64(len("legacy")), &daramjwee.Metadata{CacheTag: "v1"}))
+
+	require.Error(t, store.Delete(ctx, key))
+	reopened := New(base, log.NewNopLogger(), WithDir(dataDir))
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	require.Eventually(t, func() bool {
+		exists, err := base.Exists(ctx, reopened.remoteEntryPath(key))
+		return err == nil && exists
+	}, time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool {
+		exists, err := base.Exists(ctx, reopened.manifestPath(key))
+		return err == nil && !exists
+	}, time.Second, 20*time.Millisecond)
+	remote := New(base, log.NewNopLogger(), WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, remote.Close()) })
+	_, _, err := remote.GetStream(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	_, err = reopened.Compact(ctx, 0)
+	require.NoError(t, err)
+	exists, err := base.Exists(ctx, blobPath)
+	require.NoError(t, err)
+	require.False(t, exists)
+}
+
+func TestStore_CachedLegacyFallbackObservesLaterTombstone(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	seed := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	key := "cached-delete"
+	blobPath := seed.blobPath(key, seed.nextVersion())
+	require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader("legacy")))
+	require.NoError(t, seed.publishManifest(ctx, key, blobPath, int64(len("legacy")), &daramjwee.Metadata{CacheTag: "v1"}))
+
+	reader := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithCheckpointCache(1<<20), WithCheckpointTTL(time.Hour), WithManifestCache(1<<20), WithManifestTTL(time.Hour))
+	stream, _, err := reader.GetStream(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+
+	deleter := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	require.NoError(t, deleter.Delete(ctx, key))
+	_, _, err = reader.GetStream(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	_, err = reader.Stat(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+type failFirstEntryUploadBucket struct {
+	objstore.Bucket
+	once sync.Once
+}
+
+func (b *failFirstEntryUploadBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+	failed := false
+	if strings.Contains(name, "/entries/") || strings.HasPrefix(name, "entries/") {
+		b.once.Do(func() { failed = true })
+	}
+	if failed {
+		return errors.New("entry upload failed")
+	}
+	return b.Bucket.Upload(ctx, name, r, opts...)
+}
+
 func TestStore_FlushUploadsSealedLocalSegmentAsRemoteSegmentObject(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
