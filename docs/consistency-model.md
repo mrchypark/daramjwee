@@ -92,13 +92,12 @@ T5: Fill discards result
 ### Promotion is Conditional
 
 ```go
-Promote(key, value, observedGeneration)
-  │
-  ├── Check: observedGeneration == currentGeneration
-  │   ├── Yes → commit promotion
-  │   └── No → discard promotion
-  │
-  └── Return data to caller regardless
+Promotion attempt
+  ├── Setup or generation validation fails before streaming
+  │   └── Return the source body directly
+  └── Streaming starts
+      ├── EOF + successful finalization → publish promotion
+      └── Sink Write/finalization error → return error; do not publish
 ```
 
 **Guaranteed**: Promotion only succeeds if the generation has not changed since the value was read.
