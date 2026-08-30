@@ -128,27 +128,14 @@ func (s *coordinatedStagedTopWriteSink) Close() error {
 
 		closeErr := s.sink.Commit(commitCtx)
 		if closeErr != nil {
-			applied := false
-			if reporter, ok := s.sink.(interface{ CommitApplied() bool }); ok {
-				applied = reporter.CommitApplied()
-			}
 			s.coord.stateMu.Lock()
-			if applied {
-				if s.coord.committedGeneration.Load() < s.generation {
-					s.coord.committedGeneration.Store(s.generation)
-				}
-				s.coord.pruneReservationsThroughLocked(s.coord.committedGeneration.Load())
-			} else {
-				s.coord.removeReservationLocked(s.generation)
-			}
+			s.coord.removeReservationLocked(s.generation)
 			s.coord.stateMu.Unlock()
 			s.err = closeErr
 			s.coord.releaseCommit()
 			commitLocked = false
-			if !applied {
-				if abortErr := s.sink.Abort(); abortErr != nil {
-					s.err = errors.Join(s.err, abortErr)
-				}
+			if abortErr := s.sink.Abort(); abortErr != nil {
+				s.err = errors.Join(s.err, abortErr)
 			}
 			return
 		}

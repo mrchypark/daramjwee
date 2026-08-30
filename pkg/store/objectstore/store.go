@@ -217,8 +217,8 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 }
 
 func (s *Store) ValidateTier(index int) error {
-	if s.initErr != nil {
-		return fmt.Errorf("objectstore: initialization failed: %w", s.initErr)
+	if err := s.ensureReady(); err != nil {
+		return fmt.Errorf("objectstore: initialization failed: %w", err)
 	}
 	return nil
 }
@@ -479,7 +479,13 @@ func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, erro
 }
 
 func (s *Store) ensureReady() error {
-	return s.initErr
+	if s.initErr != nil {
+		return s.initErr
+	}
+	if s.catalog != nil {
+		return s.catalog.Health()
+	}
+	return nil
 }
 
 func (s *Store) loadManifest(ctx context.Context, key string) (*manifest, error) {

@@ -29,7 +29,6 @@ type writer struct {
 	doneCh  chan struct{}
 	result  error
 	aborted bool
-	applied bool
 }
 
 func (w *writer) Write(p []byte) (int, error) {
@@ -82,9 +81,6 @@ func (w *writer) Commit(ctx context.Context) (result error) {
 		Generation:  w.generation,
 		Metadata:    metadata,
 	})
-	w.mu.Lock()
-	w.applied = published
-	w.mu.Unlock()
 	if err != nil {
 		if published {
 			w.store.enqueueFlush(w.key)
@@ -99,12 +95,6 @@ func (w *writer) Commit(ctx context.Context) (result error) {
 	}
 	w.store.enqueueFlush(w.key)
 	return nil
-}
-
-func (w *writer) CommitApplied() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.applied
 }
 
 func (w *writer) Abort() (result error) {

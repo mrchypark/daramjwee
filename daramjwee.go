@@ -31,6 +31,11 @@ var ErrCacheableNotFound = errors.New("daramjwee: resource not found, but this s
 // is invoked without a Fetcher.
 var ErrNilFetcher = errors.New("daramjwee: nil fetcher")
 
+// ErrCommitOutcomeUnknown means a staged commit reached durable storage but
+// its final outcome could not be confirmed. The store must fail closed until
+// it is reconciled or reopened safely.
+var ErrCommitOutcomeUnknown = errors.New("daramjwee: commit outcome is unknown")
+
 // Cache is the primary public interface for interacting with daramjwee.
 // It enforces a memory-safe, stream-based interaction model.
 type Cache interface {
@@ -254,10 +259,12 @@ type StagedWriteSink interface {
 // cache coordinate only the short commit phase instead of holding cache-level
 // same-key ownership for the full caller-controlled write lifetime.
 // BeginStagedSet must keep the currently readable value for key unchanged
-// until Commit succeeds. Abort and failed Commit must leave no visible value
-// from the staged writer, and Delete must not wait for an uncommitted staged
-// writer on the same key to commit or abort. Commit and Abort are terminal and
-// must tolerate repeated cleanup calls because the cache may call Abort after a
+// until Commit succeeds. Abort and confirmed failed Commit must leave no visible
+// value from the staged writer. An error matching ErrCommitOutcomeUnknown is an
+// indeterminate outcome, not a confirmed failure; the store must fail closed
+// until reconciliation. Delete must not wait for an uncommitted staged writer
+// on the same key to commit or abort. Commit and Abort are terminal and must
+// tolerate repeated cleanup calls because the cache may call Abort after a
 // failed Commit to release hidden staging resources.
 type StagingStore interface {
 	BeginStagedSet(ctx context.Context, key string, metadata *Metadata) (StagedWriteSink, error)

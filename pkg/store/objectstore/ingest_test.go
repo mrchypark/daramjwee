@@ -926,7 +926,7 @@ func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 	require.Empty(t, segments)
 }
 
-func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
+func TestStore_ClosePostRenameFailurePoisonsStoreAndPreservesBothSegments(t *testing.T) {
 	ctx := context.Background()
 	store := New(
 		objstore.NewInMemBucket(),
@@ -946,7 +946,6 @@ func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
 	clear(store.pendingShards)
 	store.flushMu.Unlock()
 
-	updateCatalog := store.updateCatalog
 	failCatalogAfterCommit(store)
 
 	writer, err := store.BeginSet(ctx, "postrename-failure", &daramjwee.Metadata{CacheTag: "v2"})
@@ -960,17 +959,17 @@ func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
 
 	entry, ok := store.catalog.Get("postrename-failure")
 	require.True(t, ok)
-	require.FileExists(t, entry.SegmentPath)
+	require.Equal(t, "v2", entry.Metadata.CacheTag)
 	require.FileExists(t, previous.SegmentPath)
+	require.FileExists(t, entry.SegmentPath)
+	require.Len(t, localSegmentPaths(t, store.dataDir), 2)
+	_, _, err = store.GetStream(ctx, "postrename-failure")
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
 
 	store.flushMu.Lock()
 	_, pending := store.pendingShards[shardForKey("postrename-failure")]
 	store.flushMu.Unlock()
 	require.True(t, pending)
-
-	store.updateCatalog = updateCatalog
-	require.NoError(t, store.flushPending(ctx))
-	require.NoFileExists(t, previous.SegmentPath)
 }
 
 func TestStore_DeletePostRenameFailurePreservesPreviousSegment(t *testing.T) {
@@ -995,6 +994,11 @@ func TestStore_DeletePostRenameFailurePreservesPreviousSegment(t *testing.T) {
 	require.ErrorContains(t, err, "sync dir failed")
 	require.ErrorIs(t, err, ErrAmbiguousCommit)
 	require.FileExists(t, previous.SegmentPath)
+	entry, ok := store.catalog.Get("postrename-delete")
+	require.True(t, ok)
+	require.True(t, entry.Missing)
+	_, _, err = store.GetStream(ctx, "postrename-delete")
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
 
 	store.flushMu.Lock()
 	_, pending := store.pendingShards[shardForKey("postrename-delete")]
@@ -1022,6 +1026,10 @@ func TestStore_FlushUpdatePostRenameFailurePreservesPreviousSegment(t *testing.T
 	err = store.commitFlushUpdates(expected, map[string]localCatalogEntry{"postrename-flush": next})
 	require.ErrorContains(t, err, "sync dir failed")
 	require.FileExists(t, previous.SegmentPath)
+	entry, ok := store.catalog.Get("postrename-flush")
+	require.True(t, ok)
+	require.Equal(t, next, entry)
+	require.ErrorIs(t, store.ensureReady(), ErrAmbiguousCommit)
 }
 
 func failCatalogAfterCommit(store *Store) {
@@ -1031,7 +1039,9 @@ func failCatalogAfterCommit(store *Store) {
 		if err != nil || !committed {
 			return committed, err
 		}
-		return true, errors.Join(ErrAmbiguousCommit, errors.New("sync dir failed"))
+		terminalErr := errors.Join(ErrAmbiguousCommit, errors.New("sync dir failed"))
+		store.initErr = terminalErr
+		return true, terminalErr
 	}
 }
 

@@ -15,6 +15,9 @@ import (
 
 func (s *Store) Compact(ctx context.Context, olderThan time.Duration) (SweepStats, error) {
 	var stats SweepStats
+	if err := s.ensureReady(); err != nil {
+		return stats, err
+	}
 	if err := s.remoteState.acquire(ctx); err != nil {
 		return stats, err
 	}

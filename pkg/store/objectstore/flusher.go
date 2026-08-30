@@ -107,6 +107,9 @@ func nextFlushRetryDelay(current time.Duration) time.Duration {
 }
 
 func (s *Store) flushPending(ctx context.Context) error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
 	if s.beforeFlushAcquire != nil {
 		s.beforeFlushAcquire()
 	}

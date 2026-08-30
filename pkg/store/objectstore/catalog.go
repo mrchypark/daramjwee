@@ -11,8 +11,9 @@ import (
 type localCatalogEntry = internalcatalog.Entry
 
 var (
-	// ErrAmbiguousCommit means a catalog update became visible after rename,
-	// but its directory durability could not be confirmed.
+	// ErrAmbiguousCommit means a catalog snapshot was renamed but its directory
+	// durability could not be confirmed. The store remains fail-closed until
+	// the catalog is explicitly reconciled.
 	ErrAmbiguousCommit   = internalcatalog.ErrAmbiguousCommit
 	errMissingLocalEntry = errors.New("objectstore: missing local entry data")
 )

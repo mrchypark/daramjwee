@@ -25,7 +25,9 @@ func TestCatalogUnchangedMutationsSkipPersist(t *testing.T) {
 	var persistCalls atomic.Int32
 	restoreWrite := writeFileFn
 	writeFileFn = func(path string, data []byte, perm os.FileMode) error {
-		persistCalls.Add(1)
+		if filepath.Base(path) == "snapshot.json.tmp" {
+			persistCalls.Add(1)
+		}
 		return restoreWrite(path, data, perm)
 	}
 	t.Cleanup(func() {
@@ -58,8 +60,11 @@ func TestCatalogSetRollsBackOnPreCommitFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	restoreSyncPath := syncPathFn
-	syncPathFn = func(string) error {
-		return errors.New("sync path failed")
+	syncPathFn = func(path string) error {
+		if filepath.Base(path) == "snapshot.json.tmp" {
+			return errors.New("sync path failed")
+		}
+		return restoreSyncPath(path)
 	}
 	t.Cleanup(func() {
 		syncPathFn = restoreSyncPath
@@ -83,7 +88,12 @@ func TestCatalogUpdateReportsPreCommitFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	restoreSyncPath := syncPathFn
-	syncPathFn = func(string) error { return errors.New("sync path failed") }
+	syncPathFn = func(path string) error {
+		if filepath.Base(path) == "snapshot.json.tmp" {
+			return errors.New("sync path failed")
+		}
+		return restoreSyncPath(path)
+	}
 	t.Cleanup(func() { syncPathFn = restoreSyncPath })
 
 	committed, err := cat.Update("precommit", func(Entry, bool) (Entry, bool) {
@@ -93,7 +103,7 @@ func TestCatalogUpdateReportsPreCommitFailure(t *testing.T) {
 	assert.False(t, committed)
 }
 
-func TestCatalogSetKeepsCommittedStateOnPostRenameFailure(t *testing.T) {
+func TestCatalogSetPoisonsCatalogOnPostRenameFailure(t *testing.T) {
 	dir := t.TempDir()
 	cat, err := Open(dir)
 	require.NoError(t, err)
@@ -117,11 +127,15 @@ func TestCatalogSetKeepsCommittedStateOnPostRenameFailure(t *testing.T) {
 	current, ok := cat.Get("postrename")
 	require.True(t, ok)
 	assert.Equal(t, entry, current)
-
-	_, err = Open(dir)
-	require.ErrorContains(t, err, "sync dir failed")
+	require.ErrorIs(t, cat.Health(), ErrAmbiguousCommit)
+	require.Error(t, cat.Set("later", Entry{}))
 
 	syncDirFn = restoreSyncDir
+	_, err = Open(dir)
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
+	require.ErrorContains(t, err, "recovery marker")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot.json.state"), []byte(markerClean), 0o644))
 	reopened, err := Open(dir)
 	require.NoError(t, err)
 	reloaded, ok := reopened.Get("postrename")
@@ -143,7 +157,7 @@ func TestOpenFailsWhenExistingSnapshotDirectoryCannotSync(t *testing.T) {
 	require.ErrorContains(t, err, "sync dir failed")
 }
 
-func TestCatalogUpdateReportsPostRenameCommit(t *testing.T) {
+func TestCatalogUpdateReportsPostRenameAmbiguityAndPoisons(t *testing.T) {
 	dir := t.TempDir()
 	cat, err := Open(dir)
 	require.NoError(t, err)
@@ -162,25 +176,57 @@ func TestCatalogUpdateReportsPostRenameCommit(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrAmbiguousCommit)
 	assert.True(t, committed)
+	require.ErrorIs(t, cat.Health(), ErrAmbiguousCommit)
 
 	current, ok := cat.Get("postrename")
 	require.True(t, ok)
 	assert.Equal(t, entry, current)
+
+	syncDirFn = restoreSyncDir
+	_, err = Open(dir)
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot.json.state"), []byte(markerClean), 0o644))
+	reopened, err := Open(dir)
+	require.NoError(t, err)
+	reloaded, ok := reopened.Get("postrename")
+	require.True(t, ok)
+	assert.Equal(t, entry, reloaded)
 }
 
-func TestCatalogUpdateRetriesPendingDirectorySyncBeforeNoopSuccess(t *testing.T) {
+func TestCatalogMarkerCleanupFailureIsAmbiguousAndPoisons(t *testing.T) {
 	dir := t.TempDir()
 	cat, err := Open(dir)
 	require.NoError(t, err)
 
-	failSync := true
-	restoreSyncDir := syncDirFn
-	syncDirFn = func(string) error {
-		if failSync {
-			return errors.New("sync dir failed")
+	restoreSyncPath := syncPathFn
+	markerSyncs := 0
+	syncPathFn = func(path string) error {
+		if filepath.Base(path) == "snapshot.json.state" {
+			markerSyncs++
+			if markerSyncs == 2 {
+				return errors.New("marker sync failed")
+			}
 		}
-		return nil
+		return restoreSyncPath(path)
 	}
+	t.Cleanup(func() { syncPathFn = restoreSyncPath })
+
+	committed, err := cat.Update("key", func(Entry, bool) (Entry, bool) {
+		return Entry{Metadata: daramjwee.Metadata{CacheTag: "v1"}}, true
+	})
+	require.True(t, committed)
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
+	require.ErrorIs(t, err, daramjwee.ErrCommitOutcomeUnknown)
+	require.ErrorIs(t, cat.Health(), ErrAmbiguousCommit)
+}
+
+func TestCatalogBlocksUpdatesAfterPostRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	cat, err := Open(dir)
+	require.NoError(t, err)
+
+	restoreSyncDir := syncDirFn
+	syncDirFn = func(string) error { return errors.New("sync dir failed") }
 	t.Cleanup(func() { syncDirFn = restoreSyncDir })
 
 	entry := Entry{Metadata: daramjwee.Metadata{CacheTag: "v1"}}
@@ -193,12 +239,4 @@ func TestCatalogUpdateRetriesPendingDirectorySyncBeforeNoopSuccess(t *testing.T)
 	})
 	require.False(t, committed)
 	require.ErrorIs(t, err, ErrAmbiguousCommit)
-
-	failSync = false
-	require.NoError(t, cat.Sync())
-	committed, err = cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
-		return current, exists
-	})
-	require.NoError(t, err)
-	require.True(t, committed)
 }
