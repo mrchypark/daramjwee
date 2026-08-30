@@ -139,6 +139,9 @@ func (*Planner) planTopTierHit(obs Observation) (plan ReadPlan) {
 
 func (p *Planner) planLowerTierHit(obs Observation, topGeneration generationValidity) (plan ReadPlan) {
 	if obs.UpperTiersHealth == UpperTiersDirty {
+		if obs.ConditionalMatched && topGeneration == generationUnspecified {
+			return ReadPlan{Reply: ReplyNotModified}
+		}
 		return p.planDirectServe(obs)
 	}
 	if obs.ConditionalMatched {

@@ -39,7 +39,7 @@ func TestPlannerPlans(t *testing.T) {
 		{"dirty lower positive", lower(Observation{UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyDirect}},
 		{"dirty lower stale", lower(Observation{Freshness: FreshnessStale, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose}},
 		{"dirty lower negative", lower(Observation{EntryNegative: true, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyNotFound}},
-		{"dirty lower conditional", lower(Observation{ConditionalMatched: true, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyDirect}},
+		{"dirty lower conditional", lower(Observation{ConditionalMatched: true, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyNotModified}},
 	}
 
 	planner := &Planner{}
@@ -55,6 +55,8 @@ func TestPlannerPlans(t *testing.T) {
 	}, generationValid))
 	require.Equal(t, ReadPlan{Reply: ReplyOK, Body: BodyDirect}, planner.plan(conditional, generationInvalid))
 	require.Equal(t, ReadPlan{Reply: ReplyOK, Body: BodyDirect}, planner.plan(conditional, generationValidity(99)))
+	dirtyConditional := lower(Observation{ConditionalMatched: true, UpperTiersHealth: UpperTiersDirty, HasTopStore: true})
+	require.Equal(t, ReadPlan{Reply: ReplyOK, Body: BodyDirect}, planner.plan(dirtyConditional, generationInvalid))
 }
 
 func TestPlannerAllOutcomeCombinations(t *testing.T) {
