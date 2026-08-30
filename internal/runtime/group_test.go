@@ -108,29 +108,33 @@ func TestGroup_CloseCache_DiscardsQueuedJobs(t *testing.T) {
 
 	// Submit a blocking job to occupy the worker
 	blocker := make(chan struct{})
+	jobStarted := make(chan struct{})
 	err := rt.Submit("cache-a", JobKindRefresh, Job{
 		Run: func(ctx context.Context) {
+			close(jobStarted)
 			<-blocker
 		},
 	})
 	require.NoError(t, err)
+	<-jobStarted
 
 	// Submit a job that will stay in the queue
-	discardCalled := false
+	discarded := make(chan DropReason, 1)
 	err = rt.Submit("cache-a", JobKindRefresh, Job{
 		Run: func(ctx context.Context) {
 			t.Fatal("job should not be executed")
 		},
 		Discard: func(reason DropReason) {
-			discardCalled = true
-			require.Equal(t, DropReasonShutdown, reason)
+			discarded <- reason
 		},
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, rt.CloseCache("cache-a", time.Second))
-	require.True(t, discardCalled, "Discard should be called for dropped jobs")
+	closed := make(chan error, 1)
+	go func() { closed <- rt.CloseCache("cache-a", time.Second) }()
+	require.Equal(t, DropReasonShutdown, <-discarded)
 	close(blocker)
+	require.NoError(t, <-closed)
 }
 
 func TestGroup_Shutdown_DiscardsAllJobs(t *testing.T) {

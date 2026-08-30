@@ -608,6 +608,7 @@ func TestE2E_FileObjectstoreChain(t *testing.T) {
 		log.NewNopLogger(),
 		objectstore.WithDir(objDir),
 	)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	fileDir := t.TempDir()
 	fileTier, err := filestore.New(fileDir, log.NewNopLogger())
@@ -631,6 +632,7 @@ func TestE2E_FileObjectstoreChain(t *testing.T) {
 		log.NewNopLogger(),
 		objectstore.WithDir(t.TempDir()),
 	)
+	t.Cleanup(func() { require.NoError(t, store2.Close()) })
 	require.Eventually(t, func() bool {
 		reader, _, err := store2.GetStream(context.Background(), "remote")
 		if err != nil {
