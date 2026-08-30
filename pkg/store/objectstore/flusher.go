@@ -39,6 +39,8 @@ type checkpointEntry struct {
 
 type uploadIntent struct {
 	RemotePath string `json:"remote_path"`
+	Completed  bool   `json:"completed,omitempty"`
+	Abandoned  bool   `json:"abandoned,omitempty"`
 }
 
 type pendingFlushRecord struct {
@@ -210,7 +212,7 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	}
 	remoteEntries := make(map[string]localCatalogEntry, len(updates))
 	for key, entry := range currentEntries {
-		if shardForKey(key) == shardID && entry.Missing {
+		if shardForKey(key) == shardID && entry.Missing && !entry.RemotePublished {
 			remoteEntries[key] = entry
 		}
 	}
@@ -224,11 +226,16 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	if err := s.publishCheckpoint(ctx, shardID, mergedEntries); err != nil {
 		return err
 	}
-	s.clearUploadIntents(ctx, updates)
+	if err := s.completeUploadIntents(ctx, updates); err != nil {
+		return err
+	}
 	if err := s.commitFlushUpdates(currentEntries, updates); err != nil {
 		return err
 	}
-	return s.clearLegacyManifests(ctx, remoteEntries)
+	if err := s.clearLegacyManifests(ctx, remoteEntries); err != nil {
+		return err
+	}
+	return s.commitPublishedTombstones(remoteEntries)
 }
 
 func (s *Store) clearLegacyManifests(ctx context.Context, entries map[string]localCatalogEntry) error {
@@ -243,7 +250,7 @@ func (s *Store) clearLegacyManifests(ctx context.Context, entries map[string]loc
 	return nil
 }
 
-func (s *Store) clearUploadIntents(ctx context.Context, entries map[string]localCatalogEntry) {
+func (s *Store) completeUploadIntents(ctx context.Context, entries map[string]localCatalogEntry) error {
 	cleared := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.RemotePath == "" {
@@ -253,10 +260,18 @@ func (s *Store) clearUploadIntents(ctx context.Context, entries map[string]local
 			continue
 		}
 		cleared[entry.RemotePath] = struct{}{}
+		data, err := json.Marshal(uploadIntent{RemotePath: entry.RemotePath, Completed: true})
+		if err != nil {
+			return err
+		}
+		if err := s.bucket.Upload(ctx, s.uploadIntentPath(entry.RemotePath), bytes.NewReader(data)); err != nil {
+			return err
+		}
 		if err := s.bucket.Delete(ctx, s.uploadIntentPath(entry.RemotePath)); ignoreNotFound(err, s.bucket) != nil {
 			_ = level.Warn(s.logger).Log("msg", "failed to clear remote upload intent", "path", entry.RemotePath, "err", err)
 		}
 	}
+	return nil
 }
 
 func (s *Store) publishRemoteEntries(ctx context.Context, entries map[string]localCatalogEntry) error {
@@ -335,7 +350,7 @@ func (s *Store) flushPackedRecords(
 		return err
 	}
 	if err := s.uploadPackedBody(ctx, remotePath, payload); err != nil {
-		return err
+		return errors.Join(err, s.abandonUploadIntent(ctx, remotePath))
 	}
 
 	for _, record := range records {
@@ -387,7 +402,7 @@ func (s *Store) flushDirectRecord(
 		return err
 	}
 	if err := s.bucket.Upload(ctx, remotePath, io.NewSectionReader(file, record.entry.Offset, record.entry.Length)); err != nil {
-		return err
+		return errors.Join(err, s.abandonUploadIntent(ctx, remotePath))
 	}
 
 	current.RemotePath = remotePath
@@ -429,7 +444,7 @@ func mergeCheckpointEntries(base map[string]checkpointEntry, locals map[string]l
 		if shardForKey(key) != shardID {
 			continue
 		}
-		if entry.Missing {
+		if entry.Missing && !entry.RemotePublished {
 			delete(merged, key)
 			continue
 		}

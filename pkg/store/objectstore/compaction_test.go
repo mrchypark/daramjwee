@@ -102,6 +102,10 @@ func TestStore_CompactProtectsAnotherInstanceUpload(t *testing.T) {
 		release: make(chan struct{}),
 	}
 	compactor := New(compactBucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	uploadNow := time.Unix(20_000, 0)
+	uploader.now = func() time.Time { return uploadNow }
+	compactor.now = func() time.Time { return uploadNow.Add(2 * time.Hour) }
+	compactor.gcGrace = time.Nanosecond
 
 	writer, err := uploader.BeginSet(ctx, "cross-instance-upload", &daramjwee.Metadata{CacheTag: "v1"})
 	require.NoError(t, err)
@@ -141,6 +145,133 @@ func TestStore_CompactProtectsAnotherInstanceUpload(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(body))
 	assert.Empty(t, listObjectNames(t, base, joinPath(uploader.prefix, "uploads")))
+}
+
+func TestStore_CompactDropsStaleLocalRemotePath(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	storeA := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	storeB := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	storeA.autoFlush = false
+	storeB.autoFlush = false
+
+	write := func(store *Store, value string) {
+		writer, err := store.BeginSet(ctx, "stale-local", &daramjwee.Metadata{CacheTag: value})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, value)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, store.flushPending(ctx))
+	}
+	write(storeA, "version-one")
+	blobs := listObjectNames(t, bucket, storeA.blobRoot())
+	require.Len(t, blobs, 1)
+	oldPath := blobs[0]
+	write(storeB, "version-two")
+
+	_, err := storeA.Compact(ctx, 0)
+	require.NoError(t, err)
+	exists, err := bucket.Exists(ctx, oldPath)
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	remote := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	stream, _, err := remote.GetStream(ctx, "stale-local")
+	require.NoError(t, err)
+	defer stream.Close()
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "version-two", string(body))
+}
+
+func TestStore_CompactClearsCompletedIntentAfterDeleteFailure(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	bucket := &failFirstIntentDeleteBucket{Bucket: base}
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	store.autoFlush = false
+
+	write := func(value string) {
+		writer, err := store.BeginSet(ctx, "intent-cleanup", &daramjwee.Metadata{CacheTag: value})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, value)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, store.flushPending(ctx))
+	}
+	write("version-one")
+	blobs := listObjectNames(t, base, store.blobRoot())
+	require.Len(t, blobs, 1)
+	oldPath := blobs[0]
+	require.Len(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")), 1)
+	write("version-two")
+
+	_, err := store.Compact(ctx, 0)
+	require.NoError(t, err)
+	exists, err := base.Exists(ctx, oldPath)
+	require.NoError(t, err)
+	require.False(t, exists)
+	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
+}
+
+func TestStore_CompactClearsAbandonedUploadIntent(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	bucket := &failFirstPayloadAfterUploadBucket{Bucket: base}
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	store.autoFlush = false
+	writer, err := store.BeginSet(ctx, "abandoned-intent", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.Error(t, store.flushPending(ctx))
+	blobs := listObjectNames(t, base, store.blobRoot())
+	require.Len(t, blobs, 1)
+	abandonedPath := blobs[0]
+	require.NoError(t, store.flushPending(ctx))
+
+	_, err = store.Compact(ctx, 0)
+	require.NoError(t, err)
+	exists, err := base.Exists(ctx, abandonedPath)
+	require.NoError(t, err)
+	require.False(t, exists)
+	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
+}
+
+type failFirstIntentDeleteBucket struct {
+	objstore.Bucket
+	once sync.Once
+}
+
+type failFirstPayloadAfterUploadBucket struct {
+	objstore.Bucket
+	once sync.Once
+}
+
+func (b *failFirstPayloadAfterUploadBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+	if err := b.Bucket.Upload(ctx, name, r, opts...); err != nil {
+		return err
+	}
+	failed := false
+	if strings.Contains(name, "/blobs/") || strings.HasPrefix(name, "blobs/") {
+		b.once.Do(func() { failed = true })
+	}
+	if failed {
+		return errors.New("payload outcome unknown")
+	}
+	return nil
+}
+
+func (b *failFirstIntentDeleteBucket) Delete(ctx context.Context, name string) error {
+	failed := false
+	if strings.Contains(name, "/uploads/") || strings.HasPrefix(name, "uploads/") {
+		b.once.Do(func() { failed = true })
+	}
+	if failed {
+		return errors.New("intent delete failed")
+	}
+	return b.Bucket.Delete(ctx, name)
 }
 
 type candidateScanGateBucket struct {

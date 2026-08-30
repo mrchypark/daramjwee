@@ -600,6 +600,14 @@ func (s *Store) publishUploadIntent(ctx context.Context, remotePath string) erro
 	return s.bucket.Upload(ctx, s.uploadIntentPath(remotePath), bytes.NewReader(data))
 }
 
+func (s *Store) abandonUploadIntent(ctx context.Context, remotePath string) error {
+	data, err := json.Marshal(uploadIntent{RemotePath: remotePath, Abandoned: true})
+	if err != nil {
+		return err
+	}
+	return s.bucket.Upload(context.WithoutCancel(ctx), s.uploadIntentPath(remotePath), bytes.NewReader(data))
+}
+
 func (s *Store) blobDir(key string) string {
 	return joinPath(s.prefix, "blobs", shardForKey(key), encodeKey(key))
 }

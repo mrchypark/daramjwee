@@ -74,6 +74,9 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 
 func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, error) {
 	if entry.Missing {
+		if entry.RemotePublished {
+			return localCatalogEntry{}, false, false, nil
+		}
 		return localCatalogEntry{}, false, false, errMissingLocalEntry
 	}
 	if entry.SegmentPath == "" {
@@ -159,6 +162,28 @@ func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCata
 				s.deferLocalSegmentReclaim(expected.SegmentPath)
 			}
 		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) commitPublishedTombstones(expectedEntries map[string]localCatalogEntry) error {
+	if s.catalog == nil {
+		return nil
+	}
+	for key, expected := range expectedEntries {
+		if !expected.Missing || expected.RemotePublished {
+			continue
+		}
+		_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			if !exists || current != expected {
+				return current, exists
+			}
+			current.RemotePublished = true
+			return current, true
+		})
 		if err != nil {
 			return err
 		}

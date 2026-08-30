@@ -12,8 +12,11 @@ func (s *Store) recoverLocalState() error {
 
 	for key, entry := range s.catalog.Entries() {
 		s.observeGeneration(entry.Generation)
-		if entry.Missing {
+		if entry.Missing && !entry.RemotePublished {
 			s.pendingShards[shardForKey(key)] = struct{}{}
+			continue
+		}
+		if entry.Missing {
 			continue
 		}
 		if entry.SegmentPath == "" {

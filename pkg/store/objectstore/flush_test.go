@@ -174,6 +174,54 @@ func TestStore_CachedLegacyFallbackObservesLaterTombstone(t *testing.T) {
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestStore_PublishedDeleteDoesNotOverrideLaterRemoteWrite(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	dataDir := t.TempDir()
+	storeA := New(bucket, log.NewNopLogger(), WithDir(dataDir))
+	storeB := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	storeA.autoFlush = false
+	storeB.autoFlush = false
+	key, otherKey := sameShardKeys("published-delete")
+
+	writeAndFlush := func(store *Store, key, value string) {
+		t.Helper()
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: value})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, value)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, store.flushPending(ctx))
+	}
+	read := func(store *Store, key string) string {
+		t.Helper()
+		stream, _, err := store.GetStream(ctx, key)
+		require.NoError(t, err)
+		defer stream.Close()
+		body, err := io.ReadAll(stream)
+		require.NoError(t, err)
+		return string(body)
+	}
+
+	writeAndFlush(storeA, key, "v1")
+	require.NoError(t, storeA.Delete(ctx, key))
+	writeAndFlush(storeB, key, "v2")
+	require.Equal(t, "v2", read(storeA, key))
+
+	remote := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	require.Equal(t, "v2", read(remote, key))
+	writeAndFlush(storeA, otherKey, "other")
+	require.Equal(t, "v2", read(remote, key))
+
+	require.NoError(t, storeA.Close())
+	reopened := New(bucket, log.NewNopLogger(), WithDir(dataDir))
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	require.Equal(t, "v2", read(reopened, key))
+	_, err := reopened.Compact(ctx, 0)
+	require.NoError(t, err)
+	require.Equal(t, "v2", read(remote, key))
+}
+
 type failFirstEntryUploadBucket struct {
 	objstore.Bucket
 	once sync.Once

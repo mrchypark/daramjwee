@@ -73,13 +73,14 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 	reachable := make(map[string]struct{})
 	remoteEntryKeys := make(map[string]struct{})
 	legacyManifests := make(map[string]string)
+	localRemotePaths := make(map[string]string)
 
 	if s.catalog != nil {
-		for _, entry := range s.catalog.Entries() {
+		for key, entry := range s.catalog.Entries() {
 			if entry.Missing || entry.RemotePath == "" {
 				continue
 			}
-			reachable[entry.RemotePath] = struct{}{}
+			localRemotePaths[key] = entry.RemotePath
 		}
 	}
 
@@ -162,6 +163,12 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 	if err != nil {
 		return nil, err
 	}
+	for key, remotePath := range localRemotePaths {
+		if _, authoritative := remoteEntryKeys[key]; authoritative {
+			continue
+		}
+		reachable[remotePath] = struct{}{}
+	}
 	for key, blobPath := range legacyManifests {
 		if _, authoritative := remoteEntryKeys[key]; authoritative {
 			continue
@@ -233,6 +240,18 @@ func (s *Store) collectUploadIntentPaths(ctx context.Context, reachable map[stri
 		}
 		if !s.isPackedRemotePath(intent.RemotePath) && !strings.HasPrefix(intent.RemotePath, s.blobRoot()) {
 			return fmt.Errorf("objectstore: upload intent %q has invalid remote_path", name)
+		}
+		if intent.Completed || intent.Abandoned {
+			if err := s.bucket.Delete(ctx, name); ignoreNotFound(err, s.bucket) != nil {
+				_ = level.Warn(s.logger).Log("msg", "failed to clear remote upload intent", "path", name, "err", err)
+			}
+			return nil
+		}
+		if _, published := reachable[intent.RemotePath]; published {
+			if err := s.bucket.Delete(ctx, name); ignoreNotFound(err, s.bucket) != nil {
+				_ = level.Warn(s.logger).Log("msg", "failed to clear published upload intent", "path", name, "err", err)
+			}
+			return nil
 		}
 		reachable[intent.RemotePath] = struct{}{}
 		stats.Reachable++
