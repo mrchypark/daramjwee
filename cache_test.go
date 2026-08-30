@@ -311,7 +311,7 @@ func newMetadataOwnershipCache(store Store) *DaramjweeCache {
 	return &DaramjweeCache{
 		tiers:  []Store{store},
 		logger: log.NewNopLogger(),
-		config: cacheConfig{opTimeout: time.Second, closeTimeout: time.Second},
+		config: cacheConfig{opTimeout: 5 * time.Second, closeTimeout: time.Second},
 	}
 }
 

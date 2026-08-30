@@ -2,6 +2,8 @@ package objectstore
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -69,13 +71,16 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 		}
 		defer reader.Close()
 
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
 		var m manifest
-		if err := json.NewDecoder(reader).Decode(&m); err != nil {
-			_ = level.Warn(s.logger).Log("msg", "failed to decode manifest during compaction", "manifest", name, "err", err)
-			return nil
+		if err := json.Unmarshal(data, &m); err != nil {
+			return err
 		}
 		if m.BlobPath == "" {
-			return nil
+			return fmt.Errorf("objectstore: compact: manifest %q is missing blob_path", name)
 		}
 		reachable[m.BlobPath] = struct{}{}
 		stats.Reachable++
@@ -101,12 +106,14 @@ func (s *Store) collectReachableRemotePaths(ctx context.Context, stats *SweepSta
 
 		var cp checkpoint
 		if err := decodeCheckpoint(reader, &cp); err != nil {
-			_ = level.Warn(s.logger).Log("msg", "failed to decode checkpoint during compaction", "checkpoint", name, "err", err)
-			return nil
+			return err
 		}
-		for _, entry := range cp.Entries {
+		if cp.Entries == nil {
+			return fmt.Errorf("objectstore: compact: checkpoint %q is missing entries", name)
+		}
+		for key, entry := range cp.Entries {
 			if entry.SegmentPath == "" {
-				continue
+				return fmt.Errorf("objectstore: compact: checkpoint %q entry %q is missing segment_path", name, key)
 			}
 			reachable[entry.SegmentPath] = struct{}{}
 			stats.Reachable++

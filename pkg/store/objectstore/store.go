@@ -91,6 +91,7 @@ type Store struct {
 	checkpointCache     *checkpointCache
 	catalog             *internalcatalog.Catalog
 	updateCatalog       func(string, func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error)
+	syncCatalog         func() error
 	lockManager         *stripedlock.Manager
 	blockLoads          singleflight.Group
 	pageLoads           singleflight.Group
@@ -193,6 +194,7 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	})
 	if cat != nil {
 		store.updateCatalog = cat.Update
+		store.syncCatalog = cat.Sync
 	}
 	if store.initErr == nil {
 		if err := store.recoverLocalState(); err != nil {
@@ -391,6 +393,7 @@ func (s *Store) beginSet(ctx context.Context, key string, metadata *daramjwee.Me
 		segment:    segmentWriter,
 		generation: generation,
 		metadata:   daramjwee.CloneMetadata(metadata),
+		doneCh:     make(chan struct{}),
 	}
 
 	return w, nil

@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/mrchypark/daramjwee"
 )
+
+var ErrAmbiguousCommit = errors.New("catalog: commit durability is ambiguous")
 
 var (
 	writeFileFn = os.WriteFile
@@ -29,9 +32,10 @@ type Entry struct {
 }
 
 type Catalog struct {
-	path    string
-	mu      sync.RWMutex
-	entries map[string]Entry
+	path                 string
+	mu                   sync.RWMutex
+	entries              map[string]Entry
+	dirDurabilityPending bool
 }
 
 func Open(dir string) (*Catalog, error) {
@@ -80,11 +84,20 @@ func (c *Catalog) Entries() map[string]Entry {
 	return snapshot
 }
 
+func (c *Catalog) Sync() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.syncPendingDirLocked()
+}
+
 // Update reports whether the requested state is visible, even when the final
 // directory sync fails after the snapshot rename.
 func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.syncPendingDirLocked(); err != nil {
+		return false, err
+	}
 
 	current, ok := c.entries[key]
 	next, keep := fn(current, ok)
@@ -115,6 +128,9 @@ func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) (bool, 
 func (c *Catalog) UpdateMany(updates map[string]Entry) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.syncPendingDirLocked(); err != nil {
+		return err
+	}
 
 	previous := make(map[string]Entry, len(updates))
 	existed := make(map[string]bool, len(updates))
@@ -150,6 +166,9 @@ func (c *Catalog) UpdateMany(updates map[string]Entry) error {
 func (c *Catalog) Set(key string, entry Entry) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.syncPendingDirLocked(); err != nil {
+		return err
+	}
 	prev, existed := c.entries[key]
 	if existed && entry == prev {
 		return nil
@@ -171,6 +190,9 @@ func (c *Catalog) Set(key string, entry Entry) error {
 func (c *Catalog) Delete(key string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.syncPendingDirLocked(); err != nil {
+		return err
+	}
 	prev, existed := c.entries[key]
 	if !existed {
 		return nil
@@ -204,9 +226,21 @@ func (c *Catalog) persistLocked() (bool, error) {
 		return false, err
 	}
 	if err := syncDirFn(filepath.Dir(c.path)); err != nil {
-		return true, err
+		c.dirDurabilityPending = true
+		return true, errors.Join(ErrAmbiguousCommit, err)
 	}
 	return true, nil
+}
+
+func (c *Catalog) syncPendingDirLocked() error {
+	if !c.dirDurabilityPending {
+		return nil
+	}
+	if err := syncDirFn(filepath.Dir(c.path)); err != nil {
+		return errors.Join(ErrAmbiguousCommit, err)
+	}
+	c.dirDurabilityPending = false
+	return nil
 }
 
 func syncPath(path string) error {

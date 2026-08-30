@@ -160,9 +160,45 @@ func TestCatalogUpdateReportsPostRenameCommit(t *testing.T) {
 		return entry, true
 	})
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
 	assert.True(t, committed)
 
 	current, ok := cat.Get("postrename")
 	require.True(t, ok)
 	assert.Equal(t, entry, current)
+}
+
+func TestCatalogUpdateRetriesPendingDirectorySyncBeforeNoopSuccess(t *testing.T) {
+	dir := t.TempDir()
+	cat, err := Open(dir)
+	require.NoError(t, err)
+
+	failSync := true
+	restoreSyncDir := syncDirFn
+	syncDirFn = func(string) error {
+		if failSync {
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() { syncDirFn = restoreSyncDir })
+
+	entry := Entry{Metadata: daramjwee.Metadata{CacheTag: "v1"}}
+	committed, err := cat.Update("key", func(Entry, bool) (Entry, bool) { return entry, true })
+	require.True(t, committed)
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
+
+	committed, err = cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
+		return current, exists
+	})
+	require.False(t, committed)
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
+
+	failSync = false
+	require.NoError(t, cat.Sync())
+	committed, err = cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
+		return current, exists
+	})
+	require.NoError(t, err)
+	require.True(t, committed)
 }

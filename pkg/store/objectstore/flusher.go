@@ -118,6 +118,11 @@ func (s *Store) flushPending(ctx context.Context) error {
 
 func (s *Store) flushPendingAcquired(ctx context.Context) error {
 	for {
+		if s.syncCatalog != nil {
+			if err := s.syncCatalog(); err != nil {
+				return err
+			}
+		}
 		shards := s.takePendingShards()
 		if len(shards) == 0 {
 			return nil

@@ -3,6 +3,7 @@ package objectstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -230,12 +231,72 @@ func TestStore_CompactKeepsLegacyManifestBackedBlobReachable(t *testing.T) {
 	assert.Equal(t, "legacy", meta.CacheTag)
 }
 
+func TestStore_CompactFailsClosedOnCorruptManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload func(string) string
+	}{
+		{name: "syntax", payload: func(string) string { return "{" }},
+		{name: "null", payload: func(string) string { return "null" }},
+		{name: "missing path", payload: func(string) string { return `{}` }},
+		{name: "trailing garbage", payload: func(path string) string {
+			return fmt.Sprintf(`{"blob_path":%q} trailing`, path)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			bucket := objstore.NewInMemBucket()
+			store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+
+			blobPath := store.blobPath("corrupt-manifest", store.nextVersion())
+			require.NoError(t, bucket.Upload(ctx, blobPath, strings.NewReader("payload")))
+			require.NoError(t, bucket.Upload(ctx, store.manifestPath("corrupt-manifest"), strings.NewReader(tc.payload(blobPath))))
+
+			_, err := store.Compact(ctx, 0)
+			require.Error(t, err)
+			exists, err := bucket.Exists(ctx, blobPath)
+			require.NoError(t, err)
+			require.True(t, exists)
+		})
+	}
+}
+
+func TestStore_CompactFailsClosedOnCorruptCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "syntax", payload: "{"},
+		{name: "null", payload: "null"},
+		{name: "missing entries", payload: `{}`},
+		{name: "missing segment path", payload: `{"entries":{"key":{}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			bucket := objstore.NewInMemBucket()
+			store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+
+			segmentPath := joinPath(store.prefix, "segments", store.nextVersion()+".seg")
+			checkpointPath := joinPath(store.prefix, "checkpoints", "00", "latest.json")
+			require.NoError(t, bucket.Upload(ctx, segmentPath, strings.NewReader("payload")))
+			require.NoError(t, bucket.Upload(ctx, checkpointPath, strings.NewReader(tc.payload)))
+
+			_, err := store.Compact(ctx, 0)
+			require.Error(t, err)
+			exists, err := bucket.Exists(ctx, segmentPath)
+			require.NoError(t, err)
+			require.True(t, exists)
+		})
+	}
+}
+
 func TestStore_ReclaimAutomaticallySchedulesFlushForPublishedUnflushedLocalEntriesAfterReopen(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
 	dataDir := t.TempDir()
 
 	store := New(bucket, log.NewNopLogger(), WithDir(dataDir))
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	store.autoFlush = false
 
 	writer, err := store.BeginSet(ctx, "requeue-key", &daramjwee.Metadata{CacheTag: "v1"})
@@ -245,8 +306,10 @@ func TestStore_ReclaimAutomaticallySchedulesFlushForPublishedUnflushedLocalEntri
 	require.NoError(t, writer.Close())
 
 	reopened := New(bucket, log.NewNopLogger(), WithDir(dataDir))
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
 
 	remoteOnly := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, remoteOnly.Close()) })
 	require.Eventually(t, func() bool {
 		stream, meta, err := remoteOnly.GetStream(ctx, "requeue-key")
 		if err != nil {

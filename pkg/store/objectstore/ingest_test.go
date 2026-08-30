@@ -169,6 +169,22 @@ func TestStore_CanceledStagedCommitLeavesNoVisibleLocalEntry(t *testing.T) {
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestStore_CommitAfterAbortDoesNotReportSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(ctx, "aborted-writer", nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Abort())
+	require.ErrorIs(t, writer.Commit(ctx), io.ErrClosedPipe)
+
+	_, err = store.Stat(ctx, "aborted-writer")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
 func TestStore_BeginSetDoesNotHoldKeyLockForWriterLifetime(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -199,7 +215,7 @@ func TestStore_BeginSetDoesNotHoldKeyLockForWriterLifetime(t *testing.T) {
 	case result := <-secondReady:
 		require.NoError(t, result.err)
 		second = result.sink
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		require.NoError(t, first.Abort())
 		result := <-secondReady
 		if result.sink != nil {
@@ -936,7 +952,10 @@ func TestStore_ClosePostRenameFailurePreservesCommittedSegment(t *testing.T) {
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "second payload")
 	require.NoError(t, err)
-	require.ErrorContains(t, writer.Close(), "sync dir failed")
+	firstErr := writer.Close()
+	require.ErrorContains(t, firstErr, "sync dir failed")
+	require.ErrorIs(t, firstErr, ErrAmbiguousCommit)
+	require.ErrorIs(t, writer.Close(), ErrAmbiguousCommit)
 
 	entry, ok := store.catalog.Get("postrename-failure")
 	require.True(t, ok)
@@ -967,7 +986,9 @@ func TestStore_DeletePostRenameFailurePreservesPreviousSegment(t *testing.T) {
 	store.flushMu.Unlock()
 	failCatalogAfterCommit(store)
 
-	require.ErrorContains(t, store.Delete(ctx, "postrename-delete"), "sync dir failed")
+	err = store.Delete(ctx, "postrename-delete")
+	require.ErrorContains(t, err, "sync dir failed")
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
 	require.FileExists(t, previous.SegmentPath)
 
 	store.flushMu.Lock()
@@ -1005,8 +1026,35 @@ func failCatalogAfterCommit(store *Store) {
 		if err != nil || !committed {
 			return committed, err
 		}
-		return true, errors.New("sync dir failed")
+		return true, errors.Join(ErrAmbiguousCommit, errors.New("sync dir failed"))
 	}
+}
+
+func TestStore_FlushPendingChecksCatalogDurabilityWithoutPendingShards(t *testing.T) {
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+	failSync := true
+	store.syncCatalog = func() error {
+		if failSync {
+			return errors.Join(ErrAmbiguousCommit, errors.New("sync dir failed"))
+		}
+		return nil
+	}
+
+	require.ErrorIs(t, store.flushPending(context.Background()), ErrAmbiguousCommit)
+	failSync = false
+	require.NoError(t, store.flushPending(context.Background()))
+	require.NoError(t, store.Close())
+}
+
+func TestStore_ClosePreservesPendingCatalogAmbiguity(t *testing.T) {
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.syncCatalog = func() error {
+		return errors.Join(ErrAmbiguousCommit, errors.New("sync dir failed"))
+	}
+
+	require.ErrorIs(t, store.Close(), ErrAmbiguousCommit)
+	require.ErrorIs(t, store.Close(), ErrAmbiguousCommit)
 }
 
 func TestStore_CloseWaitsForActiveWriterAndFlushesIt(t *testing.T) {

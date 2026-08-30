@@ -10,7 +10,12 @@ import (
 
 type localCatalogEntry = internalcatalog.Entry
 
-var errMissingLocalEntry = errors.New("objectstore: missing local entry data")
+var (
+	// ErrAmbiguousCommit means a catalog update became visible after rename,
+	// but its directory durability could not be confirmed.
+	ErrAmbiguousCommit   = internalcatalog.ErrAmbiguousCommit
+	errMissingLocalEntry = errors.New("objectstore: missing local entry data")
+)
 
 func (s *Store) loadLocalEntry(key string) (localCatalogEntry, bool, error) {
 	if s.catalog == nil {
