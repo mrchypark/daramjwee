@@ -69,20 +69,25 @@ Origin → ERROR
 
 This is a failure to retrieve the data. The caller receives an error.
 
-### Cache Fill Failure
+### Cache Writer Setup Failure
 
 ```
 Origin → SUCCESS(data)
-Cache write → ERROR
+Acquire cache writer → ERROR
   └── Get returns data to caller (non-fatal)
 ```
 
-This is a failure to cache the data. The caller still receives the data.
+This happens before response streaming starts, so the caller still receives the
+origin data directly.
+
+Once streaming starts, a cache `Write` or finalizing `Close` error is returned
+to the caller and the partial fill is aborted. The cache never publishes that
+partial object.
 
 ### Implementation
 
 ```go
-// Cache fill failure is non-fatal to data retrieval
+// Cache writer setup failure is non-fatal to data retrieval
 result, err := c.fetchFromOrigin(ctx, fetcher, oldMetadata)
 if err != nil {
     return nil, err  // Data retrieval failure
@@ -99,9 +104,8 @@ if err != nil {
 
 ### Policy
 
-> **Cache write failure is non-fatal to a successful source read, unless the caller explicitly requests write-through durability.**
-
-This ensures cache never reduces availability.
+> **Cache writer setup failure is non-fatal. A write or finalization failure
+> after streaming begins is reported and prevents publication.**
 
 ## Atomic Commit Contract
 

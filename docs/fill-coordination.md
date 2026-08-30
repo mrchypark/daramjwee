@@ -21,7 +21,10 @@ These are deliberately separate guarantees:
 - miss coordination reduces duplicate origin work for fast fills;
 - staged publication prevents partial objects from becoming visible;
 - generation validation prevents stale publication;
-- cache-write failure remains non-fatal to a successful origin response.
+- failure to acquire the cache writer before streaming falls back to the
+  successful origin response;
+- a write or finalization failure after streaming starts is returned to the
+  caller and the partial fill is never published.
 
 See `tests/miss_coalescing_test.go` and the generation/write-coordinator tests
 for the executable contract.

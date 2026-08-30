@@ -103,12 +103,16 @@ Promote(key, value, observedGeneration)
 
 **Guaranteed**: Promotion only succeeds if the generation has not changed since the value was read.
 
-### Promotion Failure is Non-Fatal
+### Promotion Setup Failure is Non-Fatal
 
-If promotion fails (due to generation mismatch, disk full, etc.):
+If promotion cannot start (for example, due to a generation mismatch or writer
+acquisition failure):
 - Caller still receives the data
 - Cache is not populated
 - This is a cache degradation, not a data retrieval failure
+
+After streaming starts, a sink write or finalization failure is returned to the
+caller and the partial promotion is aborted.
 
 ## ObjectStore Consistency
 

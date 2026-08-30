@@ -108,7 +108,9 @@ The remaining responsibilities stay separate:
 ## Non-negotiable invariants
 
 1. A partial read never publishes a complete cache entry.
-2. A successful origin body remains usable when cache fill fails.
+2. Failure to acquire a fill writer leaves a successful origin body usable;
+   write or finalization failure after streaming starts is reported and aborts
+   publication.
 3. Delete, set, refresh, and promotion cannot publish through an obsolete
    top-write generation.
 4. Conditional 304 is returned only after the relevant generation is valid at
