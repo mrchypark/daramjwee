@@ -35,7 +35,9 @@ func storeFactories() []storeFactory {
 			return store
 		}},
 		{name: "objectstore", new: func(t *testing.T) daramjwee.Store {
-			return objectstore.New(objstore.NewInMemBucket(), log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+			store := objectstore.New(objstore.NewInMemBucket(), log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+			return store
 		}},
 	}
 }
