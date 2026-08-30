@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
@@ -239,6 +240,49 @@ func TestStore_CompactClearsAbandonedUploadIntent(t *testing.T) {
 	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
 }
 
+func TestStore_RetryReusesPayloadAfterCompletedIntentUploadFailure(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	bucket := &failCompletedIntentUploadBucket{Bucket: base}
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "intent-complete-retry", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.Error(t, store.flushPending(ctx))
+	require.Len(t, listObjectNames(t, base, store.blobRoot()), 1)
+	require.NoError(t, store.flushPending(ctx))
+	require.Len(t, listObjectNames(t, base, store.blobRoot()), 1)
+	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
+}
+
+func TestStore_AbandonIntentHasBoundedDetachedContext(t *testing.T) {
+	previousTimeout := intentFinalizeTimeout
+	intentFinalizeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { intentFinalizeTimeout = previousTimeout })
+
+	base := objstore.NewInMemBucket()
+	bucket := &blockingAbandonedIntentBucket{Bucket: base}
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	store.autoFlush = false
+	writer, err := store.BeginSet(context.Background(), "bounded-abandon", &daramjwee.Metadata{})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	require.Error(t, store.flushPending(ctx))
+	require.Less(t, time.Since(started), time.Second)
+	_, err = store.Compact(context.Background(), 0)
+	require.NoError(t, err)
+}
+
 type failFirstIntentDeleteBucket struct {
 	objstore.Bucket
 	once sync.Once
@@ -247,6 +291,49 @@ type failFirstIntentDeleteBucket struct {
 type failFirstPayloadAfterUploadBucket struct {
 	objstore.Bucket
 	once sync.Once
+}
+
+type failCompletedIntentUploadBucket struct {
+	objstore.Bucket
+	mu      sync.Mutex
+	uploads int
+}
+
+func (b *failCompletedIntentUploadBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+	if strings.Contains(name, "/uploads/") || strings.HasPrefix(name, "uploads/") {
+		b.mu.Lock()
+		b.uploads++
+		fail := b.uploads == 2
+		b.mu.Unlock()
+		if fail {
+			return errors.New("completed intent upload failed")
+		}
+	}
+	return b.Bucket.Upload(ctx, name, r, opts...)
+}
+
+type blockingAbandonedIntentBucket struct {
+	objstore.Bucket
+}
+
+func (b *blockingAbandonedIntentBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+	if strings.Contains(name, "/blobs/") || strings.HasPrefix(name, "blobs/") {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if strings.Contains(name, "/uploads/") || strings.HasPrefix(name, "uploads/") {
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return err
+		}
+		var intent uploadIntent
+		if json.Unmarshal(data, &intent) == nil && intent.Abandoned {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return b.Bucket.Upload(ctx, name, strings.NewReader(string(data)), opts...)
+	}
+	return b.Bucket.Upload(ctx, name, r, opts...)
 }
 
 func (b *failFirstPayloadAfterUploadBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {

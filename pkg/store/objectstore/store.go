@@ -605,7 +605,9 @@ func (s *Store) abandonUploadIntent(ctx context.Context, remotePath string) erro
 	if err != nil {
 		return err
 	}
-	return s.bucket.Upload(context.WithoutCancel(ctx), s.uploadIntentPath(remotePath), bytes.NewReader(data))
+	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), intentFinalizeTimeout)
+	defer cancel()
+	return s.bucket.Upload(finalizeCtx, s.uploadIntentPath(remotePath), bytes.NewReader(data))
 }
 
 func (s *Store) blobDir(key string) string {

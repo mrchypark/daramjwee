@@ -23,6 +23,8 @@ const (
 	flushRetryMax = time.Second
 )
 
+var intentFinalizeTimeout = 5 * time.Second
+
 type checkpoint struct {
 	UpdatedAt time.Time                  `json:"updated_at"`
 	Entries   map[string]checkpointEntry `json:"entries"`
@@ -196,6 +198,10 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	updates := make(map[string]localCatalogEntry, len(records))
 	packedRecords := make([]pendingFlushRecord, 0, len(records))
 	for _, record := range records {
+		if record.entry.PendingRemotePath != "" {
+			s.resumePendingRemote(record, currentEntries, updates, mergedEntries)
+			continue
+		}
 		if s.shouldUploadDirect(record.entry) {
 			if err := s.flushDirectRecord(ctx, record, currentEntries, updates, mergedEntries); err != nil {
 				return err
@@ -211,9 +217,13 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 		}
 	}
 	remoteEntries := make(map[string]localCatalogEntry, len(updates))
+	cleanupEntries := make(map[string]localCatalogEntry)
 	for key, entry := range currentEntries {
 		if shardForKey(key) == shardID && entry.Missing && !entry.RemotePublished {
 			remoteEntries[key] = entry
+		}
+		if shardForKey(key) == shardID && entry.Missing && entry.CleanupPending {
+			cleanupEntries[key] = entry
 		}
 	}
 	for key, entry := range updates {
@@ -221,6 +231,9 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	}
 	if err := s.publishRemoteEntries(ctx, remoteEntries); err != nil {
 		return err
+	}
+	for key, entry := range remoteEntries {
+		cleanupEntries[key] = entry
 	}
 
 	if err := s.publishCheckpoint(ctx, shardID, mergedEntries); err != nil {
@@ -232,10 +245,10 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	if err := s.commitFlushUpdates(currentEntries, updates); err != nil {
 		return err
 	}
-	if err := s.clearLegacyManifests(ctx, remoteEntries); err != nil {
+	if err := s.clearLegacyManifests(ctx, cleanupEntries); err != nil {
 		return err
 	}
-	return s.commitPublishedTombstones(remoteEntries)
+	return s.commitCleanedTombstones(cleanupEntries)
 }
 
 func (s *Store) clearLegacyManifests(ctx context.Context, entries map[string]localCatalogEntry) error {
@@ -298,6 +311,11 @@ func (s *Store) publishRemoteEntries(ctx context.Context, entries map[string]loc
 			return err
 		}
 		s.checkpointCache.SetEntry(key, &remoteEntry, int64(len(data)))
+		if entry.Missing {
+			if err := s.commitPublishedTombstones(map[string]localCatalogEntry{key: entry}); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -305,14 +323,16 @@ func (s *Store) publishRemoteEntries(ctx context.Context, entries map[string]loc
 func (s *Store) pendingRecordsForShard(shardID string, entries map[string]localCatalogEntry) ([]pendingFlushRecord, error) {
 	records := make([]pendingFlushRecord, 0)
 	for key, entry := range entries {
-		if shardForKey(key) != shardID || entry.Missing || entry.SegmentPath == "" || entry.RemotePath != "" {
+		if shardForKey(key) != shardID || entry.Missing || entry.RemotePath != "" || (entry.SegmentPath == "" && entry.PendingRemotePath == "") {
 			continue
 		}
-		if _, err := os.Stat(entry.SegmentPath); err != nil {
-			if os.IsNotExist(err) {
-				continue
+		if entry.PendingRemotePath == "" {
+			if _, err := os.Stat(entry.SegmentPath); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, err
 			}
-			return nil, err
 		}
 		records = append(records, pendingFlushRecord{key: key, entry: entry})
 	}
@@ -358,8 +378,19 @@ func (s *Store) flushPackedRecords(
 		if !ok || current.Missing || current.SegmentPath != record.entry.SegmentPath {
 			continue
 		}
+		pending, applied, err := s.persistPendingRemote(record.key, current, remotePath, offsets[record.key])
+		if err != nil {
+			return err
+		}
+		if !applied {
+			continue
+		}
+		currentEntries[record.key] = pending
+		current = pending
 		current.RemotePath = remotePath
 		current.RemoteOffset = offsets[record.key]
+		current.PendingRemotePath = ""
+		current.PendingRemoteOffset = 0
 		current.SegmentPath = ""
 		current.Offset = 0
 		updates[record.key] = current
@@ -404,9 +435,20 @@ func (s *Store) flushDirectRecord(
 	if err := s.bucket.Upload(ctx, remotePath, io.NewSectionReader(file, record.entry.Offset, record.entry.Length)); err != nil {
 		return errors.Join(err, s.abandonUploadIntent(ctx, remotePath))
 	}
+	pending, applied, err := s.persistPendingRemote(record.key, current, remotePath, 0)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return nil
+	}
+	currentEntries[record.key] = pending
+	current = pending
 
 	current.RemotePath = remotePath
 	current.RemoteOffset = 0
+	current.PendingRemotePath = ""
+	current.PendingRemoteOffset = 0
 	current.SegmentPath = ""
 	current.Offset = 0
 	updates[record.key] = current
@@ -418,6 +460,50 @@ func (s *Store) flushDirectRecord(
 		Metadata:    current.Metadata,
 	}
 	return nil
+}
+
+func (s *Store) persistPendingRemote(key string, expected localCatalogEntry, remotePath string, remoteOffset int64) (localCatalogEntry, bool, error) {
+	pending := expected
+	pending.PendingRemotePath = remotePath
+	pending.PendingRemoteOffset = remoteOffset
+	if s.catalog == nil {
+		return pending, true, nil
+	}
+	applied := false
+	_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		if !exists || current != expected {
+			return current, exists
+		}
+		applied = true
+		return pending, true
+	})
+	return pending, applied, err
+}
+
+func (s *Store) resumePendingRemote(
+	record pendingFlushRecord,
+	currentEntries map[string]localCatalogEntry,
+	updates map[string]localCatalogEntry,
+	mergedEntries map[string]checkpointEntry,
+) {
+	current, ok := currentEntries[record.key]
+	if !ok || current != record.entry || current.PendingRemotePath == "" {
+		return
+	}
+	current.RemotePath = current.PendingRemotePath
+	current.RemoteOffset = current.PendingRemoteOffset
+	current.PendingRemotePath = ""
+	current.PendingRemoteOffset = 0
+	current.SegmentPath = ""
+	current.Offset = 0
+	updates[record.key] = current
+	mergedEntries[record.key] = checkpointEntry{
+		SegmentPath: current.RemotePath,
+		Offset:      current.RemoteOffset,
+		Length:      current.Length,
+		Generation:  current.Generation,
+		Metadata:    current.Metadata,
+	}
 }
 
 func (s *Store) loadCheckpointEntries(ctx context.Context, shardID string) (map[string]checkpointEntry, error) {
@@ -444,7 +530,7 @@ func mergeCheckpointEntries(base map[string]checkpointEntry, locals map[string]l
 		if shardForKey(key) != shardID {
 			continue
 		}
-		if entry.Missing && !entry.RemotePublished {
+		if entry.Missing && (!entry.RemotePublished || entry.CleanupPending) {
 			delete(merged, key)
 			continue
 		}

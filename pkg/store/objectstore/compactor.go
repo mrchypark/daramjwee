@@ -248,6 +248,13 @@ func (s *Store) collectUploadIntentPaths(ctx context.Context, reachable map[stri
 			return nil
 		}
 		if _, published := reachable[intent.RemotePath]; published {
+			data, err := json.Marshal(uploadIntent{RemotePath: intent.RemotePath, Completed: true})
+			if err != nil {
+				return err
+			}
+			if err := s.bucket.Upload(ctx, name, strings.NewReader(string(data))); err != nil {
+				return err
+			}
 			if err := s.bucket.Delete(ctx, name); ignoreNotFound(err, s.bucket) != nil {
 				_ = level.Warn(s.logger).Log("msg", "failed to clear published upload intent", "path", name, "err", err)
 			}

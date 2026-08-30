@@ -27,15 +27,18 @@ var (
 )
 
 type Entry struct {
-	SegmentPath     string             `json:"segment_path"`
-	Offset          int64              `json:"offset"`
-	Length          int64              `json:"length"`
-	Generation      uint64             `json:"generation,omitempty"`
-	Missing         bool               `json:"missing,omitempty"`
-	RemotePublished bool               `json:"remote_published,omitempty"`
-	RemotePath      string             `json:"remote_path,omitempty"`
-	RemoteOffset    int64              `json:"remote_offset,omitempty"`
-	Metadata        daramjwee.Metadata `json:"metadata"`
+	SegmentPath         string             `json:"segment_path"`
+	Offset              int64              `json:"offset"`
+	Length              int64              `json:"length"`
+	Generation          uint64             `json:"generation,omitempty"`
+	Missing             bool               `json:"missing,omitempty"`
+	RemotePublished     bool               `json:"remote_published,omitempty"`
+	CleanupPending      bool               `json:"cleanup_pending,omitempty"`
+	RemotePath          string             `json:"remote_path,omitempty"`
+	RemoteOffset        int64              `json:"remote_offset,omitempty"`
+	PendingRemotePath   string             `json:"pending_remote_path,omitempty"`
+	PendingRemoteOffset int64              `json:"pending_remote_offset,omitempty"`
+	Metadata            daramjwee.Metadata `json:"metadata"`
 }
 
 type Catalog struct {

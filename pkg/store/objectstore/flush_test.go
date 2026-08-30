@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -152,6 +153,40 @@ func TestStore_DeleteTombstoneIsRetriedAfterReopen(t *testing.T) {
 	require.False(t, exists)
 }
 
+func TestStore_PendingRemotePayloadResumesAfterEntryFailureAndMissingLocalSegment(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	bucket := &failFirstEntryUploadBucket{Bucket: base}
+	dataDir := t.TempDir()
+	store := New(bucket, log.NewNopLogger(), WithDir(dataDir), WithPackThreshold(1))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "pending-remote-recovery", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.Error(t, store.flushPending(ctx))
+	require.Len(t, listObjectNames(t, base, store.blobRoot()), 1)
+	segments := localSegmentPaths(t, dataDir)
+	require.Len(t, segments, 1)
+	require.NoError(t, os.Remove(segments[0]))
+
+	reopened := New(base, log.NewNopLogger(), WithDir(dataDir), WithPackThreshold(1))
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	remote := New(base, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	require.Eventually(t, func() bool {
+		stream, _, err := remote.GetStream(ctx, "pending-remote-recovery")
+		if err != nil {
+			return false
+		}
+		defer stream.Close()
+		body, err := io.ReadAll(stream)
+		return err == nil && string(body) == "payload"
+	}, time.Second, 20*time.Millisecond)
+	require.Len(t, listObjectNames(t, base, store.blobRoot()), 1)
+}
+
 func TestStore_CachedLegacyFallbackObservesLaterTombstone(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
@@ -222,9 +257,55 @@ func TestStore_PublishedDeleteDoesNotOverrideLaterRemoteWrite(t *testing.T) {
 	require.Equal(t, "v2", read(remote, key))
 }
 
+func TestStore_DeleteCleanupRetryDoesNotRepublishTombstone(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	bucket := &failFirstManifestDeleteBucket{Bucket: base}
+	storeA := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	storeB := New(base, log.NewNopLogger(), WithDir(t.TempDir()))
+	storeA.autoFlush = false
+	storeB.autoFlush = false
+	key := "delete-cleanup-retry"
+
+	require.Error(t, storeA.Delete(ctx, key))
+	writer, err := storeB.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "v2")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, storeB.flushPending(ctx))
+	require.NoError(t, storeA.flushPending(ctx))
+
+	remote := New(base, log.NewNopLogger(), WithDir(t.TempDir()))
+	stream, _, err := remote.GetStream(ctx, key)
+	require.NoError(t, err)
+	defer stream.Close()
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.Equal(t, "v2", string(body))
+	_, err = remote.Compact(ctx, 0)
+	require.NoError(t, err)
+}
+
 type failFirstEntryUploadBucket struct {
 	objstore.Bucket
 	once sync.Once
+}
+
+type failFirstManifestDeleteBucket struct {
+	objstore.Bucket
+	once sync.Once
+}
+
+func (b *failFirstManifestDeleteBucket) Delete(ctx context.Context, name string) error {
+	failed := false
+	if strings.Contains(name, "/manifests/") || strings.HasPrefix(name, "manifests/") {
+		b.once.Do(func() { failed = true })
+	}
+	if failed {
+		return errors.New("manifest delete failed")
+	}
+	return b.Bucket.Delete(ctx, name)
 }
 
 func (b *failFirstEntryUploadBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {

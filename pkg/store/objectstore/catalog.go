@@ -93,7 +93,7 @@ func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, 
 func repairedEntryWithoutLocalSegment(entry localCatalogEntry) localCatalogEntry {
 	entry.SegmentPath = ""
 	entry.Offset = 0
-	if entry.RemotePath != "" {
+	if entry.RemotePath != "" || entry.PendingRemotePath != "" {
 		return entry
 	}
 	entry.Missing = true
@@ -182,6 +182,29 @@ func (s *Store) commitPublishedTombstones(expectedEntries map[string]localCatalo
 				return current, exists
 			}
 			current.RemotePublished = true
+			current.CleanupPending = true
+			return current, true
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) commitCleanedTombstones(expectedEntries map[string]localCatalogEntry) error {
+	if s.catalog == nil {
+		return nil
+	}
+	for key, expected := range expectedEntries {
+		if !expected.Missing {
+			continue
+		}
+		_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			if !exists || !current.Missing || !current.RemotePublished {
+				return current, exists
+			}
+			current.CleanupPending = false
 			return current, true
 		})
 		if err != nil {
@@ -211,9 +234,10 @@ func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, err
 			previousSegment = current.SegmentPath
 		}
 		tombstone := localCatalogEntry{
-			Generation: generation,
-			Missing:    true,
-			Metadata:   current.Metadata,
+			Generation:     generation,
+			Missing:        true,
+			CleanupPending: true,
+			Metadata:       current.Metadata,
 		}
 		return tombstone, true
 	})

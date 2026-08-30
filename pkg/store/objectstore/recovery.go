@@ -12,12 +12,15 @@ func (s *Store) recoverLocalState() error {
 
 	for key, entry := range s.catalog.Entries() {
 		s.observeGeneration(entry.Generation)
-		if entry.Missing && !entry.RemotePublished {
+		if entry.Missing && (!entry.RemotePublished || entry.CleanupPending) {
 			s.pendingShards[shardForKey(key)] = struct{}{}
 			continue
 		}
 		if entry.Missing {
 			continue
+		}
+		if entry.PendingRemotePath != "" {
+			s.pendingShards[shardForKey(key)] = struct{}{}
 		}
 		if entry.SegmentPath == "" {
 			continue
@@ -31,8 +34,12 @@ func (s *Store) recoverLocalState() error {
 			return err
 		}
 
-		if _, err := s.publishLocalEntry(key, repairedEntryWithoutLocalSegment(entry)); err != nil {
+		repaired := repairedEntryWithoutLocalSegment(entry)
+		if _, err := s.publishLocalEntry(key, repaired); err != nil {
 			return err
+		}
+		if repaired.PendingRemotePath != "" {
+			s.pendingShards[shardForKey(key)] = struct{}{}
 		}
 	}
 	return nil
