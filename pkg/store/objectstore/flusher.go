@@ -61,6 +61,11 @@ func (s *Store) scheduleFlushLocked() {
 	}
 	s.flushScheduled = true
 	s.scheduleFlushAfter(delay, func() {
+		if err := s.flushRun.acquire(context.Background()); err != nil {
+			return
+		}
+		defer s.flushRun.release()
+
 		s.flushMu.Lock()
 		if !s.autoFlush {
 			s.flushScheduled = false
@@ -69,7 +74,7 @@ func (s *Store) scheduleFlushLocked() {
 		}
 		s.flushMu.Unlock()
 
-		err := s.flushPending(context.Background())
+		err := s.flushPendingAcquired(context.Background())
 		if err != nil {
 			_ = level.Warn(s.logger).Log("msg", "objectstore flush failed", "err", err)
 		}
@@ -102,7 +107,10 @@ func (s *Store) flushPending(ctx context.Context) error {
 		return err
 	}
 	defer s.flushRun.release()
+	return s.flushPendingAcquired(ctx)
+}
 
+func (s *Store) flushPendingAcquired(ctx context.Context) error {
 	for {
 		shards := s.takePendingShards()
 		if len(shards) == 0 {

@@ -288,6 +288,39 @@ func TestStore_AutomaticFlushStopsAfterClose(t *testing.T) {
 	assert.Equal(t, 1, remaining, "scheduled callback must not upload after Close")
 }
 
+func TestStore_CloseWaitsForAutomaticFlush(t *testing.T) {
+	bucket := newBlockingPackedUploadBucket(objstore.NewInMemBucket())
+	t.Cleanup(bucket.releaseUpload)
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	scheduler := &manualFlushScheduler{}
+	store.scheduleFlushAfter = scheduler.after
+
+	writePendingObject(t, store, "close-waits-for-flush", "payload")
+	scheduled := scheduler.pop(t)
+	callbackDone := make(chan struct{})
+	go func() {
+		defer close(callbackDone)
+		scheduled.run()
+	}()
+
+	select {
+	case <-bucket.uploadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("automatic flush did not start")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- store.Close() }()
+	select {
+	case err := <-closeDone:
+		require.FailNow(t, "Close returned during automatic flush", "err: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	bucket.releaseUpload()
+	<-callbackDone
+	require.NoError(t, <-closeDone)
+}
+
 func TestStore_DeleteRepublishesCheckpointWithoutDeletedKey(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
