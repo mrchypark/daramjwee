@@ -78,7 +78,9 @@ func (c *Catalog) Entries() map[string]Entry {
 	return snapshot
 }
 
-func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) error {
+// Update reports whether the requested state is visible, even when the final
+// directory sync fails after the snapshot rename.
+func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -86,12 +88,12 @@ func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) error {
 	next, keep := fn(current, ok)
 	if keep {
 		if next == current {
-			return nil
+			return true, nil
 		}
 		c.entries[key] = next
 	} else {
 		if !ok {
-			return nil
+			return true, nil
 		}
 		delete(c.entries, key)
 	}
@@ -103,9 +105,9 @@ func (c *Catalog) Update(key string, fn func(Entry, bool) (Entry, bool)) error {
 				delete(c.entries, key)
 			}
 		}
-		return err
+		return committed, err
 	}
-	return nil
+	return true, nil
 }
 
 func (c *Catalog) UpdateMany(updates map[string]Entry) error {

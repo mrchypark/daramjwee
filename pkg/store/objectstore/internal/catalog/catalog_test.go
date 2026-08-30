@@ -33,16 +33,18 @@ func TestCatalogUnchangedMutationsSkipPersist(t *testing.T) {
 	})
 
 	require.NoError(t, cat.Set("key", entry))
-	require.NoError(t, cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
+	_, err = cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
 		return current, exists
-	}))
+	})
+	require.NoError(t, err)
 	require.NoError(t, cat.Delete("missing-key"))
 	require.Equal(t, int32(0), persistCalls.Load(), "unchanged mutations must not rewrite the snapshot")
 
-	require.NoError(t, cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
+	_, err = cat.Update("key", func(current Entry, exists bool) (Entry, bool) {
 		current.Generation = 2
 		return current, true
-	}))
+	})
+	require.NoError(t, err)
 	require.Equal(t, int32(1), persistCalls.Load(), "real mutations must still persist")
 
 	updated, ok := cat.Get("key")
@@ -75,6 +77,22 @@ func TestCatalogSetRollsBackOnPreCommitFailure(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestCatalogUpdateReportsPreCommitFailure(t *testing.T) {
+	dir := t.TempDir()
+	cat, err := Open(dir)
+	require.NoError(t, err)
+
+	restoreSyncPath := syncPathFn
+	syncPathFn = func(string) error { return errors.New("sync path failed") }
+	t.Cleanup(func() { syncPathFn = restoreSyncPath })
+
+	committed, err := cat.Update("precommit", func(Entry, bool) (Entry, bool) {
+		return Entry{Metadata: daramjwee.Metadata{CacheTag: "v1"}}, true
+	})
+	require.Error(t, err)
+	assert.False(t, committed)
+}
+
 func TestCatalogSetKeepsCommittedStateOnPostRenameFailure(t *testing.T) {
 	dir := t.TempDir()
 	cat, err := Open(dir)
@@ -105,4 +123,28 @@ func TestCatalogSetKeepsCommittedStateOnPostRenameFailure(t *testing.T) {
 	reloaded, ok := reopened.Get("postrename")
 	require.True(t, ok)
 	assert.Equal(t, entry, reloaded)
+}
+
+func TestCatalogUpdateReportsPostRenameCommit(t *testing.T) {
+	dir := t.TempDir()
+	cat, err := Open(dir)
+	require.NoError(t, err)
+
+	restoreSyncDir := syncDirFn
+	syncDirFn = func(string) error { return errors.New("sync dir failed") }
+	t.Cleanup(func() { syncDirFn = restoreSyncDir })
+
+	entry := Entry{
+		SegmentPath: filepath.Join(dir, "segment.seg"),
+		Metadata:    daramjwee.Metadata{CacheTag: "v2"},
+	}
+	committed, err := cat.Update("postrename", func(Entry, bool) (Entry, bool) {
+		return entry, true
+	})
+	require.Error(t, err)
+	assert.True(t, committed)
+
+	current, ok := cat.Get("postrename")
+	require.True(t, ok)
+	assert.Equal(t, entry, current)
 }
