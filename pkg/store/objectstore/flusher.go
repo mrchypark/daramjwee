@@ -73,6 +73,9 @@ func (s *Store) scheduleFlushLocked() {
 			return
 		}
 		s.flushMu.Unlock()
+		if s.afterAutoFlushCheck != nil {
+			s.afterAutoFlushCheck()
+		}
 
 		err := s.flushPendingAcquired(context.Background())
 		if err != nil {
@@ -103,6 +106,9 @@ func nextFlushRetryDelay(current time.Duration) time.Duration {
 }
 
 func (s *Store) flushPending(ctx context.Context) error {
+	if s.beforeFlushAcquire != nil {
+		s.beforeFlushAcquire()
+	}
 	if err := s.flushRun.acquire(ctx); err != nil {
 		return err
 	}

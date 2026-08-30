@@ -289,11 +289,41 @@ func TestStore_AutomaticFlushStopsAfterClose(t *testing.T) {
 }
 
 func TestStore_CloseWaitsForAutomaticFlush(t *testing.T) {
-	bucket := newBlockingPackedUploadBucket(objstore.NewInMemBucket())
-	t.Cleanup(bucket.releaseUpload)
+	bucket := &failingUploadBucket{
+		Bucket: objstore.NewInMemBucket(),
+		failuresLeft: map[string]int{
+			"segments/": 2,
+		},
+	}
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
 	scheduler := &manualFlushScheduler{}
 	store.scheduleFlushAfter = scheduler.after
+	autoFlushChecked := make(chan struct{})
+	releaseAutoFlush := make(chan struct{})
+	closeAcquireStarted := make(chan struct{})
+	releaseCloseAcquire := make(chan struct{})
+	var autoFlushCheckOnce sync.Once
+	var closeAcquireOnce sync.Once
+	store.afterAutoFlushCheck = func() {
+		autoFlushCheckOnce.Do(func() { close(autoFlushChecked) })
+		<-releaseAutoFlush
+	}
+	store.beforeFlushAcquire = func() {
+		closeAcquireOnce.Do(func() { close(closeAcquireStarted) })
+		<-releaseCloseAcquire
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releaseAutoFlush:
+		default:
+			close(releaseAutoFlush)
+		}
+		select {
+		case <-releaseCloseAcquire:
+		default:
+			close(releaseCloseAcquire)
+		}
+	})
 
 	writePendingObject(t, store, "close-waits-for-flush", "payload")
 	scheduled := scheduler.pop(t)
@@ -303,22 +333,21 @@ func TestStore_CloseWaitsForAutomaticFlush(t *testing.T) {
 		scheduled.run()
 	}()
 
-	select {
-	case <-bucket.uploadStarted:
-	case <-time.After(time.Second):
-		t.Fatal("automatic flush did not start")
-	}
+	<-autoFlushChecked
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- store.Close() }()
-	select {
-	case err := <-closeDone:
-		require.FailNow(t, "Close returned during automatic flush", "err: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
+	<-closeAcquireStarted
+	require.Zero(t, len(store.flushRun), "automatic callback must hold flushRun before checking autoFlush")
 
-	bucket.releaseUpload()
+	close(releaseCloseAcquire)
+	close(releaseAutoFlush)
 	<-callbackDone
-	require.NoError(t, <-closeDone)
+	require.Error(t, <-closeDone)
+	require.Zero(t, scheduler.len())
+	bucket.mu.Lock()
+	remaining := bucket.failuresLeft["segments/"]
+	bucket.mu.Unlock()
+	assert.Zero(t, remaining)
 }
 
 func TestStore_DeleteRepublishesCheckpointWithoutDeletedKey(t *testing.T) {

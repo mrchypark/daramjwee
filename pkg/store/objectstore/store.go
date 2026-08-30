@@ -78,44 +78,46 @@ func (s contextSemaphore) release() {
 // Store is a first-party object storage backend.
 // It currently publishes immutable blob versions via internal manifest pointers.
 type Store struct {
-	bucket             objstore.Bucket
-	logger             log.Logger
-	dataDir            string
-	prefix             string
-	gcGrace            time.Duration
-	packThreshold      int64
-	pagedThreshold     int64
-	pageSize           int64
-	blockCache         *blockcache.Cache
-	pageCache          *blockcache.Cache
-	checkpointCache    *checkpointCache
-	catalog            *internalcatalog.Catalog
-	lockManager        *stripedlock.Manager
-	blockLoads         singleflight.Group
-	pageLoads          singleflight.Group
-	manifestCache      *manifestCache
-	versionSeq         atomic.Uint64
-	generationSeq      atomic.Uint64
-	initErr            error
-	segmentRefsMu      sync.Mutex
-	segmentRefs        map[string]int
-	reclaimableSegs    map[string]struct{}
-	flushMu            sync.Mutex
-	flushRun           contextSemaphore
-	remoteState        contextSemaphore
-	pendingShards      map[string]struct{}
-	flushScheduled     bool
-	flushRetryDelay    time.Duration
-	scheduleFlushAfter func(time.Duration, func())
-	autoFlush          bool
-	now                func() time.Time
-	openSegmentWriter  func(root, shard, segmentID string) (segmentWriter, error)
-	isClosed           atomic.Bool
-	writersMu          sync.Mutex
-	writers            sync.WaitGroup
-	closeOnce          sync.Once
-	closeDone          chan struct{}
-	closeErr           error
+	bucket              objstore.Bucket
+	logger              log.Logger
+	dataDir             string
+	prefix              string
+	gcGrace             time.Duration
+	packThreshold       int64
+	pagedThreshold      int64
+	pageSize            int64
+	blockCache          *blockcache.Cache
+	pageCache           *blockcache.Cache
+	checkpointCache     *checkpointCache
+	catalog             *internalcatalog.Catalog
+	lockManager         *stripedlock.Manager
+	blockLoads          singleflight.Group
+	pageLoads           singleflight.Group
+	manifestCache       *manifestCache
+	versionSeq          atomic.Uint64
+	generationSeq       atomic.Uint64
+	initErr             error
+	segmentRefsMu       sync.Mutex
+	segmentRefs         map[string]int
+	reclaimableSegs     map[string]struct{}
+	flushMu             sync.Mutex
+	flushRun            contextSemaphore
+	remoteState         contextSemaphore
+	pendingShards       map[string]struct{}
+	flushScheduled      bool
+	flushRetryDelay     time.Duration
+	scheduleFlushAfter  func(time.Duration, func())
+	afterAutoFlushCheck func()
+	beforeFlushAcquire  func()
+	autoFlush           bool
+	now                 func() time.Time
+	openSegmentWriter   func(root, shard, segmentID string) (segmentWriter, error)
+	isClosed            atomic.Bool
+	writersMu           sync.Mutex
+	writers             sync.WaitGroup
+	closeOnce           sync.Once
+	closeDone           chan struct{}
+	closeErr            error
 }
 
 func (s *Store) GetStreamUsesContext() bool { return true }
