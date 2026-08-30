@@ -75,11 +75,12 @@ func (w *writer) Commit(ctx context.Context) (result error) {
 		metadata = *w.metadata
 	}
 	published, err := w.store.publishLocalEntry(w.key, localCatalogEntry{
-		SegmentPath: sealedPath,
-		Offset:      0,
-		Length:      size,
-		Generation:  w.generation,
-		Metadata:    metadata,
+		SegmentPath:      sealedPath,
+		Offset:           0,
+		Length:           size,
+		Generation:       w.generation,
+		PublicationToken: w.store.nextVersion(),
+		Metadata:         metadata,
 	})
 	if err != nil {
 		if published {

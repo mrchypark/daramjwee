@@ -187,6 +187,129 @@ func TestStore_PendingRemotePayloadResumesAfterEntryFailureAndMissingLocalSegmen
 	require.Len(t, listObjectNames(t, base, store.blobRoot()), 1)
 }
 
+func TestStore_PackedUploadPlanSurvivesEntryFailureAndMissingSegments(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	bucket := &failFirstEntryUploadBucket{Bucket: base}
+	dataDir := t.TempDir()
+	store := New(bucket, log.NewNopLogger(), WithDir(dataDir), WithPackThreshold(1<<20))
+	store.autoFlush = false
+	keyA, keyB := sameShardKeys("packed-plan")
+	values := map[string]string{keyA: "alpha", keyB: "bravo"}
+	for key, value := range values {
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: value})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, value)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+	}
+	require.Error(t, store.flushPending(ctx))
+	entries := store.catalog.Entries()
+	require.NotEmpty(t, entries[keyA].PendingRemotePath)
+	require.Equal(t, entries[keyA].PendingRemotePath, entries[keyB].PendingRemotePath)
+	require.Positive(t, entries[keyA].PendingRemoteSize)
+	for _, segmentPath := range localSegmentPaths(t, dataDir) {
+		require.NoError(t, os.Remove(segmentPath))
+	}
+
+	reopened := New(base, log.NewNopLogger(), WithDir(dataDir), WithPackThreshold(1<<20))
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	remote := New(base, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1<<20))
+	for key, value := range values {
+		require.Eventually(t, func() bool {
+			stream, _, err := remote.GetStream(ctx, key)
+			if err != nil {
+				return false
+			}
+			defer stream.Close()
+			body, err := io.ReadAll(stream)
+			return err == nil && string(body) == value
+		}, time.Second, 20*time.Millisecond)
+	}
+	require.Len(t, listObjectNames(t, base, ensureDir(joinPath(store.prefix, "segments"))), 1)
+}
+
+func TestStore_PendingRemoteWithMissingSegmentDoesNotServeOlderRemote(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	key := "pending-no-stale-fallback"
+	seed := New(base, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	seed.autoFlush = false
+	writer, err := seed.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "v1")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, seed.flushPending(ctx))
+
+	dataDir := t.TempDir()
+	store := New(&failFirstEntryUploadBucket{Bucket: base}, log.NewNopLogger(), WithDir(dataDir), WithPackThreshold(1))
+	store.autoFlush = false
+	writer, err = store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "v2")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.Error(t, store.flushPending(ctx))
+	segments := localSegmentPaths(t, dataDir)
+	require.Len(t, segments, 1)
+	require.NoError(t, os.Remove(segments[0]))
+
+	_, _, err = store.GetStream(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	_, err = store.Stat(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
+func TestStore_TombstoneReplayCannotOverwriteLaterRemoteWrite(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	dataDir := t.TempDir()
+	storeA := New(base, log.NewNopLogger(), WithDir(dataDir), WithPackThreshold(1))
+	storeB := New(base, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	storeA.autoFlush = false
+	storeB.autoFlush = false
+	key := "tombstone-cas-replay"
+
+	write := func(store *Store, value string) {
+		writer, err := store.BeginSet(ctx, key, &daramjwee.Metadata{CacheTag: value})
+		require.NoError(t, err)
+		_, err = io.WriteString(writer, value)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		require.NoError(t, store.flushPending(ctx))
+	}
+	write(storeA, "v1")
+
+	originalUpdate := storeA.updateCatalog
+	failPublishCommit := true
+	storeA.updateCatalog = func(updateKey string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error) {
+		current, exists := storeA.catalog.Get(updateKey)
+		next, keep := fn(current, exists)
+		if failPublishCommit && updateKey == key && keep && !current.RemotePublished && next.RemotePublished {
+			failPublishCommit = false
+			return false, errors.New("published tombstone catalog commit failed")
+		}
+		return originalUpdate(updateKey, func(localCatalogEntry, bool) (localCatalogEntry, bool) { return next, keep })
+	}
+	require.Error(t, storeA.Delete(ctx, key))
+	entry, ok := storeA.catalog.Get(key)
+	require.True(t, ok)
+	require.False(t, entry.RemotePublished)
+
+	write(storeB, "v2")
+	require.NoError(t, storeA.flushPending(ctx))
+	_, ok = storeA.catalog.Get(key)
+	require.False(t, ok)
+	remote := New(base, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	stream, _, err := remote.GetStream(ctx, key)
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Equal(t, "v2", string(body))
+}
+
 func TestStore_CachedLegacyFallbackObservesLaterTombstone(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
@@ -290,6 +413,18 @@ func TestStore_DeleteCleanupRetryDoesNotRepublishTombstone(t *testing.T) {
 type failFirstEntryUploadBucket struct {
 	objstore.Bucket
 	once sync.Once
+}
+
+type noConditionalUploadBucket struct{ objstore.Bucket }
+
+func (b *noConditionalUploadBucket) SupportedObjectUploadOptions() []objstore.ObjectUploadOptionType {
+	return nil
+}
+
+func TestStore_RejectsBucketWithoutConditionalEntryUploads(t *testing.T) {
+	store := New(&noConditionalUploadBucket{Bucket: objstore.NewInMemBucket()}, log.NewNopLogger(), WithDir(t.TempDir()))
+	_, err := store.BeginSet(context.Background(), "unsupported-cas", nil)
+	require.ErrorContains(t, err, "must support IfNotExists and IfMatch")
 }
 
 type failFirstManifestDeleteBucket struct {

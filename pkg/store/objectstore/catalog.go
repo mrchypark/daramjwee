@@ -73,6 +73,9 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 }
 
 func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, error) {
+	if entry.Superseded {
+		return localCatalogEntry{}, false, false, nil
+	}
 	if entry.Missing {
 		if entry.RemotePublished {
 			return localCatalogEntry{}, false, false, nil
@@ -80,6 +83,9 @@ func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, 
 		return localCatalogEntry{}, false, false, errMissingLocalEntry
 	}
 	if entry.SegmentPath == "" {
+		if entry.PendingRemotePath != "" {
+			return localCatalogEntry{}, false, false, errMissingLocalEntry
+		}
 		return localCatalogEntry{}, false, false, nil
 	}
 	if _, err := os.Stat(entry.SegmentPath); err == nil {
@@ -138,6 +144,13 @@ func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (l
 	return s.updateCatalog(key, fn)
 }
 
+func (s *Store) updateLocalEntriesIf(expected, updates map[string]localCatalogEntry) (bool, error) {
+	if s.updateCatalogManyIf == nil {
+		return true, nil
+	}
+	return s.updateCatalogManyIf(expected, updates)
+}
+
 func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCatalogEntry) error {
 	if s.catalog == nil || len(updates) == 0 {
 		return nil
@@ -192,6 +205,31 @@ func (s *Store) commitPublishedTombstones(expectedEntries map[string]localCatalo
 	return nil
 }
 
+func (s *Store) commitCleanedUploadIntents(expectedEntries map[string]localCatalogEntry) error {
+	if s.catalog == nil {
+		return nil
+	}
+	for key, expected := range expectedEntries {
+		if !expected.IntentCleanupPending || expected.RemotePath == "" {
+			continue
+		}
+		_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			if !exists || current.RemotePath != expected.RemotePath {
+				return current, exists
+			}
+			if current.Superseded {
+				return localCatalogEntry{}, false
+			}
+			current.IntentCleanupPending = false
+			return current, true
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) commitCleanedTombstones(expectedEntries map[string]localCatalogEntry) error {
 	if s.catalog == nil {
 		return nil
@@ -203,6 +241,9 @@ func (s *Store) commitCleanedTombstones(expectedEntries map[string]localCatalogE
 		_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 			if !exists || !current.Missing || !current.RemotePublished {
 				return current, exists
+			}
+			if current.Superseded {
+				return localCatalogEntry{}, false
 			}
 			current.CleanupPending = false
 			return current, true
@@ -234,10 +275,11 @@ func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, err
 			previousSegment = current.SegmentPath
 		}
 		tombstone := localCatalogEntry{
-			Generation:     generation,
-			Missing:        true,
-			CleanupPending: true,
-			Metadata:       current.Metadata,
+			Generation:       generation,
+			Missing:          true,
+			CleanupPending:   true,
+			PublicationToken: s.nextVersion(),
+			Metadata:         current.Metadata,
 		}
 		return tombstone, true
 	})

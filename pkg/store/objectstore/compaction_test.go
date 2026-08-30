@@ -215,7 +215,7 @@ func TestStore_CompactClearsCompletedIntentAfterDeleteFailure(t *testing.T) {
 	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
 }
 
-func TestStore_CompactClearsAbandonedUploadIntent(t *testing.T) {
+func TestStore_RetryReusesAbandonedUploadPath(t *testing.T) {
 	ctx := context.Background()
 	base := objstore.NewInMemBucket()
 	bucket := &failFirstPayloadAfterUploadBucket{Bucket: base}
@@ -236,7 +236,7 @@ func TestStore_CompactClearsAbandonedUploadIntent(t *testing.T) {
 	require.NoError(t, err)
 	exists, err := base.Exists(ctx, abandonedPath)
 	require.NoError(t, err)
-	require.False(t, exists)
+	require.True(t, exists)
 	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
 }
 
@@ -279,6 +279,14 @@ func TestStore_AbandonIntentHasBoundedDetachedContext(t *testing.T) {
 	started := time.Now()
 	require.Error(t, store.flushPending(ctx))
 	require.Less(t, time.Since(started), time.Second)
+	pending, ok := store.catalog.Get("bounded-abandon")
+	require.True(t, ok)
+	require.NotEmpty(t, pending.PendingRemotePath)
+	store.bucket = base
+	require.NoError(t, store.flushPending(context.Background()))
+	published, ok := store.catalog.Get("bounded-abandon")
+	require.True(t, ok)
+	require.Equal(t, pending.PendingRemotePath, published.RemotePath)
 	_, err = store.Compact(context.Background(), 0)
 	require.NoError(t, err)
 }

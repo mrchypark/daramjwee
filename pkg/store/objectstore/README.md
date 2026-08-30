@@ -2,6 +2,8 @@
 
 `objectstore` is a first-party `Store` for [`thanos-io/objstore`](https://github.com/thanos-io/objstore) providers such as S3, GCS, and Azure Blob Storage.
 
+The bucket must support both `objstore.IfNotExists` and `objstore.IfMatch` uploads. `objectstore` rejects providers without these conditions because it cannot safely publish concurrent updates on them.
+
 It fits into the same ordered-tier API as the other backends:
 
 ```go

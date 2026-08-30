@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,7 @@ type Store struct {
 	checkpointCache     *checkpointCache
 	catalog             *internalcatalog.Catalog
 	updateCatalog       func(string, func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error)
+	updateCatalogManyIf func(map[string]localCatalogEntry, map[string]localCatalogEntry) (bool, error)
 	syncCatalog         func() error
 	lockManager         *stripedlock.Manager
 	blockLoads          singleflight.Group
@@ -200,7 +202,11 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	})
 	if cat != nil {
 		store.updateCatalog = cat.Update
+		store.updateCatalogManyIf = cat.UpdateManyIf
 		store.syncCatalog = cat.Sync
+	}
+	if store.initErr == nil {
+		store.initErr = validateRemoteEntryCAS(bucket)
 	}
 	if store.initErr == nil {
 		if err := store.recoverLocalState(); err != nil {
@@ -214,6 +220,17 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 		}
 	}
 	return store
+}
+
+func validateRemoteEntryCAS(bucket objstore.Bucket) error {
+	if bucket == nil {
+		return errors.New("objectstore: bucket is nil")
+	}
+	supported := bucket.SupportedObjectUploadOptions()
+	if !slices.Contains(supported, objstore.IfNotExists) || !slices.Contains(supported, objstore.IfMatch) {
+		return errors.New("objectstore: bucket must support IfNotExists and IfMatch uploads")
+	}
+	return nil
 }
 
 func (s *Store) ValidateTier(index int) error {

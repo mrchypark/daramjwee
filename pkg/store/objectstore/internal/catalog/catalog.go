@@ -27,18 +27,26 @@ var (
 )
 
 type Entry struct {
-	SegmentPath         string             `json:"segment_path"`
-	Offset              int64              `json:"offset"`
-	Length              int64              `json:"length"`
-	Generation          uint64             `json:"generation,omitempty"`
-	Missing             bool               `json:"missing,omitempty"`
-	RemotePublished     bool               `json:"remote_published,omitempty"`
-	CleanupPending      bool               `json:"cleanup_pending,omitempty"`
-	RemotePath          string             `json:"remote_path,omitempty"`
-	RemoteOffset        int64              `json:"remote_offset,omitempty"`
-	PendingRemotePath   string             `json:"pending_remote_path,omitempty"`
-	PendingRemoteOffset int64              `json:"pending_remote_offset,omitempty"`
-	Metadata            daramjwee.Metadata `json:"metadata"`
+	SegmentPath          string             `json:"segment_path"`
+	Offset               int64              `json:"offset"`
+	Length               int64              `json:"length"`
+	Generation           uint64             `json:"generation,omitempty"`
+	Missing              bool               `json:"missing,omitempty"`
+	RemotePublished      bool               `json:"remote_published,omitempty"`
+	CleanupPending       bool               `json:"cleanup_pending,omitempty"`
+	RemotePath           string             `json:"remote_path,omitempty"`
+	RemoteOffset         int64              `json:"remote_offset,omitempty"`
+	IntentCleanupPending bool               `json:"intent_cleanup_pending,omitempty"`
+	Superseded           bool               `json:"superseded,omitempty"`
+	PendingRemotePath    string             `json:"pending_remote_path,omitempty"`
+	PendingRemoteOffset  int64              `json:"pending_remote_offset,omitempty"`
+	PendingRemoteSize    int64              `json:"pending_remote_size,omitempty"`
+	PublicationToken     string             `json:"publication_token,omitempty"`
+	RemoteVersionSet     bool               `json:"remote_version_set,omitempty"`
+	RemoteVersionAbsent  bool               `json:"remote_version_absent,omitempty"`
+	RemoteVersionType    int                `json:"remote_version_type,omitempty"`
+	RemoteVersionValue   string             `json:"remote_version_value,omitempty"`
+	Metadata             daramjwee.Metadata `json:"metadata"`
 }
 
 type Catalog struct {
@@ -198,6 +206,39 @@ func (c *Catalog) UpdateMany(updates map[string]Entry) error {
 		return err
 	}
 	return nil
+}
+
+// UpdateManyIf atomically applies updates only while every expected entry is
+// still current. It is used to persist a complete packed-upload plan before
+// any remote object is created.
+func (c *Catalog) UpdateManyIf(expected, updates map[string]Entry) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.syncPendingDirLocked(); err != nil {
+		return false, err
+	}
+	for key, entry := range expected {
+		current, ok := c.entries[key]
+		if !ok || current != entry {
+			return false, nil
+		}
+	}
+
+	previous := make(map[string]Entry, len(updates))
+	for key, next := range updates {
+		previous[key] = c.entries[key]
+		c.entries[key] = next
+	}
+	if committed, err := c.persistLocked(); err != nil {
+		restore := func() {
+			for key, prev := range previous {
+				c.entries[key] = prev
+			}
+		}
+		visible, err := c.finishPersistLocked(committed, err, restore)
+		return visible, err
+	}
+	return true, nil
 }
 
 func (c *Catalog) Set(key string, entry Entry) error {
