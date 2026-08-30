@@ -359,6 +359,15 @@ func (c *DaramjweeCache) serveMissWaiterFromTop(requestCtx, setupCtx context.Con
 // visible or aborts) and release the leader registration at the same point;
 // non-body responses and errors signal and release immediately.
 func (c *DaramjweeCache) handleMissAsLeader(requestCtx, setupCtx context.Context, key string, req GetRequest, fetcher Fetcher, cancel context.CancelFunc, expectedGeneration *topWriteGeneration, higherTiersClean bool, lead *missLead) (*GetResponse, error) {
+	if lead != nil {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				lead.signal()
+				c.missLeads.release(key, lead)
+				panic(recovered)
+			}
+		}()
+	}
 	resp, err := c.handleMissInner(requestCtx, setupCtx, key, req, fetcher, cancel, expectedGeneration, higherTiersClean)
 	if lead == nil {
 		return resp, err

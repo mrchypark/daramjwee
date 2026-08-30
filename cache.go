@@ -115,6 +115,12 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 	topGenerationAtStart := c.currentTopWriteGeneration(key)
 	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 	session := newReadSession(nil, cancel, topGenerationAtStart)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_ = session.Finish(OutcomeReadError)
+			panic(recovered)
+		}
+	}()
 	higherTiersClean := true
 
 	for i, tier := range c.tiers {
