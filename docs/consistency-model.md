@@ -43,76 +43,15 @@ Writer B: Set(k, v2)
 
 ## Fill Coordination
 
-When multiple goroutines request the same key simultaneously:
+The first concurrent cold miss for a key becomes a leader. Other callers wait
+for at most 200 ms (or their context deadline), then re-read the top tier if the
+leader published or perform an independent origin fetch. They do not share the
+leader's response body or automatically receive its error.
 
-```
-┌── caller A
-miss ── fill key ─┼── caller B
-                  ├── caller C
-                  └── caller D
-
-                    │
-                    ▼
-
-                 loader()
-                    │
-                    ▼
-                 publish
-                    │
-             ┌──────┼──────┐
-             ▼      ▼      ▼
-             A      B      C
-```
-
-### Fill Guarantees
-
-1. **Single Loader**: Only one loader runs per key at a time
-2. **All Waiters Get Result**: All waiting goroutines receive the same result
-3. **Generation Fence**: Published value must match the generation observed when fill started
-
-### Fill Failure Scenarios
-
-#### A. Loader Returns Error
-
-```go
-loader() → error
-```
-
-- All waiters receive the same error
-- No value is published to cache
-- Callers can retry
-
-#### B. Context Cancellation
-
-```go
-A: loader(ctx) → cancelled
-B: wait → continues waiting
-C: wait → continues waiting
-```
-
-- If the leader is cancelled, waiters continue waiting
-- If all waiters are cancelled, loader may be cancelled
-
-#### C. Loader Panic
-
-```go
-loader() → panic
-```
-
-- Fill state is released
-- Key is not permanently stuck
-
-#### D. Stale Result (Critical Race)
-
-```go
-T1: loader A starts (generation=42)
-T2: Set(k, newer) (generation=43)
-T3: loader A finishes
-T4: loader A checks: generation 42 != 43
-T5: loader A discards result
-```
-
-**Guaranteed**: A fill cannot overwrite a newer value. The generation fence prevents this.
+Publication is a separate guarantee: the staged fill must reach EOF and close,
+and its captured generation must still be valid. Therefore an older fill cannot
+overwrite a later `Set` or resurrect a value after `Delete`. See
+[fill-coordination.md](fill-coordination.md) for the complete lifecycle.
 
 ## Deletion Semantics
 
