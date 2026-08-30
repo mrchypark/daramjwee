@@ -265,6 +265,29 @@ func TestStore_AutomaticFlushKeepsOneRetryWhenNewShardIsQueued(t *testing.T) {
 	}
 }
 
+func TestStore_AutomaticFlushStopsAfterClose(t *testing.T) {
+	bucket := &failingUploadBucket{
+		Bucket: objstore.NewInMemBucket(),
+		failuresLeft: map[string]int{
+			"segments/": 2,
+		},
+	}
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	scheduler := &manualFlushScheduler{}
+	store.scheduleFlushAfter = scheduler.after
+
+	writePendingObject(t, store, "close-stops-retry", "payload")
+	scheduled := scheduler.pop(t)
+	require.Error(t, store.Close())
+
+	scheduled.run()
+	require.Zero(t, scheduler.len())
+	bucket.mu.Lock()
+	remaining := bucket.failuresLeft["segments/"]
+	bucket.mu.Unlock()
+	assert.Equal(t, 1, remaining, "scheduled callback must not upload after Close")
+}
+
 func TestStore_DeleteRepublishesCheckpointWithoutDeletedKey(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()

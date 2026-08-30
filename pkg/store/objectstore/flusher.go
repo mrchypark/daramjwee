@@ -52,7 +52,7 @@ func (s *Store) enqueueFlush(key string) {
 }
 
 func (s *Store) scheduleFlushLocked() {
-	if s.flushScheduled {
+	if !s.autoFlush || s.flushScheduled {
 		return
 	}
 	delay := flushDebounce
@@ -61,6 +61,14 @@ func (s *Store) scheduleFlushLocked() {
 	}
 	s.flushScheduled = true
 	s.scheduleFlushAfter(delay, func() {
+		s.flushMu.Lock()
+		if !s.autoFlush {
+			s.flushScheduled = false
+			s.flushMu.Unlock()
+			return
+		}
+		s.flushMu.Unlock()
+
 		err := s.flushPending(context.Background())
 		if err != nil {
 			_ = level.Warn(s.logger).Log("msg", "objectstore flush failed", "err", err)
