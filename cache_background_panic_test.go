@@ -107,6 +107,12 @@ func (panicCacheableNotFoundFetcher) Fetch(context.Context, *Metadata) (*FetchRe
 	return nil, ErrCacheableNotFound
 }
 
+type panicMissFetcher struct{}
+
+func (panicMissFetcher) Fetch(context.Context, *Metadata) (*FetchResult, error) {
+	panic("miss fetch panic")
+}
+
 type panicCommitStore struct {
 	commitTriggered chan struct{}
 	commitOnce      sync.Once
@@ -249,6 +255,23 @@ func requireLaterSameKeyWrite(t *testing.T, cache *DaramjweeCache, key string) {
 	require.NoError(t, err)
 	require.NoError(t, writer.Abort())
 	requireCoordinatorRetired(t, cache, key)
+}
+
+func TestMissFetcherPanicReleasesLeader(t *testing.T) {
+	cache, err := New(nil, WithTiers(&panicBackgroundStore{}), WithOpTimeout(time.Second))
+	require.NoError(t, err)
+	defer cache.Close()
+	impl, ok := cache.(*DaramjweeCache)
+	require.True(t, ok)
+
+	const key = "miss-fetch-panic"
+	require.PanicsWithValue(t, "miss fetch panic", func() {
+		_, _ = cache.Get(context.Background(), key, GetRequest{}, panicMissFetcher{})
+	})
+
+	_, active := impl.missLeads.current(key)
+	require.False(t, active)
+	requireCoordinatorRetired(t, impl, key)
 }
 
 func TestPersistBackgroundPanicReleasesCoordinator(t *testing.T) {

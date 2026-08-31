@@ -80,6 +80,68 @@ func TestSafeCloserReadAll(t *testing.T) {
 	}
 }
 
+func TestCacheStopsAtUncertainHigherTier(t *testing.T) {
+	lower := &uncertainTestStore{}
+	cache := &DaramjweeCache{
+		tiers:  []Store{&uncertainTestStore{err: ErrReadStateUncertain}, lower},
+		logger: log.NewNopLogger(),
+		config: cacheConfig{opTimeout: time.Second, closeTimeout: time.Second},
+	}
+
+	_, err := cache.Get(context.Background(), "key", GetRequest{}, metadataOwnershipFetcher{})
+	require.ErrorIs(t, err, ErrReadStateUncertain)
+	require.Equal(t, 0, lower.reads)
+}
+
+func TestCacheStopsWhenHigherTierCancelsRequestContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	lower := &uncertainTestStore{}
+	cache := &DaramjweeCache{
+		tiers:  []Store{&cancelingTestStore{cancel: cancel}, lower},
+		logger: log.NewNopLogger(),
+		config: cacheConfig{opTimeout: time.Second, closeTimeout: time.Second},
+	}
+
+	_, err := cache.Get(ctx, "key", GetRequest{}, metadataOwnershipFetcher{})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 0, lower.reads)
+}
+
+type cancelingTestStore struct{ cancel context.CancelFunc }
+
+func (s *cancelingTestStore) GetStream(context.Context, string) (io.ReadCloser, *Metadata, error) {
+	s.cancel()
+	return nil, nil, context.Canceled
+}
+
+func (*cancelingTestStore) BeginSet(context.Context, string, *Metadata) (WriteSink, error) {
+	return nil, nil
+}
+
+func (*cancelingTestStore) Delete(context.Context, string) error { return nil }
+
+func (*cancelingTestStore) Stat(context.Context, string) (*Metadata, error) {
+	return nil, context.Canceled
+}
+
+type uncertainTestStore struct {
+	err   error
+	reads int
+}
+
+func (s *uncertainTestStore) GetStream(context.Context, string) (io.ReadCloser, *Metadata, error) {
+	s.reads++
+	return nil, nil, s.err
+}
+
+func (*uncertainTestStore) BeginSet(context.Context, string, *Metadata) (WriteSink, error) {
+	return nil, nil
+}
+
+func (*uncertainTestStore) Delete(context.Context, string) error { return nil }
+
+func (s *uncertainTestStore) Stat(context.Context, string) (*Metadata, error) { return nil, s.err }
+
 func TestSafeCloserReadAllAutoClose(t *testing.T) {
 	// Verify callback execution
 	callbackExecuted := false
@@ -311,7 +373,7 @@ func newMetadataOwnershipCache(store Store) *DaramjweeCache {
 	return &DaramjweeCache{
 		tiers:  []Store{store},
 		logger: log.NewNopLogger(),
-		config: cacheConfig{opTimeout: time.Second, closeTimeout: time.Second},
+		config: cacheConfig{opTimeout: 5 * time.Second, closeTimeout: time.Second},
 	}
 }
 

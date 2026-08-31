@@ -2,7 +2,9 @@ package daramjwee_test
 
 import (
 	"context"
+	"errors"
 	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,10 +12,34 @@ import (
 	"github.com/go-kit/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thanos-io/objstore"
 
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/pkg/store/filestore"
+	objectstorepkg "github.com/mrchypark/daramjwee/pkg/store/objectstore"
 )
+
+type failingRemoteEntryGetBucket struct {
+	objstore.Bucket
+	fail atomic.Bool
+}
+
+func (b *failingRemoteEntryGetBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	if b.fail.Load() && strings.Contains(name, "entries/") {
+		return nil, errors.New("remote entry unavailable")
+	}
+	return b.Bucket.Get(ctx, name)
+}
+
+type countingReadStore struct {
+	daramjwee.Store
+	reads atomic.Int32
+}
+
+func (s *countingReadStore) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {
+	s.reads.Add(1)
+	return s.Store.GetStream(ctx, key)
+}
 
 type nonComparableTierStore struct {
 	inner *mockStore
@@ -44,10 +70,77 @@ func (s nonComparableTierStore) Stat(ctx context.Context, key string) (*daramjwe
 }
 
 func TestCache_LowerTierHitSynchronouslyFillsTopAndAsyncBackfillsIntermediate(t *testing.T) {
+	testLowestTierBackfill(t, "tier-key", "tier-value")
+}
+
+func TestCache_MissingOwnedObjectstoreBodyStopsStaleLowerTier(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	seed := objectstorepkg.New(bucket, log.NewNopLogger(), objectstorepkg.WithDir(t.TempDir()), objectstorepkg.WithPackThreshold(1))
+	writer, err := seed.BeginSet(ctx, "owned-body", &daramjwee.Metadata{CacheTag: "v2", CachedAt: time.Now()})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "v2")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, seed.Close())
+
+	var blobs []string
+	require.NoError(t, bucket.Iter(ctx, "blobs/", func(name string) error {
+		blobs = append(blobs, name)
+		return nil
+	}, objstore.WithRecursiveIter()))
+	require.Len(t, blobs, 1)
+	require.NoError(t, bucket.Delete(ctx, blobs[0]))
+
+	top := objectstorepkg.New(bucket, log.NewNopLogger(), objectstorepkg.WithDir(t.TempDir()), objectstorepkg.WithPackThreshold(1))
+	lower := newMockStore()
+	lower.setData("owned-body", "v1", &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(top, lower), daramjwee.WithFreshness(time.Hour, time.Hour))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	_, err = cache.Get(ctx, "owned-body", daramjwee.GetRequest{}, &mockFetcher{})
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
+}
+
+func TestCache_LocalRemoteOwnershipStopsStaleLowerTierOnPointerFailure(t *testing.T) {
+	ctx := context.Background()
+	bucket := &failingRemoteEntryGetBucket{Bucket: objstore.NewInMemBucket()}
+	dataDir := t.TempDir()
+	top := objectstorepkg.New(bucket, log.NewNopLogger(), objectstorepkg.WithDir(dataDir), objectstorepkg.WithPackThreshold(1))
+	writer, err := top.BeginSet(ctx, "owned-pointer", &daramjwee.Metadata{CacheTag: "v2", CachedAt: time.Now()})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "v2")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, top.Close())
+
+	bucket.fail.Store(true)
+	top = objectstorepkg.New(bucket, log.NewNopLogger(), objectstorepkg.WithDir(dataDir), objectstorepkg.WithPackThreshold(1))
+	lowerBase := newMockStore()
+	lowerBase.setData("owned-pointer", "v1", &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
+	lower := &countingReadStore{Store: lowerBase}
+	cache, err := daramjwee.New(nil, daramjwee.WithTiers(top, lower), daramjwee.WithFreshness(time.Hour, time.Hour))
+	require.NoError(t, err)
+	defer cache.Close()
+
+	_, err = cache.Get(ctx, "owned-pointer", daramjwee.GetRequest{}, &mockFetcher{})
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
+	require.Zero(t, lower.reads.Load())
+	_, err = top.Stat(ctx, "owned-pointer")
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
+}
+
+func TestCache_LowestTierHitSynchronouslyFillsTopAndAsyncBackfillsRemainingTiers(t *testing.T) {
+	testLowestTierBackfill(t, "lowest-key", "lowest-value")
+}
+
+func testLowestTierBackfill(t *testing.T, key, value string) {
+	t.Helper()
 	top := newMockStore()
 	mid := newSlowSetStore(150 * time.Millisecond)
 	low := newMockStore()
-	low.setData("tier-key", "tier-value", &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
+	low.setData(key, value, &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
 
 	cache, err := daramjwee.New(
 		nil,
@@ -58,63 +151,23 @@ func TestCache_LowerTierHitSynchronouslyFillsTopAndAsyncBackfillsIntermediate(t 
 	require.NoError(t, err)
 	defer cache.Close()
 
-	stream, err := cache.Get(context.Background(), "tier-key", daramjwee.GetRequest{}, &mockFetcher{})
+	stream, err := cache.Get(context.Background(), key, daramjwee.GetRequest{}, &mockFetcher{})
 	require.NoError(t, err)
 
 	body, err := io.ReadAll(stream)
 	require.NoError(t, err)
-	require.Equal(t, "tier-value", string(body))
+	require.Equal(t, value, string(body))
 	require.NoError(t, stream.Close())
 
-	topReader, _, err := top.GetStream(context.Background(), "tier-key")
+	topReader, _, err := top.GetStream(context.Background(), key)
 	require.NoError(t, err)
 	_ = topReader.Close()
 
-	_, _, err = mid.GetStream(context.Background(), "tier-key")
+	_, _, err = mid.GetStream(context.Background(), key)
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 
 	require.Eventually(t, func() bool {
-		reader, _, err := mid.GetStream(context.Background(), "tier-key")
-		if err != nil {
-			return false
-		}
-		_ = reader.Close()
-		return true
-	}, 2*time.Second, 10*time.Millisecond)
-}
-
-func TestCache_LowestTierHitSynchronouslyFillsTopAndAsyncBackfillsRemainingTiers(t *testing.T) {
-	top := newMockStore()
-	mid := newSlowSetStore(150 * time.Millisecond)
-	lowest := newMockStore()
-	lowest.setData("lowest-key", "lowest-value", &daramjwee.Metadata{CacheTag: "v1", CachedAt: time.Now()})
-
-	cache, err := daramjwee.New(
-		nil,
-		daramjwee.WithTiers(top, mid, lowest),
-		daramjwee.WithFreshness(time.Hour, time.Hour),
-		daramjwee.WithOpTimeout(2*time.Second),
-	)
-	require.NoError(t, err)
-	defer cache.Close()
-
-	stream, err := cache.Get(context.Background(), "lowest-key", daramjwee.GetRequest{}, &mockFetcher{})
-	require.NoError(t, err)
-
-	body, err := io.ReadAll(stream)
-	require.NoError(t, err)
-	require.Equal(t, "lowest-value", string(body))
-	require.NoError(t, stream.Close())
-
-	topReader, _, err := top.GetStream(context.Background(), "lowest-key")
-	require.NoError(t, err)
-	_ = topReader.Close()
-
-	_, _, err = mid.GetStream(context.Background(), "lowest-key")
-	require.ErrorIs(t, err, daramjwee.ErrNotFound)
-
-	require.Eventually(t, func() bool {
-		reader, _, err := mid.GetStream(context.Background(), "lowest-key")
+		reader, _, err := mid.GetStream(context.Background(), key)
 		if err != nil {
 			return false
 		}

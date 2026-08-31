@@ -10,9 +10,8 @@ require (
 	github.com/goccy/go-json v0.10.6
 	github.com/minio/minio-go/v7 v7.0.99
 	github.com/stretchr/testify v1.11.1
-	github.com/thanos-io/objstore v0.0.0-20250813080715-4e5fd4289b50
+	github.com/thanos-io/objstore v0.0.0-20260817070452-e42d91c337ee
 	github.com/zeebo/xxh3 v1.1.0
-	golang.org/x/sync v0.20.0
 	google.golang.org/api v0.273.1
 )
 
@@ -84,6 +83,7 @@ require (
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pkg/xattr v0.4.10 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
@@ -111,6 +111,7 @@ require (
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.15.0 // indirect

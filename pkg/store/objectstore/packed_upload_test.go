@@ -129,8 +129,18 @@ func TestStorePackedFlushPinsSourcesUntilUploadReaderCloses(t *testing.T) {
 		{
 			name: "overwrite",
 			mutate: func(t *testing.T, store *Store, key string) <-chan error {
-				writePendingObject(t, store, key, "replacement payload")
-				return nil
+				done := make(chan error, 1)
+				go func() {
+					writer, err := store.BeginSet(context.Background(), key, nil)
+					if err == nil {
+						_, err = io.WriteString(writer, "replacement payload")
+					}
+					if err == nil {
+						err = writer.Close()
+					}
+					done <- err
+				}()
+				return done
 			},
 		},
 		{
@@ -138,10 +148,6 @@ func TestStorePackedFlushPinsSourcesUntilUploadReaderCloses(t *testing.T) {
 			mutate: func(t *testing.T, store *Store, key string) <-chan error {
 				done := make(chan error, 1)
 				go func() { done <- store.Delete(context.Background(), key) }()
-				require.Eventually(t, func() bool {
-					entry, ok := store.catalog.Get(key)
-					return ok && entry.Missing
-				}, 5*time.Second, time.Millisecond)
 				return done
 			},
 		},
@@ -174,14 +180,17 @@ func TestStorePackedFlushPinsSourcesUntilUploadReaderCloses(t *testing.T) {
 			assert.Equal(t, 1, store.localSegmentRefCount(entryA.SegmentPath))
 			assert.Equal(t, 1, store.localSegmentRefCount(entryB.SegmentPath))
 			mutationDone := tc.mutate(t, store, keyA)
+			select {
+			case err := <-mutationDone:
+				t.Fatalf("mutation completed before publication: %v", err)
+			case <-time.After(50 * time.Millisecond):
+			}
 			_, err := os.Stat(entryA.SegmentPath)
 			require.NoError(t, err, "concurrent mutation reclaimed a not-yet-read packed source")
 
 			bucket.releaseUpload()
 			require.NoError(t, <-flushDone)
-			if mutationDone != nil {
-				require.NoError(t, <-mutationDone)
-			}
+			require.NoError(t, <-mutationDone)
 			_, err = os.Stat(entryA.SegmentPath)
 			require.ErrorIs(t, err, os.ErrNotExist)
 		})

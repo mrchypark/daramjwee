@@ -173,7 +173,7 @@ T11                               Discard promotion
 
 **Result**: Only one promotion succeeds.
 
-### Scenario 4: Cache Fill Failure
+### Scenario 4: Cache Writer Setup Failure
 
 ```
 Time    Goroutine A (Get)
@@ -182,7 +182,7 @@ T1      Get(X) starts
 T2      Capture generation=5
 T3      Miss all tiers
 T4      Fetch from origin → SUCCESS(data)
-T5      Attempt cache write → ERROR
+T5      Acquire cache writer → ERROR
 T6      Log warning
 T7      Return data to caller (non-fatal)
 ```
@@ -197,9 +197,11 @@ T7      Return data to caller (non-fatal)
 
 3. **No Double Promotion**: Only one promotion can succeed for a given generation.
 
-4. **Caller Always Gets Data**: Even if promotion fails, the caller receives the requested data.
+4. **Setup Failure Preserves Data**: If promotion cannot acquire a writer, the
+   caller receives the requested data directly.
 
-5. **Fill Failure is Non-Fatal**: Cache fill failure does not cause data retrieval failure.
+5. **Streaming Failure is Reported**: A write or finalization failure after
+   streaming starts is returned to the caller and the partial fill is aborted.
 
 ## Testing
 
@@ -209,5 +211,6 @@ The following test scenarios verify promotion semantics:
 2. **Concurrent Promotions**: Verify that only one promotion succeeds.
 3. **Stale Promotion**: Verify that stale entries can be promoted and later refreshed.
 4. **Generation Mismatch**: Verify that mismatched generations cause promotion failure.
-5. **Cache Fill Failure**: Verify that fill failure does not affect data retrieval.
+5. **Cache Writer Setup Failure**: Verify that writer acquisition failure falls
+   back to the source body, while streaming write failure is reported.
 6. **Delete During Fill**: Verify that delete during origin fetch prevents publish.

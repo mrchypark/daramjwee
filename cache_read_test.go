@@ -136,55 +136,7 @@ func TestTopTierCloseCallback(t *testing.T) {
 	})
 }
 
-func TestHandleConditionalLowerTierPromotionError(t *testing.T) {
-	tests := []struct {
-		name           string
-		err            error
-		expectedStatus GetStatus
-		cancelExpected bool
-	}{
-		{
-			name:           "invalidation with preserveBody true",
-			err:            lowerTierPromotionInvalidatedError{preserveBody: true},
-			expectedStatus: GetStatusOK,
-			cancelExpected: false,
-		},
-		{
-			name:           "invalidation with preserveBody false",
-			err:            lowerTierPromotionInvalidatedError{preserveBody: false},
-			expectedStatus: GetStatusNotFound,
-			cancelExpected: true,
-		},
-		{
-			name:           "ErrTopWriteInvalidated",
-			err:            ErrTopWriteInvalidated,
-			expectedStatus: GetStatusOK,
-			cancelExpected: false,
-		},
-		{
-			name:           "other error",
-			err:            errors.New("some error"),
-			expectedStatus: GetStatusNotModified,
-			cancelExpected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cancelCalled := false
-			cancel := func() { cancelCalled = true }
-			src := io.NopCloser(strings.NewReader("data"))
-			cache := &DaramjweeCache{logger: log.NewNopLogger()}
-			meta := &Metadata{CacheTag: "v1"}
-
-			resp := cache.handleConditionalLowerTierPromotionError("key", 1, tt.err, src, meta, cancel)
-			assert.Equal(t, tt.expectedStatus, resp.Status)
-			assert.Equal(t, tt.cancelExpected, cancelCalled)
-		})
-	}
-}
-
-func TestDecideLowerTierHit(t *testing.T) {
+func TestPlanLowerTierHit(t *testing.T) {
 	tests := []struct {
 		name             string
 		higherTiersClean bool
@@ -193,33 +145,33 @@ func TestDecideLowerTierHit(t *testing.T) {
 		isNegative       bool
 		isStale          bool
 		canServeCond     bool
-		expectedAction   lowerTierAction
+		expectedPlan     ReadPlan
 	}{
 		{
 			name:             "higher tiers dirty + positive",
 			higherTiersClean: false,
 			cacheTag:         "v1",
 			isStale:          false,
-			expectedAction:   actionServeBodyDirect,
+			expectedPlan:     ReadPlan{Reply: ReplyOK, Body: BodyDirect},
 		},
 		{
 			name:             "higher tiers dirty + conditional",
 			higherTiersClean: false,
 			ifNoneMatch:      `"v1"`,
 			cacheTag:         "v1",
-			expectedAction:   actionServeConditionalDirect,
+			expectedPlan:     ReadPlan{Reply: ReplyOK, Body: BodyDirect},
 		},
 		{
 			name:             "higher tiers dirty + negative",
 			higherTiersClean: false,
 			isNegative:       true,
-			expectedAction:   actionServeNotFoundDirect,
+			expectedPlan:     ReadPlan{Reply: ReplyNotFound},
 		},
 		{
 			name:             "higher tiers dirty + stale",
 			higherTiersClean: false,
 			isStale:          true,
-			expectedAction:   actionServeStaleBodyRefresh,
+			expectedPlan:     ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose},
 		},
 		{
 			name:             "higher tiers clean + conditional + can serve",
@@ -227,7 +179,7 @@ func TestDecideLowerTierHit(t *testing.T) {
 			ifNoneMatch:      `"v1"`,
 			cacheTag:         "v1",
 			canServeCond:     true,
-			expectedAction:   actionServeConditionalWithPromotion,
+			expectedPlan:     ReadPlan{Reply: ReplyNotModified},
 		},
 		{
 			name:             "higher tiers clean + conditional + cannot serve",
@@ -235,38 +187,38 @@ func TestDecideLowerTierHit(t *testing.T) {
 			ifNoneMatch:      `"v1"`,
 			cacheTag:         "v1",
 			canServeCond:     false,
-			expectedAction:   actionServeBodyDirect,
+			expectedPlan:     ReadPlan{Reply: ReplyOK, Body: BodyDirect},
 		},
 		{
 			name:             "higher tiers clean + negative + not stale",
 			higherTiersClean: true,
 			isNegative:       true,
 			isStale:          false,
-			expectedAction:   actionServeNegativeNotFoundPromote,
+			expectedPlan:     ReadPlan{Reply: ReplyNotFound, Publish: PublishOnEOF, Fanout: FanoutAfterPublish},
 		},
 		{
 			name:             "higher tiers clean + negative + stale",
 			higherTiersClean: true,
 			isNegative:       true,
 			isStale:          true,
-			expectedAction:   actionServeNegativeNotFoundStale,
+			expectedPlan:     ReadPlan{Reply: ReplyNotFound, Refresh: RefreshOnClose},
 		},
 		{
 			name:             "higher tiers clean + positive + stale",
 			higherTiersClean: true,
 			isStale:          true,
-			expectedAction:   actionServeStaleBodyRefresh,
+			expectedPlan:     ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose},
 		},
 		{
 			name:             "higher tiers clean + positive + not stale",
 			higherTiersClean: true,
-			expectedAction:   actionPromotePositive,
+			expectedPlan:     ReadPlan{Reply: ReplyOK, Body: BodyStream, Publish: PublishOnEOF, Fanout: FanoutAfterPublish},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache := &DaramjweeCache{logger: log.NewNopLogger()}
+			cache := &DaramjweeCache{logger: log.NewNopLogger(), tiers: []Store{&dummyStore{}}}
 
 			p := lowerTierHitParams{
 				key:              "key",
@@ -291,11 +243,38 @@ func TestDecideLowerTierHit(t *testing.T) {
 				p.expectedGeneration = gen
 			}
 
-			decision := cache.decideLowerTierHit(p, meta, tt.isStale)
-			assert.Equal(t, tt.expectedAction, decision.action)
-			assert.Equal(t, tt.isStale, decision.isStale)
+			plan := cache.planLowerTierHit(p, meta, tt.isStale)
+			assert.Equal(t, tt.expectedPlan, plan)
 		})
 	}
+}
+
+func TestPlanLowerTierHitRecordsProbationOnce(t *testing.T) {
+	cache := &DaramjweeCache{
+		logger:    log.NewNopLogger(),
+		tiers:     []Store{&dummyStore{}},
+		probation: newPromotionProbation(1),
+	}
+	p := lowerTierHitParams{key: "key", tierIndex: 1, higherTiersClean: true}
+	meta := &Metadata{}
+
+	first := cache.planLowerTierHit(p, meta, false)
+	second := cache.planLowerTierHit(p, meta, false)
+
+	assert.Equal(t, ReadPlan{Reply: ReplyOK, Body: BodyDirect}, first)
+	assert.Equal(t, ReadPlan{Reply: ReplyOK, Body: BodyStream, Publish: PublishOnEOF, Fanout: FanoutAfterPublish}, second)
+}
+
+func TestExecuteLowerTierPlanRejectsNonCanonicalPlan(t *testing.T) {
+	var cancelled atomic.Int32
+	cache := &DaramjweeCache{logger: log.NewNopLogger()}
+	resp, err := cache.executeLowerTierPlan(lowerTierHitParams{
+		cancel: func() { cancelled.Add(1) },
+	}, ReadPlan{Reply: ReplyOK, Body: BodyStream}, nil)
+
+	require.Error(t, err)
+	require.Nil(t, resp)
+	require.EqualValues(t, 1, cancelled.Load())
 }
 
 func TestServeLowerTierWithoutPromotion(t *testing.T) {
@@ -469,52 +448,6 @@ func TestCanAttemptExpectedTopWrite(t *testing.T) {
 		gen.coord.committedGeneration.Store(1)
 		assert.True(t, cache.canAttemptExpectedTopWrite("key", gen))
 	})
-}
-
-func TestDecideDirectServe(t *testing.T) {
-	tests := []struct {
-		name           string
-		ifNoneMatch    string
-		cacheTag       string
-		isNegative     bool
-		isStale        bool
-		expectedAction lowerTierAction
-	}{
-		{
-			name:           "conditional satisfied",
-			ifNoneMatch:    `"v1"`,
-			cacheTag:       "v1",
-			expectedAction: actionServeConditionalDirect,
-		},
-		{
-			name:           "negative entry",
-			isNegative:     true,
-			expectedAction: actionServeNotFoundDirect,
-		},
-		{
-			name:           "stale entry",
-			isStale:        true,
-			expectedAction: actionServeStaleBodyRefresh,
-		},
-		{
-			name:           "positive entry",
-			expectedAction: actionServeBodyDirect,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cache := &DaramjweeCache{logger: log.NewNopLogger()}
-			p := lowerTierHitParams{
-				key:  "key",
-				req:  GetRequest{IfNoneMatch: tt.ifNoneMatch},
-				meta: &Metadata{CacheTag: tt.cacheTag, IsNegative: tt.isNegative},
-			}
-
-			decision := cache.decideDirectServe(p, p.meta, tt.isStale)
-			assert.Equal(t, tt.expectedAction, decision.action)
-		})
-	}
 }
 
 func TestHandleMissFetchError(t *testing.T) {

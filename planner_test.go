@@ -6,290 +6,74 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPlanner_Plan_Miss(t *testing.T) {
-	p := &Planner{}
-	obs := Observation{Source: SourceNone, HasTopStore: true}
-
-	plan := p.Plan(obs)
-
-	require.Equal(t, ReplyOK, plan.Reply)
-	require.Equal(t, BodyStream, plan.Body)
-	require.Equal(t, PublishOnEOF, plan.Publish)
-	require.Equal(t, FanoutAfterPublish, plan.Fanout)
-}
-
-func TestPlanner_Plan_TopTierHit_Fresh(t *testing.T) {
-	p := &Planner{}
+func TestPlannerPlans(t *testing.T) {
+	top := func(obs Observation) Observation {
+		obs.Source, obs.HasTopStore = SourceTop, true
+		return obs
+	}
+	lower := func(obs Observation) Observation {
+		obs.Source, obs.SourceTier = SourceLower, 1
+		return obs
+	}
 
 	tests := []struct {
 		name string
 		obs  Observation
 		want ReadPlan
 	}{
-		{
-			name: "fresh positive",
-			obs:  Observation{Source: SourceTop, Freshness: FreshnessFresh, HasTopStore: true},
-			want: ReadPlan{Reply: ReplyOK, Body: BodyDirect},
-		},
-		{
-			name: "fresh negative",
-			obs:  Observation{Source: SourceTop, Freshness: FreshnessFresh, EntryNegative: true, HasTopStore: true},
-			want: ReadPlan{Reply: ReplyNotFound, Body: BodyNone},
-		},
-		{
-			name: "fresh conditional matched",
-			obs:  Observation{Source: SourceTop, Freshness: FreshnessFresh, ConditionalMatched: true, HasTopStore: true},
-			want: ReadPlan{Reply: ReplyNotModified, Body: BodyNone},
-		},
-		{
-			name: "stale positive",
-			obs:  Observation{Source: SourceTop, Freshness: FreshnessStale, HasTopStore: true},
-			want: ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose},
-		},
-		{
-			name: "stale conditional matched",
-			obs:  Observation{Source: SourceTop, Freshness: FreshnessStale, ConditionalMatched: true, HasTopStore: true},
-			want: ReadPlan{Reply: ReplyNotModified, Body: BodyNone, Refresh: RefreshOnClose},
-		},
+		{"miss", Observation{Source: SourceNone, HasTopStore: true}, ReadPlan{Reply: ReplyOK, Body: BodyStream, Publish: PublishOnEOF, Fanout: FanoutAfterPublish}},
+		{"top fresh positive", top(Observation{}), ReadPlan{Reply: ReplyOK, Body: BodyDirect}},
+		{"top fresh negative", top(Observation{EntryNegative: true}), ReadPlan{Reply: ReplyNotFound}},
+		{"top conditional", top(Observation{ConditionalMatched: true}), ReadPlan{Reply: ReplyNotModified}},
+		{"top stale positive", top(Observation{Freshness: FreshnessStale}), ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose}},
+		{"top stale conditional", top(Observation{Freshness: FreshnessStale, ConditionalMatched: true}), ReadPlan{Reply: ReplyNotModified, Refresh: RefreshOnClose}},
+		{"lower promote positive", lower(Observation{HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyStream, Publish: PublishOnEOF, Fanout: FanoutAfterPublish}},
+		{"lower defer positive", lower(Observation{HasTopStore: true, Admission: AdmissionDeferred}), ReadPlan{Reply: ReplyOK, Body: BodyDirect}},
+		{"lower positive without top", lower(Observation{}), ReadPlan{Reply: ReplyOK, Body: BodyDirect}},
+		{"lower stale positive", lower(Observation{Freshness: FreshnessStale, HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose}},
+		{"lower promote negative", lower(Observation{EntryNegative: true, HasTopStore: true}), ReadPlan{Reply: ReplyNotFound, Publish: PublishOnEOF, Fanout: FanoutAfterPublish}},
+		{"lower defer negative", lower(Observation{EntryNegative: true, HasTopStore: true, Admission: AdmissionDeferred}), ReadPlan{Reply: ReplyNotFound}},
+		{"lower stale negative", lower(Observation{EntryNegative: true, Freshness: FreshnessStale, HasTopStore: true}), ReadPlan{Reply: ReplyNotFound, Refresh: RefreshOnClose}},
+		{"lower conditional legacy default", lower(Observation{ConditionalMatched: true, HasTopStore: true}), ReadPlan{Reply: ReplyNotModified, Refresh: RefreshOnClose}},
+		{"lower conditional without top", lower(Observation{ConditionalMatched: true}), ReadPlan{Reply: ReplyNotModified}},
+		{"lower stale conditional without top", lower(Observation{ConditionalMatched: true, Freshness: FreshnessStale}), ReadPlan{Reply: ReplyNotModified}},
+		{"dirty lower positive", lower(Observation{UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyDirect}},
+		{"dirty lower stale", lower(Observation{Freshness: FreshnessStale, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose}},
+		{"dirty lower negative", lower(Observation{EntryNegative: true, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyNotFound}},
+		{"dirty lower conditional", lower(Observation{ConditionalMatched: true, UpperTiersHealth: UpperTiersDirty, HasTopStore: true}), ReadPlan{Reply: ReplyNotModified}},
 	}
 
+	planner := &Planner{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plan := p.Plan(tt.obs)
-			require.Equal(t, tt.want, plan)
+			require.Equal(t, tt.want, planner.Plan(tt.obs))
 		})
 	}
+
+	conditional := Observation{Source: SourceLower, ConditionalMatched: true, HasTopStore: true}
+	require.Equal(t, ReadPlan{Reply: ReplyNotModified}, planner.plan(conditional, generationValid))
+	require.Equal(t, ReadPlan{Reply: ReplyNotModified, Refresh: RefreshOnClose}, planner.plan(Observation{
+		Source: SourceLower, ConditionalMatched: true, Freshness: FreshnessStale, HasTopStore: true,
+	}, generationValid))
+	require.Equal(t, ReadPlan{Reply: ReplyOK, Body: BodyDirect}, planner.plan(conditional, generationInvalid))
+	require.Equal(t, ReadPlan{Reply: ReplyOK, Body: BodyDirect}, planner.plan(conditional, generationValidity(99)))
+	dirtyConditional := lower(Observation{ConditionalMatched: true, UpperTiersHealth: UpperTiersDirty, HasTopStore: true})
+	require.Equal(t, ReadPlan{Reply: ReplyOK, Body: BodyDirect}, planner.plan(dirtyConditional, generationInvalid))
 }
 
-func TestPlanner_Plan_LowerTierHit_CleanUpperTiers(t *testing.T) {
-	p := &Planner{}
-
-	tests := []struct {
-		name string
-		obs  Observation
-		want ReadPlan
-	}{
-		{
-			name: "fresh positive with promotion allowed",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessFresh,
-				UpperTiersHealth: UpperTiersClean,
-				Admission:        AdmissionAllowed,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyOK, Body: BodyStream, Publish: PublishOnEOF, Fanout: FanoutAfterPublish},
-		},
-		{
-			name: "fresh positive with promotion deferred",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessFresh,
-				UpperTiersHealth: UpperTiersClean,
-				Admission:        AdmissionDeferred,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyOK, Body: BodyDirect},
-		},
-		{
-			name: "fresh positive without top store",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessFresh,
-				UpperTiersHealth: UpperTiersClean,
-				Admission:        AdmissionAllowed,
-				HasTopStore:      false,
-			},
-			want: ReadPlan{Reply: ReplyOK, Body: BodyDirect},
-		},
-		{
-			name: "stale positive",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessStale,
-				UpperTiersHealth: UpperTiersClean,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose},
-		},
-		{
-			name: "fresh negative with promotion allowed",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessFresh,
-				EntryNegative:    true,
-				UpperTiersHealth: UpperTiersClean,
-				Admission:        AdmissionAllowed,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyNotFound, Body: BodyNone, Publish: PublishOnEOF, Fanout: FanoutAfterPublish},
-		},
-		{
-			name: "fresh negative with promotion deferred",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessFresh,
-				EntryNegative:    true,
-				UpperTiersHealth: UpperTiersClean,
-				Admission:        AdmissionDeferred,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyNotFound, Body: BodyNone},
-		},
-		{
-			name: "stale negative",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessStale,
-				EntryNegative:    true,
-				UpperTiersHealth: UpperTiersClean,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyNotFound, Body: BodyNone, Refresh: RefreshOnClose},
-		},
-		{
-			name: "conditional matched with top store",
-			obs: Observation{
-				Source:             SourceLower,
-				SourceTier:         1,
-				Freshness:          FreshnessFresh,
-				ConditionalMatched: true,
-				UpperTiersHealth:   UpperTiersClean,
-				HasTopStore:        true,
-			},
-			want: ReadPlan{Reply: ReplyNotModified, Body: BodyNone, Refresh: RefreshOnClose},
-		},
-		{
-			name: "conditional matched without top store",
-			obs: Observation{
-				Source:             SourceLower,
-				SourceTier:         1,
-				Freshness:          FreshnessFresh,
-				ConditionalMatched: true,
-				UpperTiersHealth:   UpperTiersClean,
-				HasTopStore:        false,
-			},
-			want: ReadPlan{Reply: ReplyNotModified, Body: BodyNone},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			plan := p.Plan(tt.obs)
-			require.Equal(t, tt.want, plan)
-		})
-	}
-}
-
-func TestPlanner_Plan_LowerTierHit_DirtyUpperTiers(t *testing.T) {
-	p := &Planner{}
-
-	tests := []struct {
-		name string
-		obs  Observation
-		want ReadPlan
-	}{
-		{
-			name: "fresh positive direct serve",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessFresh,
-				UpperTiersHealth: UpperTiersDirty,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyOK, Body: BodyDirect},
-		},
-		{
-			name: "stale positive direct serve",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessStale,
-				UpperTiersHealth: UpperTiersDirty,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyOK, Body: BodyDirect, Refresh: RefreshOnClose},
-		},
-		{
-			name: "negative direct serve",
-			obs: Observation{
-				Source:           SourceLower,
-				SourceTier:       1,
-				Freshness:        FreshnessFresh,
-				EntryNegative:    true,
-				UpperTiersHealth: UpperTiersDirty,
-				HasTopStore:      true,
-			},
-			want: ReadPlan{Reply: ReplyNotFound, Body: BodyNone},
-		},
-		{
-			name: "conditional matched direct serve",
-			obs: Observation{
-				Source:             SourceLower,
-				SourceTier:         1,
-				Freshness:          FreshnessFresh,
-				ConditionalMatched: true,
-				UpperTiersHealth:   UpperTiersDirty,
-				HasTopStore:        true,
-			},
-			want: ReadPlan{Reply: ReplyNotModified, Body: BodyNone},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			plan := p.Plan(tt.obs)
-			require.Equal(t, tt.want, plan)
-		})
-	}
-}
-
-func TestPlanner_Plan_AllOutcomeCombinations(t *testing.T) {
-	p := &Planner{}
-
-	// Test that all source × freshness × conditional × admission combinations
-	// produce valid plans (no panics, all fields set)
-	sources := []SourceKind{SourceTop, SourceLower}
-	freshness := []Freshness{FreshnessFresh, FreshnessStale}
-	conditional := []bool{true, false}
-	admission := []AdmissionPolicy{AdmissionAllowed, AdmissionDeferred}
-	upperHealth := []UpperTierHealth{UpperTiersClean, UpperTiersDirty}
-	negative := []bool{true, false}
-	hasTopStore := []bool{true, false}
-
-	validReplies := map[ReplySpec]bool{
-		ReplyOK:          true,
-		ReplyNotModified: true,
-		ReplyNotFound:    true,
-	}
-
-	for _, src := range sources {
-		for _, fresh := range freshness {
-			for _, cond := range conditional {
-				for _, adm := range admission {
-					for _, health := range upperHealth {
-						for _, neg := range negative {
-							for _, top := range hasTopStore {
-								obs := Observation{
-									Source:             src,
-									Freshness:          fresh,
-									ConditionalMatched: cond,
-									Admission:          adm,
-									UpperTiersHealth:   health,
-									EntryNegative:      neg,
-									HasTopStore:        top,
-								}
-								plan := p.Plan(obs)
-								// Verify plan has a valid Reply
-								require.True(t, validReplies[plan.Reply], "obs: %+v, plan: %+v", obs, plan)
+func TestPlannerAllOutcomeCombinations(t *testing.T) {
+	planner := &Planner{}
+	bools := []bool{false, true}
+	for _, source := range []SourceKind{SourceTop, SourceLower} {
+		for _, freshness := range []Freshness{FreshnessFresh, FreshnessStale} {
+			for _, conditional := range bools {
+				for _, admission := range []AdmissionPolicy{AdmissionAllowed, AdmissionDeferred} {
+					for _, health := range []UpperTierHealth{UpperTiersClean, UpperTiersDirty} {
+						for _, negative := range bools {
+							for _, hasTop := range bools {
+								obs := Observation{Source: source, Freshness: freshness, ConditionalMatched: conditional, Admission: admission, UpperTiersHealth: health, EntryNegative: negative, HasTopStore: hasTop}
+								plan := planner.Plan(obs)
+								require.Contains(t, []ReplySpec{ReplyOK, ReplyNotModified, ReplyNotFound}, plan.Reply, "obs: %+v, plan: %+v", obs, plan)
 							}
 						}
 					}

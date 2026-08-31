@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### 🔒 Correctness
+
+*   **Authoritative lower-tier Planner**: Runtime lower-tier reads now execute the public Planner policy instead of a separate action decision tree. Generation validity remains private, conditional 304 responses are revalidated immediately before execution, and the v0.15 `Observation` layout and `Planner.Plan` behavior remain source-compatible.
+
+### 🧹 Maintenance
+
+*   Consolidated duplicate objectstore TTL/page caches and simplified runtime, write-coordinator, read-session, and test scaffolding without changing their observable contracts.
+*   Corrected fill-coordination, stampede-prevention, consistency, and observability documentation to describe implemented behavior only.
+
 ## v0.14.2
 
 ### 🔒 Correctness

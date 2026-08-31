@@ -7,12 +7,12 @@ import (
 )
 
 type Key struct {
-	Path  string
+	ID    string
 	Index int64
 }
 
 func (k Key) String() string {
-	return k.Path + ":" + strconv.FormatInt(k.Index, 10)
+	return k.ID + ":" + strconv.FormatInt(k.Index, 10)
 }
 
 type Cache struct {

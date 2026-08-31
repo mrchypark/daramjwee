@@ -109,10 +109,6 @@ func (r *Group) Register(cacheID string, cfg Config) error {
 }
 
 func (r *Group) Submit(cacheID string, kind JobKind, job Job) error {
-	return r.submit(cacheID, kind, job)
-}
-
-func (r *Group) submit(cacheID string, kind JobKind, job Job) error {
 	if r == nil {
 		if job.Discard != nil {
 			job.Discard(DropReasonRejected)
@@ -121,49 +117,32 @@ func (r *Group) submit(cacheID string, kind JobKind, job Job) error {
 	}
 
 	r.mu.Lock()
+	reject := func(reason rejectReason, depth, limit int) error {
+		r.noteRejectLocked(cacheID, kind, reason, depth, limit)
+		r.mu.Unlock()
+		if job.Discard != nil {
+			job.Discard(DropReasonRejected)
+		}
+		return ErrRejected
+	}
 	state, ok := r.caches[cacheID]
 	if !ok {
-		r.noteRejectLocked(cacheID, kind, rejectReasonCacheClosed, 0, 0)
-		r.mu.Unlock()
-		if job.Discard != nil {
-			job.Discard(DropReasonRejected)
-		}
-		return ErrRejected
+		return reject(rejectReasonCacheClosed, 0, 0)
 	}
 	if r.closing {
-		r.noteRejectLocked(cacheID, kind, rejectReasonGroupClosing, len(state.queue), state.queueLimit)
-		r.mu.Unlock()
-		if job.Discard != nil {
-			job.Discard(DropReasonRejected)
-		}
-		return ErrRejected
+		return reject(rejectReasonGroupClosing, len(state.queue), state.queueLimit)
 	}
 	if state.closed {
-		r.noteRejectLocked(cacheID, kind, rejectReasonCacheClosed, len(state.queue), state.queueLimit)
-		r.mu.Unlock()
-		if job.Discard != nil {
-			job.Discard(DropReasonRejected)
-		}
-		return ErrRejected
+		return reject(rejectReasonCacheClosed, len(state.queue), state.queueLimit)
 	}
 	depth := len(state.queue)
 	if depth >= state.queueLimit {
-		r.noteRejectLocked(cacheID, kind, rejectReasonQueueFull, depth, state.queueLimit)
-		r.mu.Unlock()
-		if job.Discard != nil {
-			job.Discard(DropReasonRejected)
-		}
-		return ErrRejected
+		return reject(rejectReasonQueueFull, depth, state.queueLimit)
 	}
 	select {
 	case state.queue <- queuedJob{cacheID: cacheID, kind: kind, job: job}:
 	default:
-		r.noteRejectLocked(cacheID, kind, rejectReasonQueueFull, len(state.queue), state.queueLimit)
-		r.mu.Unlock()
-		if job.Discard != nil {
-			job.Discard(DropReasonRejected)
-		}
-		return ErrRejected
+		return reject(rejectReasonQueueFull, len(state.queue), state.queueLimit)
 	}
 	_ = level.Debug(r.logger).Log(
 		"msg", "queued background job",

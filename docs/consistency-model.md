@@ -43,76 +43,15 @@ Writer B: Set(k, v2)
 
 ## Fill Coordination
 
-When multiple goroutines request the same key simultaneously:
+The first concurrent cold miss for a key becomes a leader. Other callers wait
+for at most 200 ms (or their context deadline), then re-read the top tier if the
+leader published or perform an independent origin fetch. They do not share the
+leader's response body or automatically receive its error.
 
-```
-┌── caller A
-miss ── fill key ─┼── caller B
-                  ├── caller C
-                  └── caller D
-
-                    │
-                    ▼
-
-                 loader()
-                    │
-                    ▼
-                 publish
-                    │
-             ┌──────┼──────┐
-             ▼      ▼      ▼
-             A      B      C
-```
-
-### Fill Guarantees
-
-1. **Single Loader**: Only one loader runs per key at a time
-2. **All Waiters Get Result**: All waiting goroutines receive the same result
-3. **Generation Fence**: Published value must match the generation observed when fill started
-
-### Fill Failure Scenarios
-
-#### A. Loader Returns Error
-
-```go
-loader() → error
-```
-
-- All waiters receive the same error
-- No value is published to cache
-- Callers can retry
-
-#### B. Context Cancellation
-
-```go
-A: loader(ctx) → cancelled
-B: wait → continues waiting
-C: wait → continues waiting
-```
-
-- If the leader is cancelled, waiters continue waiting
-- If all waiters are cancelled, loader may be cancelled
-
-#### C. Loader Panic
-
-```go
-loader() → panic
-```
-
-- Fill state is released
-- Key is not permanently stuck
-
-#### D. Stale Result (Critical Race)
-
-```go
-T1: loader A starts (generation=42)
-T2: Set(k, newer) (generation=43)
-T3: loader A finishes
-T4: loader A checks: generation 42 != 43
-T5: loader A discards result
-```
-
-**Guaranteed**: A fill cannot overwrite a newer value. The generation fence prevents this.
+Publication is a separate guarantee: the staged fill must reach EOF and close,
+and its captured generation must still be valid. Therefore an older fill cannot
+overwrite a later `Set` or resurrect a value after `Delete`. See
+[fill-coordination.md](fill-coordination.md) for the complete lifecycle.
 
 ## Deletion Semantics
 
@@ -153,23 +92,26 @@ T5: Fill discards result
 ### Promotion is Conditional
 
 ```go
-Promote(key, value, observedGeneration)
-  │
-  ├── Check: observedGeneration == currentGeneration
-  │   ├── Yes → commit promotion
-  │   └── No → discard promotion
-  │
-  └── Return data to caller regardless
+Promotion attempt
+  ├── Setup or generation validation fails before streaming
+  │   └── Return the source body directly
+  └── Streaming starts
+      ├── EOF + successful finalization → publish promotion
+      └── Sink Write/finalization error → return error; do not publish
 ```
 
 **Guaranteed**: Promotion only succeeds if the generation has not changed since the value was read.
 
-### Promotion Failure is Non-Fatal
+### Promotion Setup Failure is Non-Fatal
 
-If promotion fails (due to generation mismatch, disk full, etc.):
+If promotion cannot start (for example, due to a generation mismatch or writer
+acquisition failure):
 - Caller still receives the data
 - Cache is not populated
 - This is a cache degradation, not a data retrieval failure
+
+After streaming starts, a sink write or finalization failure is returned to the
+caller and the partial promotion is aborted.
 
 ## ObjectStore Consistency
 
@@ -201,8 +143,8 @@ If promotion fails (due to generation mismatch, disk full, etc.):
 4. **Concurrent Delete and Get**: Verify in-progress gets can return old value
 5. **Fill then Delete**: Verify fill is discarded after delete
 6. **Generation Fence**: Verify stale fills are discarded
-7. **Loader Error**: Verify all waiters receive error
-8. **Loader Panic**: Verify fill state is released
+7. **Fetcher Error**: Verify the leader receives its error while waiters are released, re-read the top tier, and independently fetch when no publication occurred; the leader error is not broadcast
+8. **Fetcher Panic**: Verify fill state is released
 
 ### Stress Testing
 

@@ -1,6 +1,7 @@
 package objectstore
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,8 +10,16 @@ import (
 )
 
 type localCatalogEntry = internalcatalog.Entry
+type uploadPlan = internalcatalog.UploadPlan
+type uploadPlanMember = internalcatalog.UploadPlanMember
 
-var errMissingLocalEntry = errors.New("objectstore: missing local entry data")
+var (
+	// ErrAmbiguousCommit means a catalog snapshot was renamed but its directory
+	// durability could not be confirmed. The store remains fail-closed until
+	// the catalog is explicitly reconciled.
+	ErrAmbiguousCommit   = internalcatalog.ErrAmbiguousCommit
+	errMissingLocalEntry = errors.New("objectstore: missing local entry data")
+)
 
 func (s *Store) loadLocalEntry(key string) (localCatalogEntry, bool, error) {
 	if s.catalog == nil {
@@ -20,16 +29,23 @@ func (s *Store) loadLocalEntry(key string) (localCatalogEntry, bool, error) {
 	return entry, ok, nil //nolint:unparam // error always nil; kept for interface consistency
 }
 
-func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) {
+func (s *Store) loadLiveLocalEntry(ctx context.Context, key string) (localCatalogEntry, bool, error) {
 	entry, ok, err := s.loadLocalEntry(key)
 	if err != nil || !ok {
 		return localCatalogEntry{}, ok, err
 	}
 	resolved, live, needsRepair, err := resolveLocalEntry(entry)
-	if err != nil || live || !needsRepair {
+	if err != nil {
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
+	}
+	if live || !needsRepair {
 		return resolved, live, err
 	}
 
+	if err := s.flushRun.acquire(ctx); err != nil {
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
+	}
+	defer s.flushRun.release()
 	s.lockManager.Lock(key)
 	defer s.lockManager.Unlock(key)
 
@@ -38,14 +54,17 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 		return localCatalogEntry{}, false, err
 	}
 	resolved, live, needsRepair, err = resolveLocalEntry(latest)
-	if err != nil || live || !needsRepair {
+	if err != nil {
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
+	}
+	if live || !needsRepair {
 		return resolved, live, err
 	}
 
 	repaired := repairedEntryWithoutLocalSegment(latest)
 	published, err := s.publishLocalEntry(key, repaired)
 	if err != nil {
-		return localCatalogEntry{}, false, err
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
 	}
 	if !published {
 		current, ok, err := s.loadLocalEntry(key) //nolint:govet // shadow: retry after lock acquisition
@@ -53,25 +72,36 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 			return localCatalogEntry{}, ok, err
 		}
 		resolved, live, needsRepair, err = resolveLocalEntry(current)
-		if needsRepair {
-			repairedCurrent := repairedEntryWithoutLocalSegment(current)
-			if repairedCurrent.Missing {
-				return localCatalogEntry{}, false, errMissingLocalEntry
-			}
-			return localCatalogEntry{}, false, nil
+		if err != nil {
+			return localCatalogEntry{}, false, uncertainRead(ctx, err)
 		}
-		return resolved, live, err
+		if needsRepair {
+			return localCatalogEntry{}, false, uncertainRead(ctx, errMissingLocalEntry)
+		}
+		return resolved, live, nil
 	}
 	resolved, live, _, err = resolveLocalEntry(repaired)
-	return resolved, live, err
+	if err != nil {
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
+	}
+	return resolved, live, nil
 }
 
 func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, error) {
+	if entry.Superseded {
+		return localCatalogEntry{}, false, false, nil
+	}
 	if entry.Missing {
+		if entry.RemotePublished {
+			return entry, false, false, nil
+		}
 		return localCatalogEntry{}, false, false, errMissingLocalEntry
 	}
 	if entry.SegmentPath == "" {
-		return localCatalogEntry{}, false, false, nil
+		if entry.PendingRemotePath != "" {
+			return localCatalogEntry{}, false, false, errMissingLocalEntry
+		}
+		return entry, false, false, nil
 	}
 	if _, err := os.Stat(entry.SegmentPath); err == nil {
 		return entry, true, false, nil
@@ -84,7 +114,7 @@ func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, 
 func repairedEntryWithoutLocalSegment(entry localCatalogEntry) localCatalogEntry {
 	entry.SegmentPath = ""
 	entry.Offset = 0
-	if entry.RemotePath != "" {
+	if entry.RemotePath != "" || entry.PendingRemotePath != "" {
 		return entry
 	}
 	entry.Missing = true
@@ -102,7 +132,7 @@ func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) (bool, er
 		applied   bool
 		staleSeen bool
 	)
-	if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+	committed, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		prev, ok = current, exists
 		if exists && current.Generation > entry.Generation {
 			staleSeen = true
@@ -110,23 +140,37 @@ func (s *Store) publishLocalEntry(key string, entry localCatalogEntry) (bool, er
 		}
 		applied = true
 		return entry, true
-	}); err != nil {
-		return false, err
+	})
+	published := committed && applied && !staleSeen
+	if published && ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
+		if err == nil {
+			s.markLocalSegmentReclaimable(prev.SegmentPath)
+		} else {
+			s.deferLocalSegmentReclaim(prev.SegmentPath)
+		}
 	}
-	if staleSeen || !applied {
-		return false, nil
-	}
-	if ok && prev.SegmentPath != "" && prev.SegmentPath != entry.SegmentPath {
-		s.markLocalSegmentReclaimable(prev.SegmentPath)
-	}
-	return true, nil
+	return published, err
 }
 
-func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) error {
-	if s.catalog == nil {
-		return nil
+func (s *Store) updateLocalEntry(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error) {
+	if s.updateCatalog == nil {
+		return true, nil
 	}
-	return s.catalog.Update(key, fn)
+	return s.updateCatalog(key, fn)
+}
+
+func (s *Store) updateLocalEntriesIf(expected, updates map[string]localCatalogEntry) (bool, error) {
+	if s.updateCatalogManyIf == nil {
+		return true, nil
+	}
+	return s.updateCatalogManyIf(expected, updates)
+}
+
+func (s *Store) updateLocalEntriesAndPlansIf(expected, updates map[string]localCatalogEntry, planUpdates map[string]uploadPlan, planDeletes []string) (bool, error) {
+	if s.updateCatalogState == nil {
+		return true, nil
+	}
+	return s.updateCatalogState(expected, updates, planUpdates, planDeletes)
 }
 
 func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCatalogEntry) error {
@@ -139,17 +183,95 @@ func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCata
 			continue
 		}
 		applied := false
-		if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+		committed, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 			if !exists || current != expected {
 				return current, exists
 			}
 			applied = true
 			return next, true
-		}); err != nil {
+		})
+		if committed && applied && expected.SegmentPath != "" && expected.SegmentPath != next.SegmentPath {
+			if err == nil {
+				s.markLocalSegmentReclaimable(expected.SegmentPath)
+			} else {
+				s.deferLocalSegmentReclaim(expected.SegmentPath)
+			}
+		}
+		if err != nil {
 			return err
 		}
-		if applied && expected.SegmentPath != "" && expected.SegmentPath != next.SegmentPath {
-			s.markLocalSegmentReclaimable(expected.SegmentPath)
+	}
+	return nil
+}
+
+func (s *Store) commitPublishedTombstones(expectedEntries map[string]localCatalogEntry) error {
+	if s.catalog == nil {
+		return nil
+	}
+	for key, expected := range expectedEntries {
+		if !expected.Missing || expected.RemotePublished {
+			continue
+		}
+		_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			if !exists || current != expected {
+				return current, exists
+			}
+			current.RemotePublished = true
+			current.CleanupPending = true
+			return current, true
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) commitCleanedUploadIntents(expectedEntries map[string]localCatalogEntry) error {
+	if s.catalog == nil {
+		return nil
+	}
+	for key, expected := range expectedEntries {
+		if !expected.IntentCleanupPending || expected.RemotePath == "" {
+			continue
+		}
+		_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			if !exists || current.RemotePath != expected.RemotePath {
+				return current, exists
+			}
+			if current.Superseded {
+				return localCatalogEntry{}, false
+			}
+			current.IntentCleanupPending = false
+			return current, true
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) commitCleanedTombstones(expectedEntries map[string]localCatalogEntry) error {
+	if s.catalog == nil {
+		return nil
+	}
+	for key, expected := range expectedEntries {
+		if !expected.Missing {
+			continue
+		}
+		_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			if !exists || !current.Missing || !current.RemotePublished {
+				return current, exists
+			}
+			if current.Superseded {
+				return localCatalogEntry{}, false
+			}
+			current.CleanupPending = false
+			return current, true
+		})
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -165,7 +287,7 @@ func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, err
 		applied         bool
 		staleSeen       bool
 	)
-	if err := s.catalog.Update(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+	committed, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		if exists && current.Generation > generation {
 			staleSeen = true
 			return current, true
@@ -175,21 +297,23 @@ func (s *Store) publishDeleteTombstone(key string, generation uint64) (bool, err
 			previousSegment = current.SegmentPath
 		}
 		tombstone := localCatalogEntry{
-			Generation: generation,
-			Missing:    true,
-			Metadata:   current.Metadata,
+			Generation:       generation,
+			Missing:          true,
+			CleanupPending:   true,
+			PublicationToken: s.nextVersion(),
+			Metadata:         current.Metadata,
 		}
 		return tombstone, true
-	}); err != nil {
-		return false, err
+	})
+	published := committed && applied && !staleSeen
+	if published && previousSegment != "" {
+		if err == nil {
+			s.markLocalSegmentReclaimable(previousSegment)
+		} else {
+			s.deferLocalSegmentReclaim(previousSegment)
+		}
 	}
-	if staleSeen || !applied {
-		return false, nil
-	}
-	if previousSegment != "" {
-		s.markLocalSegmentReclaimable(previousSegment)
-	}
-	return true, nil
+	return published, err
 }
 
 func removeLocalSegment(path string) error {

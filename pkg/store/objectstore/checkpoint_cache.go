@@ -3,132 +3,99 @@ package objectstore
 import (
 	"sync"
 	"time"
-
-	"github.com/mrchypark/daramjwee"
-	"github.com/mrchypark/daramjwee/pkg/policy"
 )
 
 const defaultCheckpointCacheTTL = 2 * time.Second
 
-type checkpointCacheEntry struct {
-	checkpoint *checkpoint
-	sizeBytes  int64
-	expiresAt  time.Time
-}
-
 type checkpointCache struct {
-	mu       sync.Mutex
-	entries  map[string]checkpointCacheEntry
-	policy   daramjwee.EvictionPolicy
-	maxBytes int64
-	current  int64
-	ttl      time.Duration
-	now      func() time.Time
+	*ttlCache[*checkpoint]
+	mu         sync.Mutex
+	entryEpoch map[string]uint64
 }
 
 func newCheckpointCache(maxBytes int64, ttl time.Duration, now func() time.Time) *checkpointCache {
-	if maxBytes <= 0 {
-		return nil
-	}
 	if ttl <= 0 {
 		ttl = defaultCheckpointCacheTTL
 	}
-	if now == nil {
-		now = time.Now
+	cache := newTTLCache(maxBytes, ttl, now, cloneCheckpoint)
+	if cache == nil {
+		return nil
 	}
-	return &checkpointCache{
-		entries:  make(map[string]checkpointCacheEntry),
-		policy:   policy.NewLRU(),
-		maxBytes: maxBytes,
-		ttl:      ttl,
-		now:      now,
-	}
+	return &checkpointCache{ttlCache: cache, entryEpoch: make(map[string]uint64)}
 }
 
-func (c *checkpointCache) Get(shardID string) (*checkpoint, bool) {
+func (c *checkpointCache) Get(key string) (*checkpoint, bool) {
 	if c == nil {
 		return nil, false
 	}
+	return c.ttlCache.Get("checkpoint:" + key)
+}
 
+func (c *checkpointCache) Set(key string, value *checkpoint, sizeBytes int64) {
+	if c == nil || value == nil {
+		return
+	}
+	c.ttlCache.Set("checkpoint:"+key, value, sizeBytes)
+}
+
+func (c *checkpointCache) GetEntry(key string) (checkpointEntry, bool, bool) {
+	if c == nil {
+		return checkpointEntry{}, false, false
+	}
+	value, cached := c.ttlCache.Get("entry:" + key)
+	if !cached {
+		return checkpointEntry{}, false, false
+	}
+	entry, exists := value.Entries[key]
+	return entry, exists, true
+}
+
+func (c *checkpointCache) SetEntry(key string, entry *checkpointEntry, sizeBytes int64) {
+	if c == nil {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	entry, ok := c.entries[shardID]
-	if !ok {
-		return nil, false
-	}
-	if !entry.expiresAt.IsZero() && c.now().After(entry.expiresAt) {
-		c.removeLocked(shardID)
-		return nil, false
-	}
-	c.policy.Touch(shardID)
-	return cloneCheckpoint(entry.checkpoint), true
+	c.entryEpoch[key]++
+	c.setEntry(key, entry, sizeBytes)
 }
 
-func (c *checkpointCache) Set(shardID string, cp *checkpoint, sizeBytes int64) {
-	if c == nil || cp == nil {
-		return
+func (c *checkpointCache) entryReadEpoch(key string) uint64 {
+	if c == nil {
+		return 0
 	}
-	if sizeBytes <= 0 {
-		sizeBytes = 1
-	}
-	if sizeBytes > c.maxBytes {
-		c.mu.Lock()
-		c.removeLocked(shardID)
-		c.mu.Unlock()
-		return
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if old, ok := c.entries[shardID]; ok {
-		c.current -= old.sizeBytes
-		c.policy.Remove(shardID)
-		delete(c.entries, shardID)
-	}
-
-	c.entries[shardID] = checkpointCacheEntry{
-		checkpoint: cloneCheckpoint(cp),
-		sizeBytes:  sizeBytes,
-		expiresAt:  c.now().Add(c.ttl),
-	}
-	c.current += sizeBytes
-	c.policy.Add(shardID, sizeBytes)
-
-	for c.current > c.maxBytes {
-		evicted := c.policy.Evict()
-		if len(evicted) == 0 {
-			break
-		}
-		for _, key := range evicted {
-			c.removeLocked(key)
-		}
-	}
+	return c.entryEpoch[key]
 }
 
-func (c *checkpointCache) removeLocked(shardID string) {
-	entry, ok := c.entries[shardID]
-	if !ok {
+func (c *checkpointCache) setEntryIfEpoch(key string, entry *checkpointEntry, sizeBytes int64, epoch uint64) {
+	if c == nil {
 		return
 	}
-	delete(c.entries, shardID)
-	c.policy.Remove(shardID)
-	c.current -= entry.sizeBytes
-	if c.current < 0 {
-		c.current = 0
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entryEpoch[key] != epoch {
+		return
 	}
+	c.entryEpoch[key]++
+	c.setEntry(key, entry, sizeBytes)
 }
 
-func cloneCheckpoint(cp *checkpoint) *checkpoint {
-	if cp == nil {
+func (c *checkpointCache) setEntry(key string, entry *checkpointEntry, sizeBytes int64) {
+	entries := make(map[string]checkpointEntry, 1)
+	if entry != nil {
+		entries[key] = *entry
+	}
+	c.ttlCache.Set("entry:"+key, &checkpoint{Entries: entries}, sizeBytes)
+}
+
+func cloneCheckpoint(value *checkpoint) *checkpoint {
+	if value == nil {
 		return nil
 	}
-	cloned := &checkpoint{
-		UpdatedAt: cp.UpdatedAt,
-		Entries:   make(map[string]checkpointEntry, len(cp.Entries)),
-	}
-	for key, entry := range cp.Entries {
+	cloned := &checkpoint{UpdatedAt: value.UpdatedAt, Entries: make(map[string]checkpointEntry, len(value.Entries))}
+	for key, entry := range value.Entries {
 		cloned.Entries[key] = entry
 	}
 	return cloned

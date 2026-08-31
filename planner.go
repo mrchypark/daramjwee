@@ -1,305 +1,198 @@
 package daramjwee
 
-// SourceKind describes where the cache entry was found.
+// SourceKind identifies where a cache lookup found an entry.
 type SourceKind int
 
 const (
-	// SourceNone indicates no cache entry was found (full miss).
 	SourceNone SourceKind = iota
-	// SourceTop indicates the entry was found in tier 0 (top/hot tier).
 	SourceTop
-	// SourceLower indicates the entry was found in a tier below tier 0.
 	SourceLower
 )
 
-// Freshness describes whether a cache entry is fresh or stale.
+// Freshness classifies a cache entry by its freshness window.
 type Freshness int
 
 const (
-	// FreshnessFresh indicates the entry is within its freshness window.
 	FreshnessFresh Freshness = iota
-	// FreshnessStale indicates the entry is beyond its freshness window.
 	FreshnessStale
 )
 
-// UpperTierHealth describes the health of tiers above the current one.
+// UpperTierHealth reports whether every tier above the source was readable.
 type UpperTierHealth int
 
 const (
-	// UpperTiersClean indicates all upper tiers responded without errors.
 	UpperTiersClean UpperTierHealth = iota
-	// UpperTiersDirty indicates at least one upper tier had an error.
 	UpperTiersDirty
 )
 
-// AdmissionPolicy controls whether a lower-tier entry can be promoted.
+// AdmissionPolicy controls lower-tier promotion.
 type AdmissionPolicy int
 
 const (
-	// AdmissionAllowed indicates the entry can be promoted to top tier.
 	AdmissionAllowed AdmissionPolicy = iota
-	// AdmissionDeferred indicates the entry should not be promoted yet (probation).
 	AdmissionDeferred
 )
 
-// Observation is a pure fact about what was discovered during a cache lookup.
-// It contains no I/O objects or mutable state - just facts.
+// generationValidity reports whether the top-write generation observed before
+// a lower-tier read is still valid. It stays private so adding runtime safety
+// does not change the public Observation layout.
+type generationValidity int
+
+const (
+	generationUnspecified generationValidity = iota
+	generationValid
+	generationInvalid
+)
+
+// Observation contains the I/O-free facts used to plan a cache read.
 type Observation struct {
-	// Source indicates where the entry was found.
-	Source SourceKind
-
-	// SourceTier is the tier index where the entry was found.
-	// Only meaningful when Source is SourceTop or SourceLower.
-	SourceTier int
-
-	// EntryNegative indicates the cached entry is a negative cache marker.
-	EntryNegative bool
-
-	// Freshness indicates whether the entry is fresh or stale.
-	Freshness Freshness
-
-	// ConditionalMatched indicates the request's If-None-Match matched.
+	Source             SourceKind
+	SourceTier         int
+	EntryNegative      bool
+	Freshness          Freshness
 	ConditionalMatched bool
-
-	// UpperTiersHealth indicates whether tiers above SourceTier are clean.
-	UpperTiersHealth UpperTierHealth
-
-	// Admission indicates whether promotion is allowed.
-	Admission AdmissionPolicy
-
-	// HasTopStore indicates whether a writable top tier exists.
-	HasTopStore bool
+	UpperTiersHealth   UpperTierHealth
+	Admission          AdmissionPolicy
+	HasTopStore        bool
 }
 
-// ReplySpec describes what response to send to the caller.
 type ReplySpec int
 
 const (
-	// ReplyOK indicates a 200 OK response with a body.
 	ReplyOK ReplySpec = iota
-	// ReplyNotModified indicates a 304 Not Modified response.
 	ReplyNotModified
-	// ReplyNotFound indicates a 404 Not Found response.
 	ReplyNotFound
 )
 
-// BodySpec describes how to handle the response body.
 type BodySpec int
 
 const (
-	// BodyNone indicates no body (e.g., 304 or 404 response).
 	BodyNone BodySpec = iota
-	// BodyDirect indicates the body comes directly from the source.
 	BodyDirect
-	// BodyStream indicates the body should be streamed through a fill sink.
 	BodyStream
 )
 
-// PublishSpec describes whether and how to publish to top tier.
 type PublishSpec int
 
 const (
-	// PublishNone indicates no publish to top tier.
 	PublishNone PublishSpec = iota
-	// PublishOnEOF indicates the entry should be published after EOF.
 	PublishOnEOF
 )
 
-// RefreshSpec describes whether to schedule a background refresh.
 type RefreshSpec int
 
 const (
-	// RefreshNone indicates no background refresh.
 	RefreshNone RefreshSpec = iota
-	// RefreshOnClose indicates a refresh should be scheduled when the body closes.
 	RefreshOnClose
 )
 
-// FanoutSpec describes whether to fanout to lower tiers after publish.
 type FanoutSpec int
 
 const (
-	// FanoutNone indicates no fanout.
 	FanoutNone FanoutSpec = iota
-	// FanoutAfterPublish indicates fanout should happen after successful publish.
 	FanoutAfterPublish
 )
 
-// ReadPlan is a pure description of what to do with a cache hit or miss.
-// It is produced by the Planner and consumed by the Executor.
+// ReadPlan describes the response and side effects for a cache read.
 type ReadPlan struct {
-	// Reply specifies the response status code.
-	Reply ReplySpec
-
-	// Body specifies how to handle the response body.
-	Body BodySpec
-
-	// Publish specifies whether to publish to top tier.
+	Reply   ReplySpec
+	Body    BodySpec
 	Publish PublishSpec
-
-	// Refresh specifies whether to schedule a background refresh.
 	Refresh RefreshSpec
-
-	// Fanout specifies whether to fanout to lower tiers.
-	Fanout FanoutSpec
+	Fanout  FanoutSpec
 }
 
-// Planner is a pure function that converts observations into read plans.
-// It contains no state and performs no I/O.
+// Planner converts observations into read plans without performing I/O.
 type Planner struct{}
 
-// Plan computes a ReadPlan from an Observation and request facts.
 func (p *Planner) Plan(obs Observation) ReadPlan {
+	return p.plan(obs, generationUnspecified)
+}
+
+func (p *Planner) plan(obs Observation, topGeneration generationValidity) ReadPlan {
 	switch obs.Source {
 	case SourceNone:
-		return p.planMiss(obs)
+		return ReadPlan{Reply: ReplyOK, Body: BodyStream, Publish: PublishOnEOF, Fanout: FanoutAfterPublish}
 	case SourceTop:
 		return p.planTopTierHit(obs)
 	case SourceLower:
-		return p.planLowerTierHit(obs)
+		return p.planLowerTierHit(obs, topGeneration)
 	default:
-		return ReadPlan{Reply: ReplyNotFound, Body: BodyNone}
+		return ReadPlan{Reply: ReplyNotFound}
 	}
 }
 
-func (p *Planner) planMiss(_ Observation) ReadPlan {
-	// Full miss: fetch from origin, stream through fill sink, publish on EOF.
-	return ReadPlan{
-		Reply:   ReplyOK,
-		Body:    BodyStream,
-		Publish: PublishOnEOF,
-		Fanout:  FanoutAfterPublish,
+func (*Planner) planTopTierHit(obs Observation) (plan ReadPlan) {
+	switch {
+	case obs.ConditionalMatched:
+		plan.Reply = ReplyNotModified
+	case obs.EntryNegative:
+		plan.Reply = ReplyNotFound
+	default:
+		plan.Body = BodyDirect
 	}
+	if obs.Freshness == FreshnessStale && (obs.ConditionalMatched || !obs.EntryNegative) {
+		plan.Refresh = RefreshOnClose
+	}
+	return plan
 }
 
-func (p *Planner) planTopTierHit(obs Observation) ReadPlan {
-	// Conditional request satisfied
-	if obs.ConditionalMatched {
-		if obs.Freshness == FreshnessStale {
-			return ReadPlan{
-				Reply:   ReplyNotModified,
-				Body:    BodyNone,
-				Refresh: RefreshOnClose,
-			}
-		}
-		return ReadPlan{
-			Reply: ReplyNotModified,
-			Body:  BodyNone,
-		}
-	}
-
-	// Negative entry
-	if obs.EntryNegative {
-		return ReadPlan{
-			Reply: ReplyNotFound,
-			Body:  BodyNone,
-		}
-	}
-
-	// Positive entry - serve directly from source
-	if obs.Freshness == FreshnessStale {
-		return ReadPlan{
-			Reply:   ReplyOK,
-			Body:    BodyDirect,
-			Refresh: RefreshOnClose,
-		}
-	}
-	return ReadPlan{
-		Reply: ReplyOK,
-		Body:  BodyDirect,
-	}
-}
-
-func (p *Planner) planLowerTierHit(obs Observation) ReadPlan {
-	// Higher tiers dirty - serve directly without promotion
+func (p *Planner) planLowerTierHit(obs Observation, topGeneration generationValidity) (plan ReadPlan) {
 	if obs.UpperTiersHealth == UpperTiersDirty {
+		if obs.ConditionalMatched && topGeneration == generationUnspecified {
+			return ReadPlan{Reply: ReplyNotModified}
+		}
 		return p.planDirectServe(obs)
 	}
-
-	// Conditional request satisfied with clean upper tiers
 	if obs.ConditionalMatched {
-		if obs.HasTopStore {
-			return ReadPlan{
-				Reply:   ReplyNotModified,
-				Body:    BodyNone,
-				Refresh: RefreshOnClose,
+		if topGeneration == generationUnspecified {
+			plan.Reply = ReplyNotModified
+			if obs.HasTopStore {
+				plan.Refresh = RefreshOnClose
 			}
+			return plan
 		}
-		return ReadPlan{
-			Reply: ReplyNotModified,
-			Body:  BodyNone,
+		if topGeneration != generationValid {
+			return p.planDirectServe(obs)
 		}
-	}
-
-	// Negative entry
-	if obs.EntryNegative {
+		plan.Reply = ReplyNotModified
 		if obs.Freshness == FreshnessStale {
-			return ReadPlan{
-				Reply:   ReplyNotFound,
-				Body:    BodyNone,
-				Refresh: RefreshOnClose,
-			}
+			plan.Refresh = RefreshOnClose
 		}
-		if obs.HasTopStore && obs.Admission == AdmissionAllowed {
-			return ReadPlan{
-				Reply:   ReplyNotFound,
-				Body:    BodyNone,
-				Publish: PublishOnEOF,
-				Fanout:  FanoutAfterPublish,
-			}
+		return plan
+	}
+	if obs.EntryNegative {
+		plan.Reply = ReplyNotFound
+		if obs.Freshness == FreshnessStale {
+			plan.Refresh = RefreshOnClose
+		} else if obs.HasTopStore && obs.Admission == AdmissionAllowed {
+			plan.Publish, plan.Fanout = PublishOnEOF, FanoutAfterPublish
 		}
-		return ReadPlan{
-			Reply: ReplyNotFound,
-			Body:  BodyNone,
-		}
+		return plan
 	}
 
-	// Stale entry
+	plan.Reply = ReplyOK
 	if obs.Freshness == FreshnessStale {
-		return ReadPlan{
-			Reply:   ReplyOK,
-			Body:    BodyDirect,
-			Refresh: RefreshOnClose,
-		}
+		plan.Body, plan.Refresh = BodyDirect, RefreshOnClose
+	} else if obs.HasTopStore && obs.Admission == AdmissionAllowed {
+		plan.Body, plan.Publish, plan.Fanout = BodyStream, PublishOnEOF, FanoutAfterPublish
+	} else {
+		plan.Body = BodyDirect
 	}
-
-	// Fresh positive entry - promote to top tier
-	if obs.HasTopStore && obs.Admission == AdmissionAllowed {
-		return ReadPlan{
-			Reply:   ReplyOK,
-			Body:    BodyStream,
-			Publish: PublishOnEOF,
-			Fanout:  FanoutAfterPublish,
-		}
-	}
-	return ReadPlan{
-		Reply: ReplyOK,
-		Body:  BodyDirect,
-	}
+	return plan
 }
 
-func (p *Planner) planDirectServe(obs Observation) ReadPlan {
-	if obs.ConditionalMatched {
-		return ReadPlan{
-			Reply: ReplyNotModified,
-			Body:  BodyNone,
+func (*Planner) planDirectServe(obs Observation) (plan ReadPlan) {
+	switch {
+	case obs.ConditionalMatched:
+		plan.Body = BodyDirect
+	case obs.EntryNegative:
+		plan.Reply = ReplyNotFound
+	default:
+		plan.Body = BodyDirect
+		if obs.Freshness == FreshnessStale {
+			plan.Refresh = RefreshOnClose
 		}
 	}
-	if obs.EntryNegative {
-		return ReadPlan{
-			Reply: ReplyNotFound,
-			Body:  BodyNone,
-		}
-	}
-	if obs.Freshness == FreshnessStale {
-		return ReadPlan{
-			Reply:   ReplyOK,
-			Body:    BodyDirect,
-			Refresh: RefreshOnClose,
-		}
-	}
-	return ReadPlan{
-		Reply: ReplyOK,
-		Body:  BodyDirect,
-	}
+	return plan
 }

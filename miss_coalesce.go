@@ -2,7 +2,6 @@ package daramjwee
 
 import (
 	"context"
-	"io"
 	"sync"
 	"time"
 )
@@ -103,28 +102,4 @@ func (m *missCoordinator) release(key string, lead *missLead) {
 		return
 	}
 	m.leads.CompareAndDelete(key, lead)
-}
-
-// missSignalReadCloser signals the miss lead when the response body is
-// closed, which is the point where a streaming miss fill becomes visible
-// in the top tier (or is aborted). onDone runs once after the signal and
-// is used to release the leader registration exactly at fill completion.
-type missSignalReadCloser struct {
-	io.ReadCloser
-	once   sync.Once
-	done   chan struct{}
-	onDone func()
-}
-
-func (r *missSignalReadCloser) Close() error {
-	err := r.ReadCloser.Close()
-	if r.done != nil {
-		r.once.Do(func() {
-			close(r.done)
-			if r.onDone != nil {
-				r.onDone()
-			}
-		})
-	}
-	return err
 }

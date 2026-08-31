@@ -100,6 +100,7 @@ func TestMissCoalescing_ConcurrentMissesShareOriginFetch(t *testing.T) {
 		nil,
 		daramjwee.WithTiers(hot),
 		daramjwee.WithOpTimeout(5*time.Second),
+		daramjwee.WithFreshness(time.Minute, time.Minute),
 	)
 	require.NoError(t, err)
 	defer cache.Close()

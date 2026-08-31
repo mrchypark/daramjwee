@@ -19,18 +19,6 @@ var ErrCacheClosed = errors.New("daramjwee: cache is closed")
 var ErrNilMetadata = errors.New("daramjwee: nil metadata encountered")
 var ErrBackgroundJobRejected = errors.New("daramjwee: background job rejected")
 
-type lowerTierPromotionInvalidatedError struct {
-	preserveBody bool
-}
-
-func (e lowerTierPromotionInvalidatedError) Error() string {
-	return ErrTopWriteInvalidated.Error()
-}
-
-func (e lowerTierPromotionInvalidatedError) Is(target error) bool {
-	return target == ErrTopWriteInvalidated
-}
-
 // cacheConfig holds the immutable configuration for a DaramjweeCache instance.
 type cacheConfig struct {
 	opTimeout              time.Duration
@@ -121,16 +109,29 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 		if errors.Is(err, ErrNilMetadata) {
 			return nil, err
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if errors.Is(err, ErrReadStateUncertain) {
+			return nil, err
+		}
 	}
 
 	// Slow path: need timeout context for lower tiers and origin fetch
 	topGenerationAtStart := c.currentTopWriteGeneration(key)
 	setupCtx, cancel := c.newCtxWithTimeout(ctx)
 	session := newReadSession(nil, cancel, topGenerationAtStart)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_ = session.Finish(OutcomeReadError)
+			panic(recovered)
+		}
+	}()
 	higherTiersClean := true
 
 	for i, tier := range c.tiers {
-		tierStream, tierMeta, err := c.getStreamFromStore(c.getStreamContextForStore(ctx, setupCtx, tier), tier, key)
+		readCtx := c.getStreamContextForStore(ctx, setupCtx, tier)
+		tierStream, tierMeta, err := c.getStreamFromStore(readCtx, tier, key)
 		if err == nil {
 			if i == 0 {
 				resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart, nil, 0)
@@ -160,6 +161,14 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 			return c.attachSession(resp, session)
 		}
 		if errors.Is(err, ErrNilMetadata) {
+			_ = session.Finish(OutcomeReadError)
+			return nil, err
+		}
+		if readCtx.Err() != nil {
+			_ = session.Finish(OutcomeReadError)
+			return nil, readCtx.Err()
+		}
+		if errors.Is(err, ErrReadStateUncertain) {
 			_ = session.Finish(OutcomeReadError)
 			return nil, err
 		}

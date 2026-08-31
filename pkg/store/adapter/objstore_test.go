@@ -28,6 +28,7 @@ func TestObjstoreAdapter_ReadsLegacyObjects(t *testing.T) {
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("legacy-key"), strings.NewReader(string(metaBytes))))
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, store.(io.Closer).Close()) })
 
 	reader, meta, err := store.GetStream(ctx, "legacy-key")
 	require.NoError(t, err)
@@ -51,6 +52,7 @@ func TestObjstoreAdapter_PrefersModernEntriesOverLegacyFallback(t *testing.T) {
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("same-key"), strings.NewReader(string(metaBytes))))
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, store.(io.Closer).Close()) })
 	writer, err := store.BeginSet(ctx, "same-key", &daramjwee.Metadata{CacheTag: "modern"})
 	require.NoError(t, err)
 	_, err = io.WriteString(writer, "modern body")
@@ -71,6 +73,7 @@ func TestObjstoreAdapter_StagedWriteCommitsOnlyOnCommit(t *testing.T) {
 	ctx := context.Background()
 	bucket := objstore.NewInMemBucket()
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, store.(io.Closer).Close()) })
 	staging, ok := store.(daramjwee.StagingStore)
 	require.True(t, ok)
 
@@ -100,6 +103,7 @@ func TestObjstoreAdapter_DeleteRemovesLegacyObjects(t *testing.T) {
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("legacy-delete"), strings.NewReader(string(metaBytes))))
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, store.(io.Closer).Close()) })
 	require.NoError(t, store.Delete(ctx, "legacy-delete"))
 
 	_, _, err := store.GetStream(ctx, "legacy-delete")
@@ -113,6 +117,7 @@ func TestObjstoreAdapter_DeleteDoesNotRemoveRawNamesWithoutLegacyMetadata(t *tes
 	require.NoError(t, bucket.Upload(ctx, key, strings.NewReader("internal object body")))
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, store.(io.Closer).Close()) })
 	require.NoError(t, store.Delete(ctx, key))
 
 	reader, err := bucket.Get(ctx, key)
@@ -131,6 +136,7 @@ func TestObjstoreAdapter_DeleteRemovesOrphanedLegacyPayloadWithoutMetadata(t *te
 	require.NoError(t, bucket.Upload(ctx, key, strings.NewReader("legacy body")))
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, store.(io.Closer).Close()) })
 	require.NoError(t, store.Delete(ctx, key))
 
 	_, err := bucket.Get(ctx, key)
@@ -144,6 +150,7 @@ func TestObjstoreAdapter_DeleteRemovesLegacyObjectsEvenWithCorruptMetadata(t *te
 	require.NoError(t, bucket.Upload(ctx, legacyMetaPath("legacy-corrupt"), strings.NewReader("{invalid json")))
 
 	store := NewObjstoreAdapter(bucket, log.NewNopLogger(), objectstore.WithDir(t.TempDir()))
+	t.Cleanup(func() { require.NoError(t, store.(io.Closer).Close()) })
 	require.NoError(t, store.Delete(ctx, "legacy-corrupt"))
 
 	_, err := bucket.Get(ctx, "legacy-corrupt")

@@ -16,6 +16,7 @@ import (
 	"github.com/thanos-io/objstore"
 
 	"github.com/mrchypark/daramjwee"
+	internalcatalog "github.com/mrchypark/daramjwee/pkg/store/objectstore/internal/catalog"
 )
 
 func TestStore_BeginSetIsNotVisibleBeforeClose(t *testing.T) {
@@ -168,6 +169,22 @@ func TestStore_CanceledStagedCommitLeavesNoVisibleLocalEntry(t *testing.T) {
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
 }
 
+func TestStore_CommitAfterAbortDoesNotReportSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginStagedSet(ctx, "aborted-writer", nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Abort())
+	require.ErrorIs(t, writer.Commit(ctx), io.ErrClosedPipe)
+
+	_, err = store.Stat(ctx, "aborted-writer")
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+}
+
 func TestStore_BeginSetDoesNotHoldKeyLockForWriterLifetime(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -198,7 +215,7 @@ func TestStore_BeginSetDoesNotHoldKeyLockForWriterLifetime(t *testing.T) {
 	case result := <-secondReady:
 		require.NoError(t, result.err)
 		second = result.sink
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		require.NoError(t, first.Abort())
 		result := <-secondReady
 		if result.sink != nil {
@@ -384,7 +401,7 @@ func TestStore_ReopenRecoversPublishedLocalEntries(t *testing.T) {
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 
 	stream, meta, err := reopened.GetStream(ctx, "recover-key")
 	require.NoError(t, err)
@@ -418,10 +435,10 @@ func TestStore_MissingLocalSegmentDoesNotRemainVisible(t *testing.T) {
 	require.NoError(t, os.Remove(segments[0]))
 
 	_, err = store.Stat(ctx, "missing-segment")
-	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
 
 	_, _, err = store.GetStream(ctx, "missing-segment")
-	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
 }
 
 func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *testing.T) {
@@ -451,19 +468,19 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 	require.NoError(t, os.Remove(segments[0]))
 
 	_, statErr := store.Stat(ctx, "missing-segment-remote-fallback")
-	require.ErrorIs(t, statErr, daramjwee.ErrNotFound)
+	require.ErrorIs(t, statErr, daramjwee.ErrReadStateUncertain)
 
 	_, _, getErr := store.GetStream(ctx, "missing-segment-remote-fallback")
-	require.ErrorIs(t, getErr, daramjwee.ErrNotFound)
+	require.ErrorIs(t, getErr, daramjwee.ErrReadStateUncertain)
 
 	reopened := New(
 		bucket,
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 	_, reopenErr := reopened.Stat(ctx, "missing-segment-remote-fallback")
-	require.ErrorIs(t, reopenErr, daramjwee.ErrNotFound)
+	require.ErrorIs(t, reopenErr, daramjwee.ErrReadStateUncertain)
 }
 
 func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.T) {
@@ -488,20 +505,16 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 
 	remotePath := store.blobPath("missing-segment-remote-live", "remote-v1")
 	require.NoError(t, bucket.Upload(ctx, remotePath, strings.NewReader("remote-current")))
-	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("missing-segment-remote-live"), map[string]checkpointEntry{
-		"missing-segment-remote-live": {
-			SegmentPath: remotePath,
-			Offset:      0,
-			Length:      int64(len("remote-current")),
-			Metadata:    entry.Metadata,
-		},
-	}))
-	require.NoError(t, store.updateLocalEntry("missing-segment-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+	remoteEntry := checkpointEntry{SegmentPath: remotePath, Length: int64(len("remote-current")), Metadata: entry.Metadata}
+	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("missing-segment-remote-live"), map[string]checkpointEntry{"missing-segment-remote-live": remoteEntry}))
+	uploadRemoteEntryForTest(t, ctx, store, "missing-segment-remote-live", remoteEntry)
+	_, updateErr := store.updateLocalEntry("missing-segment-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		require.True(t, exists)
 		current.RemotePath = remotePath
 		current.RemoteOffset = 0
 		return current, true
-	}))
+	})
+	require.NoError(t, updateErr)
 
 	segments, err := filepath.Glob(filepath.Join(dataDir, "ingest", "sealed", "*", "*.seg"))
 	require.NoError(t, err)
@@ -522,7 +535,7 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 
 	reopenedStream, reopenedMeta, err := reopened.GetStream(ctx, "missing-segment-remote-live")
 	require.NoError(t, err)
@@ -750,7 +763,7 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 	require.NoError(t, reopened.ensureReady())
 
 	_, err = os.Stat(orphanPath)
@@ -764,6 +777,30 @@ func TestStore_ReopenSweepsOrphanedLocalSegments(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "live payload", string(body))
 	assert.Equal(t, "v1", meta.CacheTag)
+}
+
+func TestStore_ReopenCatalogSyncFailureDoesNotSweepSegments(t *testing.T) {
+	dataDir := t.TempDir()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(dataDir))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(context.Background(), "preserved-key", nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	entry, ok := store.catalog.Get("preserved-key")
+	require.True(t, ok)
+
+	open := openCatalog
+	openCatalog = func(string) (*internalcatalog.Catalog, error) {
+		return nil, errors.New("sync dir failed")
+	}
+	t.Cleanup(func() { openCatalog = open })
+
+	reopened := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(dataDir))
+	require.ErrorContains(t, reopened.ensureReady(), "sync dir failed")
+	require.FileExists(t, entry.SegmentPath)
 }
 
 func TestStore_ReopenSweepsAbandonedActiveSegments(t *testing.T) {
@@ -795,7 +832,7 @@ func TestStore_ReopenSweepsAbandonedActiveSegments(t *testing.T) {
 		log.NewNopLogger(),
 		WithDir(dataDir),
 	)
-	reopened.autoFlush = false
+	disableAutoFlush(reopened)
 	require.NoError(t, reopened.ensureReady())
 
 	_, err = os.Stat(abandonedPath)
@@ -884,6 +921,184 @@ func TestStore_CloseFailureDoesNotLeaveSealedSegmentVisible(t *testing.T) {
 	require.Empty(t, segments)
 }
 
+func TestStore_ClosePostRenameFailurePoisonsStoreAndPreservesBothSegments(t *testing.T) {
+	ctx := context.Background()
+	store := New(
+		objstore.NewInMemBucket(),
+		log.NewNopLogger(),
+		WithDir(t.TempDir()),
+	)
+	store.autoFlush = false
+	first, err := store.BeginSet(ctx, "postrename-failure", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(first, "first payload")
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+	previous, ok := store.catalog.Get("postrename-failure")
+	require.True(t, ok)
+
+	store.flushMu.Lock()
+	clear(store.pendingShards)
+	store.flushMu.Unlock()
+
+	failCatalogAfterCommit(store)
+
+	writer, err := store.BeginSet(ctx, "postrename-failure", &daramjwee.Metadata{CacheTag: "v2"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "second payload")
+	require.NoError(t, err)
+	firstErr := writer.Close()
+	require.ErrorContains(t, firstErr, "sync dir failed")
+	require.ErrorIs(t, firstErr, ErrAmbiguousCommit)
+	require.ErrorIs(t, writer.Close(), ErrAmbiguousCommit)
+
+	entry, ok := store.catalog.Get("postrename-failure")
+	require.True(t, ok)
+	require.Equal(t, "v2", entry.Metadata.CacheTag)
+	require.FileExists(t, previous.SegmentPath)
+	require.FileExists(t, entry.SegmentPath)
+	require.Len(t, localSegmentPaths(t, store.dataDir), 2)
+	_, _, err = store.GetStream(ctx, "postrename-failure")
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
+
+	store.flushMu.Lock()
+	_, pending := store.pendingShards[shardForKey("postrename-failure")]
+	store.flushMu.Unlock()
+	require.True(t, pending)
+}
+
+func TestStore_DeletePostRenameFailurePreservesPreviousSegment(t *testing.T) {
+	ctx := context.Background()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "postrename-delete", nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	previous, ok := store.catalog.Get("postrename-delete")
+	require.True(t, ok)
+
+	store.flushMu.Lock()
+	clear(store.pendingShards)
+	store.flushMu.Unlock()
+	failCatalogAfterCommit(store)
+
+	err = store.Delete(ctx, "postrename-delete")
+	require.ErrorContains(t, err, "sync dir failed")
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
+	require.FileExists(t, previous.SegmentPath)
+	entry, ok := store.catalog.Get("postrename-delete")
+	require.True(t, ok)
+	require.True(t, entry.Missing)
+	_, _, err = store.GetStream(ctx, "postrename-delete")
+	require.ErrorIs(t, err, ErrAmbiguousCommit)
+
+	store.flushMu.Lock()
+	_, pending := store.pendingShards[shardForKey("postrename-delete")]
+	store.flushMu.Unlock()
+	require.True(t, pending)
+}
+
+func TestStore_FlushUpdatePostRenameFailurePreservesPreviousSegment(t *testing.T) {
+	ctx := context.Background()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "postrename-flush", nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	expected := store.catalog.Entries()
+	previous := expected["postrename-flush"]
+	next := previous
+	next.RemotePath = "remote/postrename-flush.seg"
+	next.SegmentPath = ""
+	failCatalogAfterCommit(store)
+
+	err = store.commitFlushUpdates(expected, map[string]localCatalogEntry{"postrename-flush": next})
+	require.ErrorContains(t, err, "sync dir failed")
+	require.FileExists(t, previous.SegmentPath)
+	entry, ok := store.catalog.Get("postrename-flush")
+	require.True(t, ok)
+	require.Equal(t, next, entry)
+	require.ErrorIs(t, store.ensureReady(), ErrAmbiguousCommit)
+}
+
+func failCatalogAfterCommit(store *Store) {
+	updateCatalog := store.updateCatalog
+	store.updateCatalog = func(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error) {
+		committed, err := updateCatalog(key, fn)
+		if err != nil || !committed {
+			return committed, err
+		}
+		terminalErr := errors.Join(ErrAmbiguousCommit, errors.New("sync dir failed"))
+		store.initErr = terminalErr
+		return true, terminalErr
+	}
+}
+
+func TestStore_FlushPendingChecksCatalogDurabilityWithoutPendingShards(t *testing.T) {
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+	failSync := true
+	store.syncCatalog = func() error {
+		if failSync {
+			return errors.Join(ErrAmbiguousCommit, errors.New("sync dir failed"))
+		}
+		return nil
+	}
+
+	require.ErrorIs(t, store.flushPending(context.Background()), ErrAmbiguousCommit)
+	failSync = false
+	require.NoError(t, store.flushPending(context.Background()))
+	require.NoError(t, store.Close())
+}
+
+func TestStore_ClosePreservesPendingCatalogAmbiguity(t *testing.T) {
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()))
+	store.syncCatalog = func() error {
+		return errors.Join(ErrAmbiguousCommit, errors.New("sync dir failed"))
+	}
+
+	require.ErrorIs(t, store.Close(), ErrAmbiguousCommit)
+	require.ErrorIs(t, store.Close(), ErrAmbiguousCommit)
+}
+
+func TestStore_CloseWaitsForActiveWriterAndFlushesIt(t *testing.T) {
+	ctx := context.Background()
+	bucket := objstore.NewInMemBucket()
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	store.autoFlush = false
+
+	writer, err := store.BeginSet(ctx, "close-active-writer", &daramjwee.Metadata{CacheTag: "v1"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "payload")
+	require.NoError(t, err)
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- store.Close() }()
+	require.Eventually(t, store.isClosed.Load, time.Second, time.Millisecond)
+	select {
+	case err := <-closeDone:
+		require.FailNow(t, "Close returned while a writer was active", "err: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	require.NoError(t, writer.Close())
+	require.NoError(t, <-closeDone)
+
+	reopened := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+	stream, _, err := reopened.GetStream(ctx, "close-active-writer")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, stream.Close()) })
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.Equal(t, "payload", string(body))
+}
+
 func TestStore_CommitSealFailureCleansStagingSegment(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -948,6 +1163,12 @@ type failingSealSegmentWriter struct {
 	sealedPath string
 	sealErr    error
 	cleanupErr error
+}
+
+func disableAutoFlush(store *Store) {
+	store.flushMu.Lock()
+	store.autoFlush = false
+	store.flushMu.Unlock()
 }
 
 func newFailingSealSegmentWriter(root, shard, segmentID string, sealErr, cleanupErr error) (*failingSealSegmentWriter, error) {

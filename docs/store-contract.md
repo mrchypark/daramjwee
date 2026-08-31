@@ -23,6 +23,7 @@ Store implementations MUST distinguish between MISS and ERROR:
 GetStream(key)
   ├── HIT(value, metadata) → success
   ├── MISS → ErrNotFound
+  ├── UNCERTAIN → ErrReadStateUncertain
   └── ERROR → other error
 ```
 
@@ -31,23 +32,32 @@ GetStream(key)
 - Not an error condition
 - Cache should continue to next tier or origin
 
+**UNCERTAIN** (`ErrReadStateUncertain`):
+- This tier owns a newer value, but its body cannot currently be read
+- Cache must stop; falling through could return a stale lower-tier value
+- The sentinel remains joined with cancellation/deadline errors after ownership is known
+
 **ERROR** (any other error):
 - Storage failure, I/O error, timeout, etc.
 - An actual error condition
-- Cache should handle as failure, not continue
+- Cache may continue in degraded mode, but must not promote a lower-tier value
 
 ### Example
 
 ```go
-// Correct: distinguish MISS from ERROR
+// Correct: distinguish MISS, an unsafe stale-fallback barrier, and degraded errors
 reader, meta, err := store.GetStream(ctx, key)
 if err != nil {
     if errors.Is(err, daramjwee.ErrNotFound) {
         // MISS: continue to next tier
         continue
     }
-    // ERROR: handle failure
-    return nil, err
+    if errors.Is(err, daramjwee.ErrReadStateUncertain) {
+        return nil, err
+    }
+    // Other errors may continue without promoting a lower-tier hit.
+    higherTiersClean = false
+    continue
 }
 
 // Incorrect: treating MISS as ERROR
@@ -69,20 +79,25 @@ Origin → ERROR
 
 This is a failure to retrieve the data. The caller receives an error.
 
-### Cache Fill Failure
+### Cache Writer Setup Failure
 
 ```
 Origin → SUCCESS(data)
-Cache write → ERROR
+Acquire cache writer → ERROR
   └── Get returns data to caller (non-fatal)
 ```
 
-This is a failure to cache the data. The caller still receives the data.
+This happens before response streaming starts, so the caller still receives the
+origin data directly.
+
+Once streaming starts, a cache `Write` or finalizing `Close` error is returned
+to the caller and the partial fill is aborted. The cache never publishes that
+partial object.
 
 ### Implementation
 
 ```go
-// Cache fill failure is non-fatal to data retrieval
+// Cache writer setup failure is non-fatal to data retrieval
 result, err := c.fetchFromOrigin(ctx, fetcher, oldMetadata)
 if err != nil {
     return nil, err  // Data retrieval failure
@@ -99,9 +114,8 @@ if err != nil {
 
 ### Policy
 
-> **Cache write failure is non-fatal to a successful source read, unless the caller explicitly requests write-through durability.**
-
-This ensures cache never reduces availability.
+> **Cache writer setup failure is non-fatal. A write or finalization failure
+> after streaming begins is reported and prevents publication.**
 
 ## Atomic Commit Contract
 
@@ -215,6 +229,12 @@ When the cache fills a tier from a lower tier or origin:
 - Uses catalog + segment files.
 - Flush is asynchronous but catalog updates are atomic.
 - `Close()` flushes pending writes before shutdown.
+- Remote GC deletes only unreachable payloads that have a terminal GC receipt.
+- An active upload intent protects its payload; a missing receipt preserves the payload.
+- Terminalization is ordered as terminal intent, receipt, then plan cleanup. Recovery is
+  ordered as active intent, receipt removal, then clearing the terminal marker.
+- A receipt and a live plan for the same payload is invalid/corrupt state and is not
+  produced by supported store formats.
 
 ## Thread Safety
 

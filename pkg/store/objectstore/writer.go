@@ -24,8 +24,11 @@ type writer struct {
 	metadata   *daramjwee.Metadata
 	generation uint64
 
-	mu   sync.Mutex
-	done bool
+	mu      sync.Mutex
+	done    bool
+	doneCh  chan struct{}
+	result  error
+	aborted bool
 }
 
 func (w *writer) Write(p []byte) (int, error) {
@@ -46,13 +49,16 @@ func (w *writer) Close() error {
 	return w.Commit(w.ctx)
 }
 
-func (w *writer) Commit(ctx context.Context) error {
+func (w *writer) Commit(ctx context.Context) (result error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !w.markDone() {
-		return nil
+	started, previous := w.beginFinalize(false)
+	if !started {
+		return previous
 	}
+	defer func() { w.finish(result) }()
+	defer w.store.writers.Done()
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("objectstore: commit: %w", w.abortWith(err))
 	}
@@ -68,15 +74,26 @@ func (w *writer) Commit(ctx context.Context) error {
 	if w.metadata != nil {
 		metadata = *w.metadata
 	}
+	// ponytail: process-wide publication fence; replace with per-key context locks if write latency becomes measurable.
+	if err := w.store.flushRun.acquire(ctx); err != nil {
+		_ = removeLocalSegment(sealedPath)
+		return fmt.Errorf("objectstore: commit: publication fence: %w", err)
+	}
+	defer w.store.flushRun.release()
 	published, err := w.store.publishLocalEntry(w.key, localCatalogEntry{
-		SegmentPath: sealedPath,
-		Offset:      0,
-		Length:      size,
-		Generation:  w.generation,
-		Metadata:    metadata,
+		SegmentPath:      sealedPath,
+		Offset:           0,
+		Length:           size,
+		Generation:       w.generation,
+		PublicationToken: w.store.nextVersion(),
+		Metadata:         metadata,
 	})
 	if err != nil {
-		_ = removeLocalSegment(sealedPath)
+		if published {
+			w.store.enqueueFlush(w.key)
+		} else {
+			_ = removeLocalSegment(sealedPath)
+		}
 		return err
 	}
 	if !published {
@@ -87,10 +104,13 @@ func (w *writer) Commit(ctx context.Context) error {
 	return nil
 }
 
-func (w *writer) Abort() error {
-	if !w.markDone() {
-		return nil
+func (w *writer) Abort() (result error) {
+	started, previous := w.beginFinalize(true)
+	if !started {
+		return previous
 	}
+	defer func() { w.finish(result) }()
+	defer w.store.writers.Done()
 	return w.segment.Abort()
 }
 
@@ -101,12 +121,31 @@ func (w *writer) abortWith(err error) error {
 	return err
 }
 
-func (w *writer) markDone() bool {
+func (w *writer) beginFinalize(abort bool) (bool, error) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.done {
-		return false
+		doneCh := w.doneCh
+		w.mu.Unlock()
+		<-doneCh
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.aborted != abort {
+			if abort {
+				return false, nil
+			}
+			return false, io.ErrClosedPipe
+		}
+		return false, w.result
 	}
 	w.done = true
-	return true
+	w.aborted = abort
+	w.mu.Unlock()
+	return true, nil
+}
+
+func (w *writer) finish(err error) {
+	w.mu.Lock()
+	w.result = err
+	close(w.doneCh)
+	w.mu.Unlock()
 }

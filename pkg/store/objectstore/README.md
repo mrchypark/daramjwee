@@ -2,6 +2,10 @@
 
 `objectstore` is a first-party `Store` for [`thanos-io/objstore`](https://github.com/thanos-io/objstore) providers such as S3, GCS, and Azure Blob Storage.
 
+The bucket must support both `objstore.IfNotExists` and `objstore.IfMatch` uploads. `objectstore` rejects providers without these conditions because it cannot safely publish concurrent updates on them.
+
+Upgrades to the conditional-publication format are stop-the-world: stop every older writer for a prefix before starting the new version, and do not downgrade a data directory after the new version opens it. For overlapping rollout, use a fresh `WithPrefix(...)`; older binaries use unconditional entry writes and cannot safely share a prefix with this protocol.
+
 It fits into the same ordered-tier API as the other backends:
 
 ```go
@@ -243,6 +247,8 @@ objectstore.New(
 ## Operational Notes
 
 - Concurrent same-key writes across multiple distributed writers are still last-writer-wins unless coordinated externally.
+- Remote GC is receipt-gated: an unreachable payload without a terminal GC receipt is preserved.
+- Supported writers never leave a GC receipt beside a live upload plan. Receipt/live-plan coexistence indicates corrupt or unsupported state; stop writers and repair the prefix before compacting it.
 
 ## Prod-like Compare Harness
 

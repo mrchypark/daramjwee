@@ -33,6 +33,8 @@ type objstoreAdapter struct {
 	logger log.Logger
 }
 
+func (a *objstoreAdapter) Close() error { return a.modern.Close() }
+
 func (a *objstoreAdapter) GetStreamUsesContext() bool { return true }
 
 func (a *objstoreAdapter) GetStream(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, error) {

@@ -80,6 +80,29 @@ func (s *Store) markLocalSegmentReclaimable(segmentPath string) {
 	}
 }
 
+func (s *Store) deferLocalSegmentReclaim(segmentPath string) {
+	if segmentPath == "" {
+		return
+	}
+	s.segmentRefsMu.Lock()
+	s.pendingDurableSegs[segmentPath] = struct{}{}
+	s.segmentRefsMu.Unlock()
+}
+
+func (s *Store) reclaimDurableLocalSegments() {
+	s.segmentRefsMu.Lock()
+	if len(s.pendingDurableSegs) == 0 {
+		s.segmentRefsMu.Unlock()
+		return
+	}
+	segments := s.pendingDurableSegs
+	s.pendingDurableSegs = make(map[string]struct{})
+	s.segmentRefsMu.Unlock()
+	for segmentPath := range segments {
+		s.markLocalSegmentReclaimable(segmentPath)
+	}
+}
+
 func (s *Store) reclaimLocalSegmentNow(segmentPath string) {
 	if err := removeLocalSegment(segmentPath); err != nil {
 		_ = level.Warn(s.logger).Log("msg", "failed to reclaim local segment file", "path", segmentPath, "err", err)

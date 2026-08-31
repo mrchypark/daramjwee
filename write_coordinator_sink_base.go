@@ -19,7 +19,6 @@ type closeCoreParams struct {
 // Returns the error to be stored in the sink's err field.
 // releaseLease is called on both success and error paths (for write lease).
 func closeCore(
-	_ context.Context,
 	p closeCoreParams,
 	commitFn func(ctx context.Context) error,
 	abortFn func() error,

@@ -93,7 +93,11 @@ func TestCache_ObjectStoreTierZeroPublishesOnClose(t *testing.T) {
 		objectstore.WithDir(dataDir),
 	)
 
-	cache, err := daramjwee.New(nil, daramjwee.WithTiers(store), daramjwee.WithOpTimeout(time.Second))
+	cache, err := daramjwee.New(nil,
+		daramjwee.WithTiers(store),
+		daramjwee.WithOpTimeout(time.Second),
+		daramjwee.WithFreshness(time.Minute, time.Minute),
+	)
 	require.NoError(t, err)
 	defer cache.Close()
 
