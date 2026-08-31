@@ -25,8 +25,6 @@ const (
 	flushRetryMax = time.Second
 )
 
-var intentFinalizeTimeout = 5 * time.Second
-
 var errPendingUploadPlanChanged = errors.New("objectstore: pending upload plan changed")
 
 type checkpoint struct {
@@ -45,9 +43,13 @@ type checkpointEntry struct {
 }
 
 type uploadIntent struct {
-	RemotePath string `json:"remote_path"`
-	Completed  bool   `json:"completed,omitempty"`
-	Abandoned  bool   `json:"abandoned,omitempty"`
+	Version    int                `json:"version,omitempty"`
+	RemotePath string             `json:"remote_path"`
+	Size       int64              `json:"size,omitempty"`
+	SizeKnown  bool               `json:"size_known,omitempty"`
+	Members    []uploadPlanMember `json:"members,omitempty"`
+	Completed  bool               `json:"completed,omitempty"`
+	Abandoned  bool               `json:"abandoned,omitempty"`
 }
 
 type pendingFlushRecord struct {
@@ -145,11 +147,15 @@ func (s *Store) flushPendingAcquired(ctx context.Context) error {
 		if len(shards) == 0 {
 			return nil
 		}
-		for idx, shardID := range shards {
+		var flushErr error
+		for _, shardID := range shards {
 			if err := s.flushShard(ctx, shardID); err != nil {
-				s.requeueShards(shards[idx:])
-				return err
+				s.requeueShards([]string{shardID})
+				flushErr = errors.Join(flushErr, err)
 			}
+		}
+		if flushErr != nil {
+			return flushErr
 		}
 	}
 }
@@ -199,10 +205,14 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 		return err
 	}
 	defer s.remoteState.release()
+	if err := s.protectLiveUploadPlans(ctx, shardID); err != nil {
+		return err
+	}
 
 	updates := make(map[string]localCatalogEntry, len(records))
 	packedRecords := make([]pendingFlushRecord, 0, len(records))
 	pendingGroups := make(map[string][]pendingFlushRecord)
+	var pendingErr error
 	for _, record := range records {
 		if record.entry.PendingRemotePath != "" {
 			pendingGroups[record.entry.PendingRemotePath] = append(pendingGroups[record.entry.PendingRemotePath], record)
@@ -210,7 +220,7 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 		}
 		if s.shouldUploadDirect(record.entry) {
 			if err := s.flushDirectRecord(ctx, record, currentEntries, updates, mergedEntries); err != nil {
-				return err
+				pendingErr = errors.Join(pendingErr, err)
 			}
 			continue
 		}
@@ -223,13 +233,13 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	slices.Sort(pendingPaths)
 	for _, remotePath := range pendingPaths {
 		if err := s.flushPendingRemoteRecords(ctx, pendingGroups[remotePath], currentEntries, updates, mergedEntries); err != nil {
-			return err
+			pendingErr = errors.Join(pendingErr, err)
 		}
 	}
 
 	if len(packedRecords) > 0 {
 		if err := s.flushPackedRecords(ctx, shardID, packedRecords, currentEntries, updates, mergedEntries); err != nil {
-			return err
+			pendingErr = errors.Join(pendingErr, err)
 		}
 	}
 	remoteEntries := make(map[string]localCatalogEntry, len(updates))
@@ -249,18 +259,31 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	if err != nil {
 		return err
 	}
-	for key, winner := range conflicts {
-		if winner.Missing {
-			delete(mergedEntries, key)
-		} else {
-			mergedEntries[key] = winner
+	rebuilt := mergeCheckpointEntries(baseEntries, currentEntries, shardID)
+	for key, entry := range remoteEntries {
+		if entry.Missing {
+			delete(rebuilt, key)
+			continue
+		}
+		rebuilt[key] = checkpointEntry{
+			SegmentPath:      entry.RemotePath,
+			Offset:           entry.RemoteOffset,
+			Length:           entry.Length,
+			Generation:       entry.Generation,
+			PublicationToken: entry.PublicationToken,
+			Metadata:         entry.Metadata,
 		}
 	}
-	for key, entry := range remoteEntries {
-		if merged, ok := mergedEntries[key]; ok {
-			merged.PublicationToken = entry.PublicationToken
-			mergedEntries[key] = merged
+	for key, winner := range conflicts {
+		if winner.Missing {
+			delete(rebuilt, key)
+		} else {
+			rebuilt[key] = winner
 		}
+	}
+	clear(mergedEntries)
+	for key, entry := range rebuilt {
+		mergedEntries[key] = entry
 	}
 	for key, entry := range remoteEntries {
 		cleanupEntries[key] = entry
@@ -272,31 +295,41 @@ func (s *Store) flushShard(ctx context.Context, shardID string) error {
 	if err := s.commitFlushUpdates(currentEntries, updates); err != nil {
 		return err
 	}
-	intentEntries := make(map[string]localCatalogEntry, len(updates))
-	for key, entry := range currentEntries {
-		if shardForKey(key) == shardID && entry.IntentCleanupPending {
-			intentEntries[key] = entry
-		}
-	}
-	for key, entry := range updates {
-		intentEntries[key] = entry
-	}
-	if err := s.completeUploadIntents(ctx, intentEntries); err != nil {
-		return err
-	}
-	if err := s.commitCleanedUploadIntents(intentEntries); err != nil {
+	if err := s.finalizeUploadPlans(ctx, shardID); err != nil {
 		return err
 	}
 	if err := s.clearLegacyManifests(ctx, cleanupEntries); err != nil {
 		return err
 	}
-	return s.commitCleanedTombstones(cleanupEntries)
+	return errors.Join(pendingErr, s.commitCleanedTombstones(cleanupEntries))
 }
 
 func (s *Store) clearLegacyManifests(ctx context.Context, entries map[string]localCatalogEntry) error {
 	for key, entry := range entries {
 		if !entry.Missing {
 			continue
+		}
+		reader, err := s.bucket.Get(ctx, s.manifestPath(key))
+		if err == nil {
+			var legacy manifest
+			decodeErr := json.NewDecoder(reader).Decode(&legacy)
+			closeErr := reader.Close()
+			if decodeErr != nil || closeErr != nil {
+				return errors.Join(decodeErr, closeErr)
+			}
+			if legacy.BlobPath == "" {
+				return fmt.Errorf("objectstore: legacy manifest for %q is missing blob_path", key)
+			}
+			receipt := uploadIntent{Version: 2, RemotePath: legacy.BlobPath, Completed: true}
+			data, err := json.Marshal(receipt)
+			if err != nil {
+				return err
+			}
+			if err := s.bucket.Upload(ctx, s.gcReceiptPath(legacy.BlobPath), bytes.NewReader(data)); err != nil {
+				return err
+			}
+		} else if !s.bucket.IsObjNotFoundErr(err) {
+			return err
 		}
 		if err := s.bucket.Delete(ctx, s.manifestPath(key)); err != nil && !s.bucket.IsObjNotFoundErr(err) {
 			return err
@@ -305,28 +338,118 @@ func (s *Store) clearLegacyManifests(ctx context.Context, entries map[string]loc
 	return nil
 }
 
-func (s *Store) completeUploadIntents(ctx context.Context, entries map[string]localCatalogEntry) error {
-	cleared := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		if entry.RemotePath == "" {
+func (s *Store) finalizeUploadPlans(ctx context.Context, shardID string) error {
+	if s.catalog == nil {
+		return nil
+	}
+	if err := s.protectLiveUploadPlans(ctx, shardID); err != nil {
+		return err
+	}
+	for path, plan := range s.catalog.UploadPlans() {
+		if len(plan.Members) == 0 || shardForKey(plan.Members[0].Key) != shardID {
 			continue
 		}
-		if _, ok := cleared[entry.RemotePath]; ok {
+		if s.uploadPlanIsLive(path, plan) {
 			continue
 		}
-		cleared[entry.RemotePath] = struct{}{}
-		data, err := json.Marshal(uploadIntent{RemotePath: entry.RemotePath, Completed: true})
+		if plan.Terminal == "" {
+			published := false
+			for _, member := range plan.Members {
+				current, exists := s.catalog.Get(member.Key)
+				owned := exists && uploadPlanMemberOwns(member, current)
+				if owned && current.RemotePath == path {
+					published = true
+					continue
+				}
+				remote, err := s.loadRemoteEntry(ctx, member.Key)
+				if err == nil && remote.PublicationToken == member.PublicationToken && remote.SegmentPath == path {
+					published = true
+					continue
+				}
+				if err != nil && !errors.Is(err, daramjwee.ErrNotFound) {
+					return err
+				}
+			}
+			if published {
+				plan.Terminal = "completed"
+			} else {
+				plan.Terminal = "abandoned"
+			}
+			if _, err := s.updateLocalEntriesAndPlansIf(nil, nil, map[string]uploadPlan{path: plan}, nil); err != nil {
+				return err
+			}
+		}
+		intent := uploadIntent{Version: 2, RemotePath: path, Size: plan.Size, SizeKnown: plan.SizeKnown, Members: plan.Members, Completed: plan.Terminal == "completed", Abandoned: plan.Terminal == "abandoned"}
+		data, err := json.Marshal(intent)
 		if err != nil {
 			return err
 		}
-		if err := s.bucket.Upload(ctx, s.uploadIntentPath(entry.RemotePath), bytes.NewReader(data)); err != nil {
+		if err := s.bucket.Upload(ctx, s.uploadIntentPath(path), bytes.NewReader(data)); err != nil {
 			return err
 		}
-		if err := s.bucket.Delete(ctx, s.uploadIntentPath(entry.RemotePath)); ignoreNotFound(err, s.bucket) != nil {
-			_ = level.Warn(s.logger).Log("msg", "failed to clear remote upload intent", "path", entry.RemotePath, "err", err)
+		if err := s.bucket.Upload(ctx, s.gcReceiptPath(path), bytes.NewReader(data)); err != nil {
+			return err
+		}
+		if err := s.bucket.Delete(ctx, s.uploadIntentPath(path)); ignoreNotFound(err, s.bucket) != nil {
+			return err
+		}
+		intentEntries := make(map[string]localCatalogEntry)
+		for _, member := range plan.Members {
+			if current, exists := s.catalog.Get(member.Key); exists && current.RemotePath == path && current.IntentCleanupPending {
+				intentEntries[member.Key] = current
+			}
+		}
+		if err := s.commitCleanedUploadIntents(intentEntries); err != nil {
+			return err
+		}
+		if _, err := s.updateLocalEntriesAndPlansIf(nil, nil, nil, []string{path}); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *Store) protectLiveUploadPlans(ctx context.Context, shardID string) error {
+	if s.catalog == nil {
+		return nil
+	}
+	for path, plan := range s.catalog.UploadPlans() {
+		if len(plan.Members) == 0 || (shardID != "" && shardForKey(plan.Members[0].Key) != shardID) || !s.uploadPlanIsLive(path, plan) {
+			continue
+		}
+		intent := uploadIntent{Version: 2, RemotePath: path, Size: plan.Size, SizeKnown: plan.SizeKnown, Members: plan.Members}
+		data, err := json.Marshal(intent)
+		if err != nil {
+			return err
+		}
+		if err := s.bucket.Upload(ctx, s.uploadIntentPath(path), bytes.NewReader(data)); err != nil {
+			return err
+		}
+		if err := s.bucket.Delete(ctx, s.gcReceiptPath(path)); ignoreNotFound(err, s.bucket) != nil {
+			return err
+		}
+		if plan.Terminal != "" {
+			plan.Terminal = ""
+			if _, err := s.updateLocalEntriesAndPlansIf(nil, nil, map[string]uploadPlan{path: plan}, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) uploadPlanIsLive(path string, plan uploadPlan) bool {
+	for _, member := range plan.Members {
+		current, exists := s.catalog.Get(member.Key)
+		if exists && uploadPlanMemberOwns(member, current) && current.PendingRemotePath == path {
+			return true
+		}
+	}
+	return false
+}
+
+func uploadPlanMemberOwns(member uploadPlanMember, entry localCatalogEntry) bool {
+	return entry.Generation == member.Generation && (member.PublicationToken == "" || entry.PublicationToken == member.PublicationToken)
 }
 
 func (s *Store) publishRemoteEntries(
@@ -354,6 +477,11 @@ func (s *Store) publishRemoteEntries(
 			return nil, err
 		}
 		if !applied {
+			if latest, exists := s.catalog.Get(key); exists {
+				currentEntries[key] = latest
+			} else {
+				delete(currentEntries, key)
+			}
 			delete(entries, key)
 			delete(updates, key)
 			continue
@@ -431,7 +559,15 @@ func (s *Store) publishRemoteEntries(
 
 func (s *Store) prepareRemotePublication(ctx context.Context, key string, expected localCatalogEntry) (localCatalogEntry, bool, error) {
 	if expected.RemoteVersionSet {
-		return expected, true, nil
+		applied := false
+		_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
+			if !exists || current != expected {
+				return current, exists
+			}
+			applied = true
+			return current, true
+		})
+		return expected, applied, err
 	}
 	prepared := expected
 	if prepared.PublicationToken == "" {
@@ -498,6 +634,7 @@ func (s *Store) retireConflictedPublication(key string, expected, publication lo
 		current.PendingRemotePath = ""
 		current.PendingRemoteOffset = 0
 		current.PendingRemoteSize = 0
+		current.PendingRemoteSizeKnown = false
 		current.IntentCleanupPending = true
 		current.Superseded = true
 		return current, true
@@ -568,7 +705,7 @@ func (s *Store) flushPackedRecords(
 		return err
 	}
 	if err := s.uploadPackedBody(ctx, remotePath, payload); err != nil {
-		return errors.Join(err, s.abandonUploadIntent(ctx, remotePath))
+		return err
 	}
 
 	for _, record := range planned {
@@ -593,6 +730,16 @@ func (s *Store) flushPendingRemoteRecords(
 		return nil
 	}
 	remotePath := records[0].entry.PendingRemotePath
+	if !records[0].entry.PendingRemoteSizeKnown {
+		available, _, err := partitionPendingRemoteRecords(records)
+		if err != nil {
+			return err
+		}
+		if len(available) == 0 {
+			return errMissingLocalEntry
+		}
+		return s.resetPendingRemoteRecords(ctx, available)
+	}
 	attrs, err := s.bucket.Attributes(ctx, remotePath)
 	if err != nil && !s.bucket.IsObjNotFoundErr(err) {
 		return err
@@ -600,6 +747,16 @@ func (s *Store) flushPendingRemoteRecords(
 	bodyReady := err == nil && attrs.Size == records[0].entry.PendingRemoteSize
 	if !bodyReady {
 		if s.isPackedRemotePath(remotePath) {
+			available, missing, err := partitionPendingRemoteRecords(records)
+			if err != nil {
+				return err
+			}
+			if len(missing) > 0 {
+				if len(available) == 0 {
+					return errMissingLocalEntry
+				}
+				return s.resetPendingRemoteRecords(ctx, available)
+			}
 			payload, offsets, err := newPackedRecordReader(records, nil)
 			if err != nil {
 				return err
@@ -623,11 +780,8 @@ func (s *Store) flushPendingRemoteRecords(
 				return err
 			}
 			defer releasePins()
-			if err := s.publishUploadIntent(ctx, remotePath); err != nil {
-				return err
-			}
 			if err := s.uploadPackedBody(ctx, remotePath, payload); err != nil {
-				return errors.Join(err, s.abandonUploadIntent(ctx, remotePath))
+				return err
 			}
 		} else {
 			if len(records) != 1 {
@@ -642,11 +796,8 @@ func (s *Store) flushPendingRemoteRecords(
 				return err
 			}
 			defer file.Close()
-			if err := s.publishUploadIntent(ctx, remotePath); err != nil {
-				return err
-			}
 			if err := s.bucket.Upload(ctx, remotePath, io.NewSectionReader(file, record.entry.Offset, record.entry.Length)); err != nil {
-				return errors.Join(err, s.abandonUploadIntent(ctx, remotePath))
+				return err
 			}
 		}
 	}
@@ -656,24 +807,40 @@ func (s *Store) flushPendingRemoteRecords(
 	return nil
 }
 
+func partitionPendingRemoteRecords(records []pendingFlushRecord) (available, missing []pendingFlushRecord, err error) {
+	for _, record := range records {
+		if record.entry.SegmentPath == "" {
+			missing = append(missing, record)
+			continue
+		}
+		if _, statErr := os.Stat(record.entry.SegmentPath); statErr != nil {
+			if os.IsNotExist(statErr) {
+				missing = append(missing, record)
+				continue
+			}
+			return nil, nil, statErr
+		}
+		available = append(available, record)
+	}
+	return available, missing, nil
+}
+
 func (s *Store) resetPendingRemoteRecords(ctx context.Context, records []pendingFlushRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
-	if err := s.abandonUploadIntent(ctx, records[0].entry.PendingRemotePath); err != nil {
-		return err
-	}
 	expected := make(map[string]localCatalogEntry, len(records))
-	cleared := make(map[string]localCatalogEntry, len(records))
+	updates := make(map[string]localCatalogEntry, len(records))
 	for _, record := range records {
 		next := record.entry
 		next.PendingRemotePath = ""
 		next.PendingRemoteOffset = 0
 		next.PendingRemoteSize = 0
+		next.PendingRemoteSizeKnown = false
 		expected[record.key] = record.entry
-		cleared[record.key] = next
+		updates[record.key] = next
 	}
-	if _, err := s.updateLocalEntriesIf(expected, cleared); err != nil {
+	if _, err := s.updateLocalEntriesAndPlansIf(expected, updates, nil, nil); err != nil {
 		return err
 	}
 	return errPendingUploadPlanChanged
@@ -711,7 +878,7 @@ func (s *Store) flushDirectRecord(
 		return err
 	}
 	if err := s.bucket.Upload(ctx, remotePath, io.NewSectionReader(file, record.entry.Offset, record.entry.Length)); err != nil {
-		return errors.Join(err, s.abandonUploadIntent(ctx, remotePath))
+		return err
 	}
 
 	current.RemotePath = remotePath
@@ -719,6 +886,7 @@ func (s *Store) flushDirectRecord(
 	current.PendingRemotePath = ""
 	current.PendingRemoteOffset = 0
 	current.PendingRemoteSize = 0
+	current.PendingRemoteSizeKnown = false
 	current.IntentCleanupPending = true
 	current.SegmentPath = ""
 	current.Offset = 0
@@ -739,17 +907,12 @@ func (s *Store) persistPendingRemote(key string, expected localCatalogEntry, rem
 	pending.PendingRemotePath = remotePath
 	pending.PendingRemoteOffset = remoteOffset
 	pending.PendingRemoteSize = remoteSize
+	pending.PendingRemoteSizeKnown = true
 	if s.catalog == nil {
 		return pending, true, nil
 	}
-	applied := false
-	_, err := s.updateLocalEntry(key, func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
-		if !exists || current != expected {
-			return current, exists
-		}
-		applied = true
-		return pending, true
-	})
+	plan := uploadPlan{RemotePath: remotePath, Size: remoteSize, SizeKnown: true, Members: []uploadPlanMember{{Key: key, Generation: expected.Generation, PublicationToken: expected.PublicationToken, Offset: remoteOffset, Length: expected.Length}}}
+	applied, err := s.updateLocalEntriesAndPlansIf(map[string]localCatalogEntry{key: expected}, map[string]localCatalogEntry{key: pending}, map[string]uploadPlan{remotePath: plan}, nil)
 	return pending, applied, err
 }
 
@@ -779,11 +942,17 @@ func (s *Store) planPendingRemoteRecords(
 		pending.PendingRemotePath = remotePath
 		pending.PendingRemoteOffset = offsets[record.key]
 		pending.PendingRemoteSize = size
+		pending.PendingRemoteSizeKnown = true
 		expected[record.key] = current
 		plannedEntries[record.key] = pending
 		planned = append(planned, pendingFlushRecord{key: record.key, entry: pending})
 	}
-	applied, err := s.updateLocalEntriesIf(expected, plannedEntries)
+	members := make([]uploadPlanMember, 0, len(planned))
+	for _, record := range planned {
+		members = append(members, uploadPlanMember{Key: record.key, Generation: record.entry.Generation, PublicationToken: record.entry.PublicationToken, Offset: record.entry.PendingRemoteOffset, Length: record.entry.Length})
+	}
+	plan := uploadPlan{RemotePath: remotePath, Size: size, SizeKnown: true, Members: members}
+	applied, err := s.updateLocalEntriesAndPlansIf(expected, plannedEntries, map[string]uploadPlan{remotePath: plan}, nil)
 	if err != nil || !applied {
 		return nil, applied, err
 	}
@@ -808,6 +977,7 @@ func (s *Store) resumePendingRemote(
 	current.PendingRemotePath = ""
 	current.PendingRemoteOffset = 0
 	current.PendingRemoteSize = 0
+	current.PendingRemoteSizeKnown = false
 	current.IntentCleanupPending = true
 	current.SegmentPath = ""
 	current.Offset = 0

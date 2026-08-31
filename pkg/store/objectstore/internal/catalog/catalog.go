@@ -15,9 +15,34 @@ import (
 var ErrAmbiguousCommit = fmt.Errorf("catalog: commit durability is ambiguous: %w", daramjwee.ErrCommitOutcomeUnknown)
 
 const (
-	markerClean  = "clean\n"
-	markerActive = "active\n"
+	markerClean           = "clean\n"
+	markerActive          = "active\n"
+	currentSnapshotFormat = 2
+	snapshotMagic         = "daramjwee-objectstore-catalog"
 )
+
+type snapshot struct {
+	Magic         string                `json:"_daramjwee_catalog"`
+	FormatVersion int                   `json:"format_version"`
+	Entries       map[string]Entry      `json:"entries"`
+	UploadPlans   map[string]UploadPlan `json:"upload_plans,omitempty"`
+}
+
+type UploadPlanMember struct {
+	Key              string `json:"key"`
+	Generation       uint64 `json:"generation"`
+	PublicationToken string `json:"publication_token"`
+	Offset           int64  `json:"offset"`
+	Length           int64  `json:"length"`
+}
+
+type UploadPlan struct {
+	RemotePath string             `json:"remote_path"`
+	Size       int64              `json:"size,omitempty"`
+	SizeKnown  bool               `json:"size_known,omitempty"`
+	Terminal   string             `json:"terminal,omitempty"`
+	Members    []UploadPlanMember `json:"members"`
+}
 
 var (
 	writeFileFn = os.WriteFile
@@ -27,32 +52,34 @@ var (
 )
 
 type Entry struct {
-	SegmentPath          string             `json:"segment_path"`
-	Offset               int64              `json:"offset"`
-	Length               int64              `json:"length"`
-	Generation           uint64             `json:"generation,omitempty"`
-	Missing              bool               `json:"missing,omitempty"`
-	RemotePublished      bool               `json:"remote_published,omitempty"`
-	CleanupPending       bool               `json:"cleanup_pending,omitempty"`
-	RemotePath           string             `json:"remote_path,omitempty"`
-	RemoteOffset         int64              `json:"remote_offset,omitempty"`
-	IntentCleanupPending bool               `json:"intent_cleanup_pending,omitempty"`
-	Superseded           bool               `json:"superseded,omitempty"`
-	PendingRemotePath    string             `json:"pending_remote_path,omitempty"`
-	PendingRemoteOffset  int64              `json:"pending_remote_offset,omitempty"`
-	PendingRemoteSize    int64              `json:"pending_remote_size,omitempty"`
-	PublicationToken     string             `json:"publication_token,omitempty"`
-	RemoteVersionSet     bool               `json:"remote_version_set,omitempty"`
-	RemoteVersionAbsent  bool               `json:"remote_version_absent,omitempty"`
-	RemoteVersionType    int                `json:"remote_version_type,omitempty"`
-	RemoteVersionValue   string             `json:"remote_version_value,omitempty"`
-	Metadata             daramjwee.Metadata `json:"metadata"`
+	SegmentPath            string             `json:"segment_path"`
+	Offset                 int64              `json:"offset"`
+	Length                 int64              `json:"length"`
+	Generation             uint64             `json:"generation,omitempty"`
+	Missing                bool               `json:"missing,omitempty"`
+	RemotePublished        bool               `json:"remote_published,omitempty"`
+	CleanupPending         bool               `json:"cleanup_pending,omitempty"`
+	RemotePath             string             `json:"remote_path,omitempty"`
+	RemoteOffset           int64              `json:"remote_offset,omitempty"`
+	IntentCleanupPending   bool               `json:"intent_cleanup_pending,omitempty"`
+	Superseded             bool               `json:"superseded,omitempty"`
+	PendingRemotePath      string             `json:"pending_remote_path,omitempty"`
+	PendingRemoteOffset    int64              `json:"pending_remote_offset,omitempty"`
+	PendingRemoteSize      int64              `json:"pending_remote_size,omitempty"`
+	PendingRemoteSizeKnown bool               `json:"pending_remote_size_known,omitempty"`
+	PublicationToken       string             `json:"publication_token,omitempty"`
+	RemoteVersionSet       bool               `json:"remote_version_set,omitempty"`
+	RemoteVersionAbsent    bool               `json:"remote_version_absent,omitempty"`
+	RemoteVersionType      int                `json:"remote_version_type,omitempty"`
+	RemoteVersionValue     string             `json:"remote_version_value,omitempty"`
+	Metadata               daramjwee.Metadata `json:"metadata"`
 }
 
 type Catalog struct {
 	path                 string
 	mu                   sync.RWMutex
 	entries              map[string]Entry
+	uploadPlans          map[string]UploadPlan
 	dirDurabilityPending bool
 	markerCleanupPending bool
 	terminalErr          error
@@ -64,8 +91,9 @@ func Open(dir string) (*Catalog, error) {
 	}
 
 	c := &Catalog{
-		path:    filepath.Join(dir, "snapshot.json"),
-		entries: make(map[string]Entry),
+		path:        filepath.Join(dir, "snapshot.json"),
+		entries:     make(map[string]Entry),
+		uploadPlans: make(map[string]UploadPlan),
 	}
 	markerPath := c.path + ".state"
 	marker, err := os.ReadFile(markerPath)
@@ -94,8 +122,41 @@ func Open(dir string) (*Catalog, error) {
 		return nil, err
 	}
 	if len(data) > 0 {
-		if err := json.Unmarshal(data, &c.entries); err != nil {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(data, &probe); err != nil {
 			return nil, err
+		}
+		var magic string
+		if raw, ok := probe["_daramjwee_catalog"]; ok {
+			_ = json.Unmarshal(raw, &magic)
+		}
+		if magic == snapshotMagic {
+			var stored snapshot
+			if err := json.Unmarshal(data, &stored); err != nil {
+				return nil, err
+			}
+			if stored.FormatVersion != currentSnapshotFormat {
+				return nil, fmt.Errorf("catalog: unsupported snapshot format %d", stored.FormatVersion)
+			}
+			if stored.Entries != nil {
+				c.entries = stored.Entries
+			}
+			if stored.UploadPlans != nil {
+				c.uploadPlans = stored.UploadPlans
+			}
+			if migrateUploadPlans(c.entries, c.uploadPlans) {
+				if _, err := c.persistLocked(); err != nil {
+					return nil, fmt.Errorf("catalog: migrate upload plans: %w", err)
+				}
+			}
+		} else {
+			if err := json.Unmarshal(data, &c.entries); err != nil {
+				return nil, err
+			}
+			migrateUploadPlans(c.entries, c.uploadPlans)
+			if _, err := c.persistLocked(); err != nil {
+				return nil, fmt.Errorf("catalog: migrate legacy snapshot: %w", err)
+			}
 		}
 	}
 	if err := syncDirFn(dir); err != nil {
@@ -120,6 +181,17 @@ func (c *Catalog) Entries() map[string]Entry {
 		snapshot[key] = entry
 	}
 	return snapshot
+}
+
+func (c *Catalog) UploadPlans() map[string]UploadPlan {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	plans := make(map[string]UploadPlan, len(c.uploadPlans))
+	for path, plan := range c.uploadPlans {
+		plan.Members = append([]UploadPlanMember(nil), plan.Members...)
+		plans[path] = plan
+	}
+	return plans
 }
 
 func (c *Catalog) Health() error {
@@ -212,6 +284,10 @@ func (c *Catalog) UpdateMany(updates map[string]Entry) error {
 // still current. It is used to persist a complete packed-upload plan before
 // any remote object is created.
 func (c *Catalog) UpdateManyIf(expected, updates map[string]Entry) (bool, error) {
+	return c.UpdateManyIfWithPlans(expected, updates, nil, nil)
+}
+
+func (c *Catalog) UpdateManyIfWithPlans(expected, updates map[string]Entry, planUpdates map[string]UploadPlan, planDeletes []string) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.syncPendingDirLocked(); err != nil {
@@ -229,10 +305,29 @@ func (c *Catalog) UpdateManyIf(expected, updates map[string]Entry) (bool, error)
 		previous[key] = c.entries[key]
 		c.entries[key] = next
 	}
+	previousPlans := make(map[string]UploadPlan, len(planUpdates)+len(planDeletes))
+	existedPlans := make(map[string]bool, len(previousPlans))
+	for path, plan := range planUpdates {
+		previousPlans[path], existedPlans[path] = c.uploadPlans[path]
+		c.uploadPlans[path] = plan
+	}
+	for _, path := range planDeletes {
+		if _, tracked := existedPlans[path]; !tracked {
+			previousPlans[path], existedPlans[path] = c.uploadPlans[path]
+		}
+		delete(c.uploadPlans, path)
+	}
 	if committed, err := c.persistLocked(); err != nil {
 		restore := func() {
 			for key, prev := range previous {
 				c.entries[key] = prev
+			}
+			for path, prev := range previousPlans {
+				if existedPlans[path] {
+					c.uploadPlans[path] = prev
+				} else {
+					delete(c.uploadPlans, path)
+				}
 			}
 		}
 		visible, err := c.finishPersistLocked(committed, err, restore)
@@ -294,7 +389,7 @@ func (c *Catalog) persistLocked() (bool, error) {
 		return c.failBeforeCommitLocked(err)
 	}
 
-	data, err := json.Marshal(c.entries)
+	data, err := json.Marshal(snapshot{Magic: snapshotMagic, FormatVersion: currentSnapshotFormat, Entries: c.entries, UploadPlans: c.uploadPlans})
 	if err != nil {
 		return c.failBeforeCommitLocked(err)
 	}
@@ -320,6 +415,40 @@ func (c *Catalog) persistLocked() (bool, error) {
 		return true, errors.Join(ErrAmbiguousCommit, fmt.Errorf("clear recovery marker: %w", err))
 	}
 	return true, nil
+}
+
+func migrateUploadPlans(entries map[string]Entry, plans map[string]UploadPlan) bool {
+	existing := make(map[string]struct{}, len(plans))
+	for path := range plans {
+		existing[path] = struct{}{}
+	}
+	created := make(map[string]UploadPlan)
+	for key, entry := range entries {
+		path := entry.PendingRemotePath
+		offset := entry.PendingRemoteOffset
+		if path == "" && entry.IntentCleanupPending {
+			path = entry.RemotePath
+			offset = entry.RemoteOffset
+		}
+		if path == "" {
+			continue
+		}
+		if _, exists := existing[path]; exists {
+			continue
+		}
+		plan := created[path]
+		plan.RemotePath = path
+		if entry.PendingRemoteSizeKnown {
+			plan.Size = entry.PendingRemoteSize
+			plan.SizeKnown = true
+		}
+		plan.Members = append(plan.Members, UploadPlanMember{Key: key, Generation: entry.Generation, PublicationToken: entry.PublicationToken, Offset: offset, Length: entry.Length})
+		created[path] = plan
+	}
+	for path, plan := range created {
+		plans[path] = plan
+	}
+	return len(created) > 0
 }
 
 func (c *Catalog) failBeforeCommitLocked(err error) (bool, error) {

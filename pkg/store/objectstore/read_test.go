@@ -1,6 +1,7 @@
 package objectstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -19,6 +20,38 @@ import (
 
 	"github.com/mrchypark/daramjwee"
 )
+
+func TestUncertainReadPreservesCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := uncertainRead(ctx, errors.New("transport stopped"))
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
+}
+
+func TestCheckpointEntryCacheRejectsReadStartedBeforeOpaqueTokenPublication(t *testing.T) {
+	cache := newCheckpointCache(1<<20, time.Hour, time.Now)
+	epoch := cache.entryReadEpoch("key")
+	cache.SetEntry("key", &checkpointEntry{PublicationToken: "a-new-but-lexically-lower"}, 1)
+	cache.setEntryIfEpoch("key", &checkpointEntry{PublicationToken: "z-old-but-lexically-higher"}, 1, epoch)
+
+	entry, exists, ok := cache.GetEntry("key")
+	require.True(t, ok)
+	require.True(t, exists)
+	require.Equal(t, "a-new-but-lexically-lower", entry.PublicationToken)
+}
+
+func TestCheckpointEntryCacheKeepsFirstConcurrentReadCompletion(t *testing.T) {
+	cache := newCheckpointCache(1<<20, time.Hour, time.Now)
+	epoch := cache.entryReadEpoch("key")
+	cache.setEntryIfEpoch("key", &checkpointEntry{PublicationToken: "new"}, 1, epoch)
+	cache.setEntryIfEpoch("key", &checkpointEntry{PublicationToken: "old"}, 1, epoch)
+
+	entry, exists, ok := cache.GetEntry("key")
+	require.True(t, ok)
+	require.True(t, exists)
+	require.Equal(t, "new", entry.PublicationToken)
+}
 
 func TestReadUpToSize_ReturnsFullBufferOnExactRead(t *testing.T) {
 	got, err := readUpToSize(strings.NewReader("abcd"), 4)
@@ -268,14 +301,9 @@ func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *
 	require.True(t, ok)
 	remotePath := joinPath(store.prefix, "segments", "local-disappears-remote-live.seg")
 	require.NoError(t, bucket.Upload(ctx, remotePath, strings.NewReader("remote fallback body")))
-	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("local-disappears-remote-live"), map[string]checkpointEntry{
-		"local-disappears-remote-live": {
-			SegmentPath: remotePath,
-			Offset:      0,
-			Length:      int64(len("remote fallback body")),
-			Metadata:    entry.Metadata,
-		},
-	}))
+	remoteEntry := checkpointEntry{SegmentPath: remotePath, Length: int64(len("remote fallback body")), Metadata: entry.Metadata}
+	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("local-disappears-remote-live"), map[string]checkpointEntry{"local-disappears-remote-live": remoteEntry}))
+	uploadRemoteEntryForTest(t, ctx, store, "local-disappears-remote-live", remoteEntry)
 	_, updateErr := store.updateLocalEntry("local-disappears-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		require.True(t, exists)
 		current.RemotePath = remotePath
@@ -301,6 +329,13 @@ func TestStore_GetStream_FallsBackToRemoteWhenSelectedLocalSegmentDisappears(t *
 	require.NoError(t, err)
 	assert.Equal(t, "remote fallback body", string(body))
 	assert.Equal(t, "v1", meta.CacheTag)
+}
+
+func uploadRemoteEntryForTest(t *testing.T, ctx context.Context, store *Store, key string, entry checkpointEntry) {
+	t.Helper()
+	data, err := json.Marshal(entry)
+	require.NoError(t, err)
+	require.NoError(t, store.bucket.Upload(ctx, store.remoteEntryPath(key), bytes.NewReader(data)))
 }
 
 func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappears(t *testing.T) {
@@ -334,7 +369,85 @@ func TestStore_GetStream_DoesNotServeOlderRemoteGenerationWhenLatestLocalDisappe
 	})
 
 	_, _, err = store.GetStream(ctx, "local-disappears-stale-remote")
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
+}
+
+func TestStore_LocalPublishedGenerationRejectsStaleCachedRemoteEntry(t *testing.T) {
+	ctx := context.Background()
+	for _, method := range []string{"get", "stat"} {
+		t.Run(method, func(t *testing.T) {
+			bucket := objstore.NewInMemBucket()
+			store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithCheckpointCache(1<<20), WithCheckpointTTL(time.Hour))
+			store.autoFlush = false
+			key := "local-owner-stale-cache-" + method
+			oldPath := store.blobPath(key, "old")
+			newPath := store.blobPath(key, "new")
+			require.NoError(t, bucket.Upload(ctx, oldPath, strings.NewReader("old")))
+			require.NoError(t, bucket.Upload(ctx, newPath, strings.NewReader("new")))
+			store.checkpointCache.SetEntry(key, &checkpointEntry{SegmentPath: oldPath, Length: 3, Generation: 1, PublicationToken: "0001"}, 1)
+			current := checkpointEntry{SegmentPath: newPath, Length: 3, Generation: 2, PublicationToken: "0002", Metadata: daramjwee.Metadata{CacheTag: "new"}}
+			data, err := json.Marshal(current)
+			require.NoError(t, err)
+			require.NoError(t, bucket.Upload(ctx, store.remoteEntryPath(key), bytes.NewReader(data)))
+			require.NoError(t, store.catalog.Set(key, localCatalogEntry{RemotePath: newPath, Length: 3, Generation: 2, PublicationToken: "0002"}))
+
+			if method == "get" {
+				stream, meta, err := store.GetStream(ctx, key)
+				require.NoError(t, err)
+				defer stream.Close()
+				body, err := io.ReadAll(stream)
+				require.NoError(t, err)
+				require.Equal(t, "new", string(body))
+				require.Equal(t, "new", meta.CacheTag)
+			} else {
+				meta, err := store.Stat(ctx, key)
+				require.NoError(t, err)
+				require.Equal(t, "new", meta.CacheTag)
+			}
+		})
+	}
+}
+
+func TestStore_InFlightOldEntryCannotOverwritePublishedTombstoneCache(t *testing.T) {
+	ctx := context.Background()
+	base := objstore.NewInMemBucket()
+	bucket := &staleEntryReadBucket{Bucket: base, started: make(chan struct{}), release: make(chan struct{})}
+	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithCheckpointCache(1<<20), WithCheckpointTTL(time.Hour))
+	store.autoFlush = false
+	key := "in-flight-entry-before-delete"
+	writer, err := store.BeginSet(ctx, key, nil)
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "value")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, store.flushPending(ctx))
+	for _, segmentPath := range localSegmentPaths(t, store.dataDir) {
+		require.NoError(t, os.Remove(segmentPath))
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		stream, _, err := store.GetStream(ctx, key)
+		if err == nil {
+			err = stream.Close()
+		}
+		firstDone <- err
+	}()
+	<-bucket.started
+	require.NoError(t, store.Delete(ctx, key))
+	close(bucket.release)
+	require.NoError(t, <-firstDone)
+
+	cached, exists, ok := store.checkpointCache.GetEntry(key)
+	require.True(t, ok)
+	require.True(t, exists)
+	require.True(t, cached.Missing)
+	_, _, err = store.GetStream(ctx, key)
 	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
+	_, err = store.Stat(ctx, key)
+	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
 }
 
 func TestStore_GetStream_RecheckUsesNewerLocalGenerationBeforeRemoteFallback(t *testing.T) {
@@ -484,6 +597,56 @@ func TestPackedRemoteReader_ReturnsUnexpectedEOFOnShortPackedBlock(t *testing.T)
 	n, err := reader.Read(buf)
 	require.Zero(t, n)
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+type cancelOnRemoteEntryMissBucket struct {
+	objstore.Bucket
+	cancel       context.CancelFunc
+	manifestGets int
+}
+
+type staleEntryReadBucket struct {
+	objstore.Bucket
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *staleEntryReadBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	blocked := false
+	if strings.Contains(name, "/entries/") || strings.HasPrefix(name, "entries/") {
+		b.once.Do(func() { blocked = true })
+	}
+	if !blocked {
+		return b.Bucket.Get(ctx, name)
+	}
+	reader, err := b.Bucket.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		return nil, err
+	}
+	close(b.started)
+	select {
+	case <-b.release:
+		return io.NopCloser(bytes.NewReader(data)), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (b *cancelOnRemoteEntryMissBucket) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	reader, err := b.Bucket.Get(ctx, name)
+	if strings.Contains(name, "entries/") {
+		b.cancel()
+	}
+	if strings.Contains(name, "manifests/") {
+		b.manifestGets++
+	}
+	return reader, err
 }
 
 type countingCheckpointBucket struct {
@@ -655,6 +818,28 @@ func TestStore_GetStream_FallsBackToLegacyManifestRemoteData(t *testing.T) {
 	stat, err := store.Stat(ctx, "legacy-remote")
 	require.NoError(t, err)
 	assert.Equal(t, "legacy", stat.CacheTag)
+}
+
+func TestStore_CanceledRemoteMissDoesNotFallBackToLegacyManifest(t *testing.T) {
+	base := objstore.NewInMemBucket()
+	seed := New(base, log.NewNopLogger(), WithDir(t.TempDir()))
+	blobPath := seed.blobPath("canceled-legacy", "v1")
+	require.NoError(t, base.Upload(context.Background(), blobPath, strings.NewReader("legacy")))
+	require.NoError(t, seed.publishManifest(context.Background(), "canceled-legacy", blobPath, int64(len("legacy")), &daramjwee.Metadata{CacheTag: "legacy"}))
+
+	for _, stat := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		bucket := &cancelOnRemoteEntryMissBucket{Bucket: base, cancel: cancel}
+		store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()))
+		if stat {
+			_, err := store.Stat(ctx, "canceled-legacy")
+			require.ErrorIs(t, err, context.Canceled)
+		} else {
+			_, _, err := store.GetStream(ctx, "canceled-legacy")
+			require.ErrorIs(t, err, context.Canceled)
+		}
+		require.Zero(t, bucket.manifestGets)
+	}
 }
 
 func TestStore_GetStream_FallsBackToDefaultPageSizeForLegacyPagedManifest(t *testing.T) {

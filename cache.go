@@ -109,6 +109,12 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 		if errors.Is(err, ErrNilMetadata) {
 			return nil, err
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if errors.Is(err, ErrReadStateUncertain) {
+			return nil, err
+		}
 	}
 
 	// Slow path: need timeout context for lower tiers and origin fetch
@@ -124,7 +130,8 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 	higherTiersClean := true
 
 	for i, tier := range c.tiers {
-		tierStream, tierMeta, err := c.getStreamFromStore(c.getStreamContextForStore(ctx, setupCtx, tier), tier, key)
+		readCtx := c.getStreamContextForStore(ctx, setupCtx, tier)
+		tierStream, tierMeta, err := c.getStreamFromStore(readCtx, tier, key)
 		if err == nil {
 			if i == 0 {
 				resp, respErr := c.handleTopTierHit(ctx, key, req, fetcher, tierStream, tierMeta, cancel, topGenerationAtStart, nil, 0)
@@ -154,6 +161,14 @@ func (c *DaramjweeCache) Get(ctx context.Context, key string, req GetRequest, fe
 			return c.attachSession(resp, session)
 		}
 		if errors.Is(err, ErrNilMetadata) {
+			_ = session.Finish(OutcomeReadError)
+			return nil, err
+		}
+		if readCtx.Err() != nil {
+			_ = session.Finish(OutcomeReadError)
+			return nil, readCtx.Err()
+		}
+		if errors.Is(err, ErrReadStateUncertain) {
 			_ = session.Finish(OutcomeReadError)
 			return nil, err
 		}

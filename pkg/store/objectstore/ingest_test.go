@@ -435,10 +435,10 @@ func TestStore_MissingLocalSegmentDoesNotRemainVisible(t *testing.T) {
 	require.NoError(t, os.Remove(segments[0]))
 
 	_, err = store.Stat(ctx, "missing-segment")
-	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
 
 	_, _, err = store.GetStream(ctx, "missing-segment")
-	require.ErrorIs(t, err, daramjwee.ErrNotFound)
+	require.ErrorIs(t, err, daramjwee.ErrReadStateUncertain)
 }
 
 func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *testing.T) {
@@ -468,10 +468,10 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 	require.NoError(t, os.Remove(segments[0]))
 
 	_, statErr := store.Stat(ctx, "missing-segment-remote-fallback")
-	require.ErrorIs(t, statErr, daramjwee.ErrNotFound)
+	require.ErrorIs(t, statErr, daramjwee.ErrReadStateUncertain)
 
 	_, _, getErr := store.GetStream(ctx, "missing-segment-remote-fallback")
-	require.ErrorIs(t, getErr, daramjwee.ErrNotFound)
+	require.ErrorIs(t, getErr, daramjwee.ErrReadStateUncertain)
 
 	reopened := New(
 		bucket,
@@ -480,7 +480,7 @@ func TestStore_MissingLocalSegmentDoesNotFallBackToOlderRemoteGeneration(t *test
 	)
 	disableAutoFlush(reopened)
 	_, reopenErr := reopened.Stat(ctx, "missing-segment-remote-fallback")
-	require.ErrorIs(t, reopenErr, daramjwee.ErrNotFound)
+	require.ErrorIs(t, reopenErr, daramjwee.ErrReadStateUncertain)
 }
 
 func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.T) {
@@ -505,14 +505,9 @@ func TestStore_MissingLocalSegmentFallsBackToCurrentRemoteGeneration(t *testing.
 
 	remotePath := store.blobPath("missing-segment-remote-live", "remote-v1")
 	require.NoError(t, bucket.Upload(ctx, remotePath, strings.NewReader("remote-current")))
-	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("missing-segment-remote-live"), map[string]checkpointEntry{
-		"missing-segment-remote-live": {
-			SegmentPath: remotePath,
-			Offset:      0,
-			Length:      int64(len("remote-current")),
-			Metadata:    entry.Metadata,
-		},
-	}))
+	remoteEntry := checkpointEntry{SegmentPath: remotePath, Length: int64(len("remote-current")), Metadata: entry.Metadata}
+	require.NoError(t, store.publishCheckpoint(ctx, shardForKey("missing-segment-remote-live"), map[string]checkpointEntry{"missing-segment-remote-live": remoteEntry}))
+	uploadRemoteEntryForTest(t, ctx, store, "missing-segment-remote-live", remoteEntry)
 	_, updateErr := store.updateLocalEntry("missing-segment-remote-live", func(current localCatalogEntry, exists bool) (localCatalogEntry, bool) {
 		require.True(t, exists)
 		current.RemotePath = remotePath

@@ -16,6 +16,14 @@ import (
 
 var errRemoteEntryTombstone = errors.New("objectstore: remote entry is a tombstone")
 
+func uncertainRead(ctx context.Context, err error) error {
+	var ctxErr error
+	if ctx != nil {
+		ctxErr = ctx.Err()
+	}
+	return errors.Join(daramjwee.ErrReadStateUncertain, err, ctxErr)
+}
+
 func (s *Store) loadCheckpointSnapshot(ctx context.Context, shardID string) (*checkpoint, error) {
 	return s.loadCheckpointSnapshotMode(ctx, shardID, true)
 }
@@ -42,12 +50,12 @@ func (s *Store) loadCheckpointSnapshotMode(ctx context.Context, shardID string, 
 
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, err
+		return nil, uncertainRead(ctx, err)
 	}
 
 	var cp checkpoint
 	if err := json.Unmarshal(data, &cp); err != nil {
-		return nil, fmt.Errorf("objectstore: decode checkpoint for shard %q: %w", shardID, err)
+		return nil, uncertainRead(ctx, fmt.Errorf("objectstore: decode checkpoint for shard %q: %w", shardID, err))
 	}
 	s.checkpointCache.Set(shardID, &cp, int64(len(data)))
 	return &cp, nil
@@ -67,25 +75,44 @@ func decodeCheckpoint(reader io.Reader, cp *checkpoint) error {
 func (s *Store) loadRemoteEntry(ctx context.Context, key string) (*checkpointEntry, error) {
 	if entry, exists, cached := s.checkpointCache.GetEntry(key); cached {
 		if exists {
-			return validateRemoteEntry(key, entry)
+			validated, err := validateRemoteEntry(key, entry)
+			if err != nil && !errors.Is(err, errRemoteEntryTombstone) {
+				return nil, uncertainRead(ctx, err)
+			}
+			return validated, err
 		}
 	}
 
+	entry, err := s.loadRemoteEntryDirect(ctx, key, true)
+	if err == nil || errors.Is(err, errRemoteEntryTombstone) || !errors.Is(err, daramjwee.ErrNotFound) {
+		return entry, err
+	}
+	return s.loadCheckpointEntry(ctx, key)
+}
+
+func (s *Store) loadRemoteEntryDirect(ctx context.Context, key string, cacheResult bool) (*checkpointEntry, error) {
+	cacheEpoch := s.checkpointCache.entryReadEpoch(key)
 	reader, err := s.bucket.Get(ctx, s.remoteEntryPath(key))
 	if err == nil {
 		defer reader.Close()
 		var entry checkpointEntry
 		size, err := decodeCheckpointEntry(reader, &entry)
 		if err != nil {
-			return nil, fmt.Errorf("objectstore: decode remote entry for %q: %w", key, err)
+			return nil, uncertainRead(ctx, fmt.Errorf("objectstore: decode remote entry for %q: %w", key, err))
 		}
-		s.checkpointCache.SetEntry(key, &entry, size)
-		return validateRemoteEntry(key, entry)
+		if cacheResult {
+			s.checkpointCache.setEntryIfEpoch(key, &entry, size, cacheEpoch)
+		}
+		validated, err := validateRemoteEntry(key, entry)
+		if err != nil && !errors.Is(err, errRemoteEntryTombstone) {
+			return nil, uncertainRead(ctx, err)
+		}
+		return validated, err
 	}
 	if !s.bucket.IsObjNotFoundErr(err) {
 		return nil, err
 	}
-	return s.loadCheckpointEntry(ctx, key)
+	return nil, daramjwee.ErrNotFound
 }
 
 func (s *Store) loadCheckpointEntry(ctx context.Context, key string) (*checkpointEntry, error) {
@@ -97,7 +124,11 @@ func (s *Store) loadCheckpointEntry(ctx context.Context, key string) (*checkpoin
 	if !ok {
 		return nil, daramjwee.ErrNotFound
 	}
-	return &entry, nil
+	validated, err := validateRemoteEntry(key, entry)
+	if err != nil && !errors.Is(err, errRemoteEntryTombstone) {
+		return nil, uncertainRead(ctx, err)
+	}
+	return validated, err
 }
 
 func validateRemoteEntry(key string, entry checkpointEntry) (*checkpointEntry, error) {
@@ -123,10 +154,7 @@ func (s *Store) openRemoteEntry(ctx context.Context, entry checkpointEntry) (io.
 		if s.blockCache == nil {
 			reader, err := s.bucket.GetRange(ctx, entry.SegmentPath, entry.Offset, entry.Length)
 			if err != nil {
-				if s.bucket.IsObjNotFoundErr(err) {
-					return nil, daramjwee.ErrNotFound
-				}
-				return nil, err
+				return nil, uncertainRead(ctx, err)
 			}
 			return reader, nil
 		}
@@ -143,10 +171,7 @@ func (s *Store) openRemoteEntry(ctx context.Context, entry checkpointEntry) (io.
 
 	reader, err := s.bucket.GetRange(ctx, entry.SegmentPath, entry.Offset, entry.Length)
 	if err != nil {
-		if s.bucket.IsObjNotFoundErr(err) {
-			return nil, daramjwee.ErrNotFound
-		}
-		return nil, err
+		return nil, uncertainRead(ctx, err)
 	}
 	return reader, nil
 }
@@ -161,31 +186,17 @@ func (s *Store) loadPackedBlock(ctx context.Context, remotePath string, blockInd
 		return block, nil
 	}
 
-	value, err, _ := s.blockLoads.Do(key.String(), func() (any, error) {
-		if block, ok := s.blockCache.Get(key); ok {
-			return block, nil
-		}
-		reader, err := s.bucket.GetRange(ctx, remotePath, blockIndex*s.pageSize, s.pageSize)
-		if err != nil {
-			if s.bucket.IsObjNotFoundErr(err) {
-				return nil, daramjwee.ErrNotFound
-			}
-			return nil, err
-		}
-		defer reader.Close()
-
-		block, err := readUpToSize(reader, s.pageSize)
-		if err != nil {
-			return nil, err
-		}
-		s.blockCache.Set(key, block)
-		return block, nil
-	})
+	reader, err := s.bucket.GetRange(ctx, remotePath, blockIndex*s.pageSize, s.pageSize)
 	if err != nil {
-		return nil, err
+		return nil, uncertainRead(ctx, err)
 	}
-	val, _ := value.([]byte)
-	return val, nil
+	defer reader.Close()
+	block, err := readUpToSize(reader, s.pageSize)
+	if err != nil {
+		return nil, uncertainRead(ctx, err)
+	}
+	s.blockCache.Set(key, block)
+	return block, nil
 }
 
 func readUpToSize(reader io.Reader, size int64) ([]byte, error) {

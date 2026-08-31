@@ -56,7 +56,11 @@ func (s *Store) Compact(ctx context.Context, olderThan time.Duration) (SweepStat
 	for name := range latest {
 		reachable[name] = struct{}{}
 	}
-	s.reclaimRemoteObjects(ctx, candidates, reachable, &stats)
+	receipts, err := s.collectGCReceipts(ctx)
+	if err != nil {
+		return stats, err
+	}
+	s.reclaimRemoteObjects(ctx, candidates, reachable, receipts, &stats)
 	if err := s.pruneStaleCheckpoints(ctx, cutoff, immediate, &stats); err != nil {
 		return stats, err
 	}
@@ -241,29 +245,44 @@ func (s *Store) collectUploadIntentPaths(ctx context.Context, reachable map[stri
 		if !s.isPackedRemotePath(intent.RemotePath) && !strings.HasPrefix(intent.RemotePath, s.blobRoot()) {
 			return fmt.Errorf("objectstore: upload intent %q has invalid remote_path", name)
 		}
-		if intent.Completed || intent.Abandoned {
-			if err := s.bucket.Delete(ctx, name); ignoreNotFound(err, s.bucket) != nil {
-				_ = level.Warn(s.logger).Log("msg", "failed to clear remote upload intent", "path", name, "err", err)
+		if intent.Version == 2 && (intent.Completed || intent.Abandoned) {
+			if err := s.bucket.Delete(ctx, name); ignoreNotFound(err, s.bucket) == nil {
+				return nil
+			} else {
+				_ = level.Warn(s.logger).Log("msg", "failed to clear terminal upload intent", "path", name, "err", err)
 			}
-			return nil
-		}
-		if _, published := reachable[intent.RemotePath]; published {
-			data, err := json.Marshal(uploadIntent{RemotePath: intent.RemotePath, Completed: true})
-			if err != nil {
-				return err
-			}
-			if err := s.bucket.Upload(ctx, name, strings.NewReader(string(data))); err != nil {
-				return err
-			}
-			if err := s.bucket.Delete(ctx, name); ignoreNotFound(err, s.bucket) != nil {
-				_ = level.Warn(s.logger).Log("msg", "failed to clear published upload intent", "path", name, "err", err)
-			}
-			return nil
 		}
 		reachable[intent.RemotePath] = struct{}{}
 		stats.Reachable++
 		return nil
 	}, objstore.WithRecursiveIter())
+}
+
+func (s *Store) collectGCReceipts(ctx context.Context) (map[string]string, error) {
+	receipts := make(map[string]string)
+	err := s.bucket.Iter(ctx, ensureDir(joinPath(s.prefix, "gc-receipts")), func(name string) error {
+		if strings.HasSuffix(name, "/") {
+			return nil
+		}
+		reader, err := s.bucket.Get(ctx, name)
+		if err != nil {
+			if s.bucket.IsObjNotFoundErr(err) {
+				return nil
+			}
+			return err
+		}
+		defer reader.Close()
+		var receipt uploadIntent
+		if _, err := decodeUploadIntent(reader, &receipt); err != nil {
+			return fmt.Errorf("objectstore: decode GC receipt %q: %w", name, err)
+		}
+		if receipt.Version != 2 || (!receipt.Completed && !receipt.Abandoned) || receipt.RemotePath == "" || (!s.isPackedRemotePath(receipt.RemotePath) && !strings.HasPrefix(receipt.RemotePath, s.blobRoot())) {
+			return fmt.Errorf("objectstore: GC receipt %q has invalid remote_path", name)
+		}
+		receipts[receipt.RemotePath] = name
+		return nil
+	}, objstore.WithRecursiveIter())
+	return receipts, err
 }
 
 func decodeUploadIntent(reader io.Reader, intent *uploadIntent) (int64, error) {
@@ -293,9 +312,13 @@ func (s *Store) collectRemoteCandidates(ctx context.Context, root string, cutoff
 	return candidates, err
 }
 
-func (s *Store) reclaimRemoteObjects(ctx context.Context, candidates []string, reachable map[string]struct{}, stats *SweepStats) {
+func (s *Store) reclaimRemoteObjects(ctx context.Context, candidates []string, reachable map[string]struct{}, receipts map[string]string, stats *SweepStats) {
 	for _, name := range candidates {
 		if _, ok := reachable[name]; ok {
+			continue
+		}
+		receipt, ok := receipts[name]
+		if !ok {
 			continue
 		}
 		if err := s.bucket.Delete(ctx, name); err != nil {
@@ -306,6 +329,10 @@ func (s *Store) reclaimRemoteObjects(ctx context.Context, candidates []string, r
 			continue
 		}
 		stats.Deleted++
+		if err := s.bucket.Delete(ctx, receipt); ignoreNotFound(err, s.bucket) != nil {
+			stats.Failed++
+			_ = level.Warn(s.logger).Log("msg", "failed to clear GC receipt", "path", receipt, "err", err)
+		}
 	}
 }
 

@@ -24,7 +24,6 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/thanos-io/objstore"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/mrchypark/daramjwee"
 	"github.com/mrchypark/daramjwee/internal/stripedlock"
@@ -95,10 +94,9 @@ type Store struct {
 	catalog             *internalcatalog.Catalog
 	updateCatalog       func(string, func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error)
 	updateCatalogManyIf func(map[string]localCatalogEntry, map[string]localCatalogEntry) (bool, error)
+	updateCatalogState  func(map[string]localCatalogEntry, map[string]localCatalogEntry, map[string]uploadPlan, []string) (bool, error)
 	syncCatalog         func() error
 	lockManager         *stripedlock.Manager
-	blockLoads          singleflight.Group
-	pageLoads           singleflight.Group
 	manifestCache       *manifestCache
 	instanceID          string
 	versionSeq          atomic.Uint64
@@ -155,8 +153,8 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	}
 
 	dataDir := cfg.dir
-	var initErr error
-	if dataDir == "" {
+	initErr := validateRemoteEntryCAS(bucket)
+	if initErr == nil && dataDir == "" {
 		dataDir, initErr = os.MkdirTemp("", "daramjwee-objectstore-*")
 	}
 
@@ -203,14 +201,14 @@ func New(bucket objstore.Bucket, logger log.Logger, opts ...Option) *Store {
 	if cat != nil {
 		store.updateCatalog = cat.Update
 		store.updateCatalogManyIf = cat.UpdateManyIf
+		store.updateCatalogState = cat.UpdateManyIfWithPlans
 		store.syncCatalog = cat.Sync
-	}
-	if store.initErr == nil {
-		store.initErr = validateRemoteEntryCAS(bucket)
 	}
 	if store.initErr == nil {
 		if err := store.recoverLocalState(); err != nil {
 			store.initErr = fmt.Errorf("failed to recover local objectstore state: %w", err)
+		} else if err := store.protectLiveUploadPlans(context.Background(), ""); err != nil {
+			store.initErr = fmt.Errorf("failed to protect recovering objectstore uploads: %w", err)
 		} else if store.autoFlush {
 			store.flushMu.Lock()
 			if len(store.pendingShards) > 0 {
@@ -278,21 +276,38 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 		ctx = context.Background()
 	}
 	if err := s.ensureReady(); err != nil {
+		if errors.Is(err, ErrAmbiguousCommit) {
+			return nil, nil, uncertainRead(ctx, err)
+		}
 		return nil, nil, err
 	}
 
-	if stream, metadata, ok, err := s.openCurrentLocalEntry(key); err != nil {
+	stream, metadata, ok, localEntry, err := s.openCurrentLocalEntry(ctx, key)
+	if err != nil {
 		return nil, nil, err
-	} else if ok {
+	}
+	if ok {
 		return stream, metadata, nil
 	}
 
-	entry, err := s.loadRemoteEntry(ctx, key)
+	ownedRemote := ownsPublishedRemoteEntry(localEntry)
+	var entry *checkpointEntry
+	if ownedRemote {
+		entry, err = s.loadRemoteEntryDirect(ctx, key, false)
+	} else {
+		entry, err = s.loadRemoteEntry(ctx, key)
+	}
 	if err != nil {
 		if errors.Is(err, errRemoteEntryTombstone) {
-			return nil, nil, daramjwee.ErrNotFound
+			return nil, nil, uncertainRead(ctx, err)
+		}
+		if ownedRemote {
+			return nil, nil, uncertainRead(ctx, err)
 		}
 		if !errors.Is(err, daramjwee.ErrNotFound) {
+			return nil, nil, err
+		}
+		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
 		m, manifestErr := s.loadManifest(ctx, key)
@@ -313,10 +328,7 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 
 		reader, manifestErr := s.bucket.Get(ctx, m.BlobPath)
 		if manifestErr != nil {
-			if s.bucket.IsObjNotFoundErr(manifestErr) {
-				return nil, nil, fmt.Errorf("objectstore: manifest for %q points to missing blob %q: %w", key, m.BlobPath, manifestErr)
-			}
-			return nil, nil, manifestErr
+			return nil, nil, uncertainRead(ctx, fmt.Errorf("objectstore: manifest for %q points to unreadable blob %q: %w", key, m.BlobPath, manifestErr))
 		}
 		return reader, daramjwee.CloneMetadata(&m.Metadata), nil
 	}
@@ -327,54 +339,57 @@ func (s *Store) GetStream(ctx context.Context, key string) (io.ReadCloser, *dara
 	return reader, daramjwee.CloneMetadata(&entry.Metadata), nil
 }
 
-func (s *Store) openCurrentLocalEntry(key string) (io.ReadCloser, *daramjwee.Metadata, bool, error) {
+func (s *Store) openCurrentLocalEntry(ctx context.Context, key string) (io.ReadCloser, *daramjwee.Metadata, bool, localCatalogEntry, error) {
 	const maxLocalOpenAttempts = 3
 
 	for attempts := 0; attempts < maxLocalOpenAttempts; attempts++ {
-		entry, ok, err := s.loadLiveLocalEntry(key)
+		entry, ok, err := s.loadLiveLocalEntry(ctx, key)
 		if err != nil {
 			if errors.Is(err, errMissingLocalEntry) {
-				return nil, nil, false, daramjwee.ErrNotFound
+				return nil, nil, false, localCatalogEntry{}, daramjwee.ErrReadStateUncertain
 			}
-			return nil, nil, false, err
+			return nil, nil, false, localCatalogEntry{}, err
 		}
 		if !ok {
-			return nil, nil, false, nil
+			return nil, nil, false, entry, nil
 		}
 
 		stream, err := s.openLocalEntry(entry)
 		if err == nil {
-			return stream, daramjwee.CloneMetadata(&entry.Metadata), true, nil
+			return stream, daramjwee.CloneMetadata(&entry.Metadata), true, localCatalogEntry{}, nil
 		}
 		if !os.IsNotExist(err) {
-			return nil, nil, false, err
+			return nil, nil, false, localCatalogEntry{}, uncertainRead(ctx, err)
 		}
 		if attempts < maxLocalOpenAttempts-1 {
 			continue
 		}
 
-		recheckEntry, recheckOK, repairErr := s.loadLiveLocalEntry(key)
+		recheckEntry, recheckOK, repairErr := s.loadLiveLocalEntry(ctx, key)
 		if repairErr != nil {
 			if errors.Is(repairErr, errMissingLocalEntry) {
-				return nil, nil, false, daramjwee.ErrNotFound
+				return nil, nil, false, localCatalogEntry{}, daramjwee.ErrReadStateUncertain
 			}
-			return nil, nil, false, repairErr
+			return nil, nil, false, localCatalogEntry{}, repairErr
 		}
 		if !recheckOK {
-			return nil, nil, false, nil
+			if ownsPublishedRemoteEntry(recheckEntry) {
+				return nil, nil, false, recheckEntry, nil
+			}
+			return nil, nil, false, localCatalogEntry{}, uncertainRead(ctx, os.ErrNotExist)
 		}
 
 		recheckStream, recheckErr := s.openLocalEntry(recheckEntry)
 		if recheckErr == nil {
-			return recheckStream, daramjwee.CloneMetadata(&recheckEntry.Metadata), true, nil
+			return recheckStream, daramjwee.CloneMetadata(&recheckEntry.Metadata), true, localCatalogEntry{}, nil
 		}
 		if os.IsNotExist(recheckErr) {
-			return nil, nil, false, nil
+			return nil, nil, false, localCatalogEntry{}, uncertainRead(ctx, recheckErr)
 		}
-		return nil, nil, false, recheckErr
+		return nil, nil, false, localCatalogEntry{}, uncertainRead(ctx, recheckErr)
 	}
 
-	return nil, nil, false, nil
+	return nil, nil, false, localCatalogEntry{}, uncertainRead(ctx, os.ErrNotExist)
 }
 
 // BeginSet starts a staged write for a new immutable generation.
@@ -435,7 +450,11 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	generation := s.nextGeneration()
+	if err := s.flushRun.acquire(ctx); err != nil {
+		return err
+	}
 	applied, err := s.publishDeleteTombstone(key, generation)
+	s.flushRun.release()
 	if err != nil {
 		if applied {
 			s.enqueueFlush(key)
@@ -458,24 +477,41 @@ func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, erro
 		ctx = context.Background()
 	}
 	if err := s.ensureReady(); err != nil {
-		return nil, err
-	}
-
-	if entry, ok, err := s.loadLiveLocalEntry(key); err != nil {
-		if errors.Is(err, errMissingLocalEntry) {
-			return nil, daramjwee.ErrNotFound
+		if errors.Is(err, ErrAmbiguousCommit) {
+			return nil, uncertainRead(ctx, err)
 		}
 		return nil, err
-	} else if ok {
-		return daramjwee.CloneMetadata(&entry.Metadata), nil
 	}
 
-	entry, err := s.loadRemoteEntry(ctx, key)
+	localEntry, ok, err := s.loadLiveLocalEntry(ctx, key)
+	if err != nil {
+		if errors.Is(err, errMissingLocalEntry) {
+			return nil, daramjwee.ErrReadStateUncertain
+		}
+		return nil, err
+	}
+	if ok {
+		return daramjwee.CloneMetadata(&localEntry.Metadata), nil
+	}
+
+	ownedRemote := ownsPublishedRemoteEntry(localEntry)
+	var entry *checkpointEntry
+	if ownedRemote {
+		entry, err = s.loadRemoteEntryDirect(ctx, key, false)
+	} else {
+		entry, err = s.loadRemoteEntry(ctx, key)
+	}
 	if err != nil {
 		if errors.Is(err, errRemoteEntryTombstone) {
-			return nil, daramjwee.ErrNotFound
+			return nil, uncertainRead(ctx, err)
+		}
+		if ownedRemote {
+			return nil, uncertainRead(ctx, err)
 		}
 		if !errors.Is(err, daramjwee.ErrNotFound) {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		m, manifestErr := s.loadManifest(ctx, key)
@@ -485,6 +521,10 @@ func (s *Store) Stat(ctx context.Context, key string) (*daramjwee.Metadata, erro
 		return daramjwee.CloneMetadata(&m.Metadata), nil
 	}
 	return daramjwee.CloneMetadata(&entry.Metadata), nil
+}
+
+func ownsPublishedRemoteEntry(entry localCatalogEntry) bool {
+	return !entry.Superseded && ((entry.Missing && entry.RemotePublished) || (!entry.Missing && entry.RemotePath != "" && entry.PendingRemotePath == ""))
 }
 
 func (s *Store) ensureReady() error {
@@ -517,12 +557,12 @@ func (s *Store) loadManifest(ctx context.Context, key string) (*manifest, error)
 
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, err
+		return nil, uncertainRead(ctx, err)
 	}
 
 	var m manifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("objectstore: decode manifest for %q: %w", key, err)
+		return nil, uncertainRead(ctx, fmt.Errorf("objectstore: decode manifest for %q: %w", key, err))
 	}
 	s.manifestCache.Set(key, &m)
 	return &m, nil
@@ -560,34 +600,23 @@ func (s *Store) loadPage(ctx context.Context, m *manifest, pageIndex int64) ([]b
 		return page, nil
 	}
 
-	value, err, _ := s.pageLoads.Do(key.String(), func() (any, error) {
-		if page, ok := s.pageCache.Get(key); ok {
-			return page, nil
-		}
-		pageSize := s.effectivePageSize(m)
-		start := pageIndex * pageSize
-		length := pageSize
-		if remaining := m.Size - start; remaining < length {
-			length = remaining
-		}
-		reader, err := s.bucket.GetRange(ctx, m.BlobPath, start, length)
-		if err != nil {
-			return nil, err
-		}
-		defer reader.Close()
-
-		page, err := io.ReadAll(reader)
-		if err != nil {
-			return nil, err
-		}
-		s.pageCache.Set(key, page)
-		return page, nil
-	})
-	if err != nil {
-		return nil, err
+	pageSize := s.effectivePageSize(m)
+	start := pageIndex * pageSize
+	length := pageSize
+	if remaining := m.Size - start; remaining < length {
+		length = remaining
 	}
-	val, _ := value.([]byte)
-	return val, nil
+	reader, err := s.bucket.GetRange(ctx, m.BlobPath, start, length)
+	if err != nil {
+		return nil, uncertainRead(ctx, err)
+	}
+	defer reader.Close()
+	page, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, uncertainRead(ctx, err)
+	}
+	s.pageCache.Set(key, page)
+	return page, nil
 }
 
 func (s *Store) effectivePageSize(m *manifest) int64 {
@@ -609,22 +638,24 @@ func (s *Store) uploadIntentPath(remotePath string) string {
 	return joinPath(s.prefix, "uploads", encodeKey(remotePath)+".json")
 }
 
+func (s *Store) gcReceiptPath(remotePath string) string {
+	return joinPath(s.prefix, "gc-receipts", encodeKey(remotePath)+".json")
+}
+
 func (s *Store) publishUploadIntent(ctx context.Context, remotePath string) error {
-	data, err := json.Marshal(uploadIntent{RemotePath: remotePath})
+	intent := uploadIntent{Version: 2, RemotePath: remotePath}
+	if s.catalog != nil {
+		if plan, ok := s.catalog.UploadPlans()[remotePath]; ok {
+			intent.Size = plan.Size
+			intent.SizeKnown = plan.SizeKnown
+			intent.Members = plan.Members
+		}
+	}
+	data, err := json.Marshal(intent)
 	if err != nil {
 		return err
 	}
 	return s.bucket.Upload(ctx, s.uploadIntentPath(remotePath), bytes.NewReader(data))
-}
-
-func (s *Store) abandonUploadIntent(ctx context.Context, remotePath string) error {
-	data, err := json.Marshal(uploadIntent{RemotePath: remotePath, Abandoned: true})
-	if err != nil {
-		return err
-	}
-	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), intentFinalizeTimeout)
-	defer cancel()
-	return s.bucket.Upload(finalizeCtx, s.uploadIntentPath(remotePath), bytes.NewReader(data))
 }
 
 func (s *Store) blobDir(key string) string {

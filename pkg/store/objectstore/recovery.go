@@ -49,5 +49,11 @@ func (s *Store) recoverLocalState() error {
 			s.pendingShards[shardForKey(key)] = struct{}{}
 		}
 	}
+	for _, plan := range s.catalog.UploadPlans() {
+		for _, member := range plan.Members {
+			s.pendingShards[shardForKey(member.Key)] = struct{}{}
+			break
+		}
+	}
 	return nil
 }

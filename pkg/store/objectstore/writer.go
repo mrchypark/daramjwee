@@ -74,6 +74,12 @@ func (w *writer) Commit(ctx context.Context) (result error) {
 	if w.metadata != nil {
 		metadata = *w.metadata
 	}
+	// ponytail: process-wide publication fence; replace with per-key context locks if write latency becomes measurable.
+	if err := w.store.flushRun.acquire(ctx); err != nil {
+		_ = removeLocalSegment(sealedPath)
+		return fmt.Errorf("objectstore: commit: publication fence: %w", err)
+	}
+	defer w.store.flushRun.release()
 	published, err := w.store.publishLocalEntry(w.key, localCatalogEntry{
 		SegmentPath:      sealedPath,
 		Offset:           0,

@@ -185,37 +185,51 @@ func TestStore_CompactDropsStaleLocalRemotePath(t *testing.T) {
 	assert.Equal(t, "version-two", string(body))
 }
 
-func TestStore_CompactClearsCompletedIntentAfterDeleteFailure(t *testing.T) {
+func TestStore_RetryClearsCompletedIntentAfterDeleteFailure(t *testing.T) {
 	ctx := context.Background()
 	base := objstore.NewInMemBucket()
 	bucket := &failFirstIntentDeleteBucket{Bucket: base}
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
 	store.autoFlush = false
 
-	write := func(value string) {
-		writer, err := store.BeginSet(ctx, "intent-cleanup", &daramjwee.Metadata{CacheTag: value})
-		require.NoError(t, err)
-		_, err = io.WriteString(writer, value)
-		require.NoError(t, err)
-		require.NoError(t, writer.Close())
-		require.NoError(t, store.flushPending(ctx))
-	}
-	write("version-one")
-	blobs := listObjectNames(t, base, store.blobRoot())
-	require.Len(t, blobs, 1)
-	oldPath := blobs[0]
+	writer, err := store.BeginSet(ctx, "intent-cleanup", &daramjwee.Metadata{CacheTag: "version-one"})
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "version-one")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.ErrorContains(t, store.flushPending(ctx), "intent delete failed")
 	require.Len(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")), 1)
-	write("version-two")
-
-	_, err := store.Compact(ctx, 0)
-	require.NoError(t, err)
-	exists, err := base.Exists(ctx, oldPath)
-	require.NoError(t, err)
-	require.False(t, exists)
+	writePendingObject(t, store, "intent-cleanup", "version-two")
+	require.NoError(t, store.flushPending(ctx))
 	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
 }
 
-func TestStore_RetryReusesAbandonedUploadPath(t *testing.T) {
+func TestStore_CleanupCatalogFailureKeepsPlanForSameProcessRetry(t *testing.T) {
+	ctx := context.Background()
+	store := New(objstore.NewInMemBucket(), log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
+	store.autoFlush = false
+	writePendingObject(t, store, "cleanup-catalog-retry", "payload")
+
+	originalUpdate := store.updateCatalog
+	fail := true
+	store.updateCatalog = func(key string, fn func(localCatalogEntry, bool) (localCatalogEntry, bool)) (bool, error) {
+		current, exists := store.catalog.Get(key)
+		next, keep := fn(current, exists)
+		if fail && current.IntentCleanupPending && (!keep || !next.IntentCleanupPending) {
+			fail = false
+			return false, errors.New("cleanup catalog failed")
+		}
+		return originalUpdate(key, fn)
+	}
+	require.ErrorContains(t, store.flushPending(ctx), "cleanup catalog failed")
+	require.Len(t, store.catalog.UploadPlans(), 1)
+
+	store.updateCatalog = originalUpdate
+	require.NoError(t, store.flushPending(ctx))
+	require.Empty(t, store.catalog.UploadPlans())
+}
+
+func TestStore_OutcomeUnknownKeepsActiveIntentAcrossCompaction(t *testing.T) {
 	ctx := context.Background()
 	base := objstore.NewInMemBucket()
 	bucket := &failFirstPayloadAfterUploadBucket{Bucket: base}
@@ -229,14 +243,31 @@ func TestStore_RetryReusesAbandonedUploadPath(t *testing.T) {
 	require.Error(t, store.flushPending(ctx))
 	blobs := listObjectNames(t, base, store.blobRoot())
 	require.Len(t, blobs, 1)
-	abandonedPath := blobs[0]
+	intentPaths := listObjectNames(t, base, joinPath(store.prefix, "uploads"))
+	require.Len(t, intentPaths, 1)
+	reader, err := base.Get(ctx, intentPaths[0])
+	require.NoError(t, err)
+	var intent uploadIntent
+	require.NoError(t, json.NewDecoder(reader).Decode(&intent))
+	require.NoError(t, reader.Close())
+	require.False(t, intent.Completed)
+	require.False(t, intent.Abandoned)
+
+	compactor := New(base, log.NewNopLogger(), WithDir(t.TempDir()))
+	_, err = compactor.Compact(ctx, 0)
+	require.NoError(t, err)
+	exists, err := base.Exists(ctx, blobs[0])
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	writePendingObject(t, store, "abandoned-intent", "replacement")
 	require.NoError(t, store.flushPending(ctx))
 
 	_, err = store.Compact(ctx, 0)
 	require.NoError(t, err)
-	exists, err := base.Exists(ctx, abandonedPath)
+	exists, err = base.Exists(ctx, blobs[0])
 	require.NoError(t, err)
-	require.True(t, exists)
+	require.False(t, exists)
 	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
 }
 
@@ -259,13 +290,9 @@ func TestStore_RetryReusesPayloadAfterCompletedIntentUploadFailure(t *testing.T)
 	assert.Empty(t, listObjectNames(t, base, joinPath(store.prefix, "uploads")))
 }
 
-func TestStore_AbandonIntentHasBoundedDetachedContext(t *testing.T) {
-	previousTimeout := intentFinalizeTimeout
-	intentFinalizeTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { intentFinalizeTimeout = previousTimeout })
-
+func TestStore_OutcomeUnknownUploadRespectsContext(t *testing.T) {
 	base := objstore.NewInMemBucket()
-	bucket := &blockingAbandonedIntentBucket{Bucket: base}
+	bucket := &blockingPayloadUntilContextBucket{Bucket: base}
 	store := New(bucket, log.NewNopLogger(), WithDir(t.TempDir()), WithPackThreshold(1))
 	store.autoFlush = false
 	writer, err := store.BeginSet(context.Background(), "bounded-abandon", &daramjwee.Metadata{})
@@ -320,26 +347,14 @@ func (b *failCompletedIntentUploadBucket) Upload(ctx context.Context, name strin
 	return b.Bucket.Upload(ctx, name, r, opts...)
 }
 
-type blockingAbandonedIntentBucket struct {
+type blockingPayloadUntilContextBucket struct {
 	objstore.Bucket
 }
 
-func (b *blockingAbandonedIntentBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
+func (b *blockingPayloadUntilContextBucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) error {
 	if strings.Contains(name, "/blobs/") || strings.HasPrefix(name, "blobs/") {
 		<-ctx.Done()
 		return ctx.Err()
-	}
-	if strings.Contains(name, "/uploads/") || strings.HasPrefix(name, "uploads/") {
-		data, err := io.ReadAll(r)
-		if err != nil {
-			return err
-		}
-		var intent uploadIntent
-		if json.Unmarshal(data, &intent) == nil && intent.Abandoned {
-			<-ctx.Done()
-			return ctx.Err()
-		}
-		return b.Bucket.Upload(ctx, name, strings.NewReader(string(data)), opts...)
 	}
 	return b.Bucket.Upload(ctx, name, r, opts...)
 }

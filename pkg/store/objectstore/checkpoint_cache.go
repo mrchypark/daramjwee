@@ -1,10 +1,17 @@
 package objectstore
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 const defaultCheckpointCacheTTL = 2 * time.Second
 
-type checkpointCache struct{ *ttlCache[*checkpoint] }
+type checkpointCache struct {
+	*ttlCache[*checkpoint]
+	mu         sync.Mutex
+	entryEpoch map[string]uint64
+}
 
 func newCheckpointCache(maxBytes int64, ttl time.Duration, now func() time.Time) *checkpointCache {
 	if ttl <= 0 {
@@ -14,7 +21,7 @@ func newCheckpointCache(maxBytes int64, ttl time.Duration, now func() time.Time)
 	if cache == nil {
 		return nil
 	}
-	return &checkpointCache{cache}
+	return &checkpointCache{ttlCache: cache, entryEpoch: make(map[string]uint64)}
 }
 
 func (c *checkpointCache) Get(key string) (*checkpoint, bool) {
@@ -47,6 +54,35 @@ func (c *checkpointCache) SetEntry(key string, entry *checkpointEntry, sizeBytes
 	if c == nil {
 		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entryEpoch[key]++
+	c.setEntry(key, entry, sizeBytes)
+}
+
+func (c *checkpointCache) entryReadEpoch(key string) uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.entryEpoch[key]
+}
+
+func (c *checkpointCache) setEntryIfEpoch(key string, entry *checkpointEntry, sizeBytes int64, epoch uint64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entryEpoch[key] != epoch {
+		return
+	}
+	c.entryEpoch[key]++
+	c.setEntry(key, entry, sizeBytes)
+}
+
+func (c *checkpointCache) setEntry(key string, entry *checkpointEntry, sizeBytes int64) {
 	entries := make(map[string]checkpointEntry, 1)
 	if entry != nil {
 		entries[key] = *entry

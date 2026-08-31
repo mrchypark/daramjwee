@@ -7,11 +7,77 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mrchypark/daramjwee"
 )
+
+func TestCatalogMigratesLegacyEnvelopeWithoutKeyCollisions(t *testing.T) {
+	dir := t.TempDir()
+	legacy := map[string]Entry{
+		"format_version":     {SegmentPath: "version.seg", Length: 3},
+		"entries":            {SegmentPath: "entries.seg", Length: 5},
+		"_daramjwee_catalog": {PendingRemotePath: "segments/pack", Length: 3},
+	}
+	data, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot.json"), data, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot.json.state"), []byte(markerClean), 0o644))
+
+	cat, err := Open(dir)
+	require.NoError(t, err)
+	require.Len(t, cat.Entries(), 3)
+	require.False(t, cat.Entries()["_daramjwee_catalog"].PendingRemoteSizeKnown)
+
+	upgraded, err := os.ReadFile(filepath.Join(dir, "snapshot.json"))
+	require.NoError(t, err)
+	var stored snapshot
+	require.NoError(t, json.Unmarshal(upgraded, &stored))
+	require.Equal(t, snapshotMagic, stored.Magic)
+	require.Equal(t, currentSnapshotFormat, stored.FormatVersion)
+	var oldDecoder map[string]Entry
+	require.Error(t, json.Unmarshal(upgraded, &oldDecoder))
+}
+
+func TestCatalogAlwaysBlocksRollbackAfterOpeningLegacySnapshot(t *testing.T) {
+	dir := t.TempDir()
+	data, err := json.Marshal(map[string]Entry{"steady": {RemotePath: "blobs/steady", Length: 6}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot.json"), data, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot.json.state"), []byte(markerClean), 0o644))
+
+	_, err = Open(dir)
+	require.NoError(t, err)
+	upgraded, err := os.ReadFile(filepath.Join(dir, "snapshot.json"))
+	require.NoError(t, err)
+	var stored snapshot
+	require.NoError(t, json.Unmarshal(upgraded, &stored))
+	require.Equal(t, snapshotMagic, stored.Magic)
+	var oldDecoder map[string]Entry
+	require.Error(t, json.Unmarshal(upgraded, &oldDecoder))
+}
+
+func TestCatalogMigrationDoesNotCompletePartiallyPublishedUploadPlan(t *testing.T) {
+	dir := t.TempDir()
+	const remotePath = "segments/packed"
+	legacy := map[string]Entry{
+		"published": {RemotePath: remotePath, IntentCleanupPending: true, Generation: 1, PublicationToken: "published", Length: 4},
+		"pending":   {PendingRemotePath: remotePath, Generation: 2, PublicationToken: "pending", Length: 4},
+	}
+	data, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot.json"), data, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "snapshot.json.state"), []byte(markerClean), 0o644))
+
+	cat, err := Open(dir)
+	require.NoError(t, err)
+	plan, ok := cat.UploadPlans()[remotePath]
+	require.True(t, ok)
+	require.Empty(t, plan.Terminal)
+	require.Len(t, plan.Members, 2)
+}
 
 func TestCatalogUnchangedMutationsSkipPersist(t *testing.T) {
 	dir := t.TempDir()

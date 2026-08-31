@@ -1,6 +1,7 @@
 package objectstore
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 )
 
 type localCatalogEntry = internalcatalog.Entry
+type uploadPlan = internalcatalog.UploadPlan
+type uploadPlanMember = internalcatalog.UploadPlanMember
 
 var (
 	// ErrAmbiguousCommit means a catalog snapshot was renamed but its directory
@@ -26,16 +29,23 @@ func (s *Store) loadLocalEntry(key string) (localCatalogEntry, bool, error) {
 	return entry, ok, nil //nolint:unparam // error always nil; kept for interface consistency
 }
 
-func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) {
+func (s *Store) loadLiveLocalEntry(ctx context.Context, key string) (localCatalogEntry, bool, error) {
 	entry, ok, err := s.loadLocalEntry(key)
 	if err != nil || !ok {
 		return localCatalogEntry{}, ok, err
 	}
 	resolved, live, needsRepair, err := resolveLocalEntry(entry)
-	if err != nil || live || !needsRepair {
+	if err != nil {
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
+	}
+	if live || !needsRepair {
 		return resolved, live, err
 	}
 
+	if err := s.flushRun.acquire(ctx); err != nil {
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
+	}
+	defer s.flushRun.release()
 	s.lockManager.Lock(key)
 	defer s.lockManager.Unlock(key)
 
@@ -44,14 +54,17 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 		return localCatalogEntry{}, false, err
 	}
 	resolved, live, needsRepair, err = resolveLocalEntry(latest)
-	if err != nil || live || !needsRepair {
+	if err != nil {
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
+	}
+	if live || !needsRepair {
 		return resolved, live, err
 	}
 
 	repaired := repairedEntryWithoutLocalSegment(latest)
 	published, err := s.publishLocalEntry(key, repaired)
 	if err != nil {
-		return localCatalogEntry{}, false, err
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
 	}
 	if !published {
 		current, ok, err := s.loadLocalEntry(key) //nolint:govet // shadow: retry after lock acquisition
@@ -59,17 +72,19 @@ func (s *Store) loadLiveLocalEntry(key string) (localCatalogEntry, bool, error) 
 			return localCatalogEntry{}, ok, err
 		}
 		resolved, live, needsRepair, err = resolveLocalEntry(current)
-		if needsRepair {
-			repairedCurrent := repairedEntryWithoutLocalSegment(current)
-			if repairedCurrent.Missing {
-				return localCatalogEntry{}, false, errMissingLocalEntry
-			}
-			return localCatalogEntry{}, false, nil
+		if err != nil {
+			return localCatalogEntry{}, false, uncertainRead(ctx, err)
 		}
-		return resolved, live, err
+		if needsRepair {
+			return localCatalogEntry{}, false, uncertainRead(ctx, errMissingLocalEntry)
+		}
+		return resolved, live, nil
 	}
 	resolved, live, _, err = resolveLocalEntry(repaired)
-	return resolved, live, err
+	if err != nil {
+		return localCatalogEntry{}, false, uncertainRead(ctx, err)
+	}
+	return resolved, live, nil
 }
 
 func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, error) {
@@ -78,7 +93,7 @@ func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, 
 	}
 	if entry.Missing {
 		if entry.RemotePublished {
-			return localCatalogEntry{}, false, false, nil
+			return entry, false, false, nil
 		}
 		return localCatalogEntry{}, false, false, errMissingLocalEntry
 	}
@@ -86,7 +101,7 @@ func resolveLocalEntry(entry localCatalogEntry) (localCatalogEntry, bool, bool, 
 		if entry.PendingRemotePath != "" {
 			return localCatalogEntry{}, false, false, errMissingLocalEntry
 		}
-		return localCatalogEntry{}, false, false, nil
+		return entry, false, false, nil
 	}
 	if _, err := os.Stat(entry.SegmentPath); err == nil {
 		return entry, true, false, nil
@@ -149,6 +164,13 @@ func (s *Store) updateLocalEntriesIf(expected, updates map[string]localCatalogEn
 		return true, nil
 	}
 	return s.updateCatalogManyIf(expected, updates)
+}
+
+func (s *Store) updateLocalEntriesAndPlansIf(expected, updates map[string]localCatalogEntry, planUpdates map[string]uploadPlan, planDeletes []string) (bool, error) {
+	if s.updateCatalogState == nil {
+		return true, nil
+	}
+	return s.updateCatalogState(expected, updates, planUpdates, planDeletes)
 }
 
 func (s *Store) commitFlushUpdates(expectedEntries, updates map[string]localCatalogEntry) error {

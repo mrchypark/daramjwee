@@ -37,7 +37,7 @@ func TestStore_BlockCacheWarmHitAvoidsRemoteRangeRead(t *testing.T) {
 	assert.Equal(t, firstReads, bucket.rangeCalls())
 }
 
-func TestStore_BlockCacheCoalescesConcurrentSameBlockMisses(t *testing.T) {
+func TestStore_BlockCacheDoesNotShareCallerContextAcrossConcurrentMisses(t *testing.T) {
 	ctx := context.Background()
 	bucket := &countingRangeBucket{
 		Bucket: objstore.NewInMemBucket(),
@@ -79,7 +79,7 @@ func TestStore_BlockCacheCoalescesConcurrentSameBlockMisses(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	assert.Equal(t, 1, bucket.rangeCalls())
+	assert.Equal(t, readers, bucket.rangeCalls())
 }
 
 func TestStore_BlockCacheUsesSegmentPathAndBlockIndexNotLogicalKey(t *testing.T) {

@@ -19,6 +19,10 @@ import (
 // ErrNotFound is returned when an object is not found in the cache or the origin.
 var ErrNotFound = errors.New("daramjwee: object not found")
 
+// ErrReadStateUncertain means a higher tier owns a newer generation but cannot
+// currently prove its contents. Callers must not fall through to older tiers.
+var ErrReadStateUncertain = errors.New("daramjwee: read state is uncertain")
+
 // ErrNotModified is a sentinel error returned by a Fetcher when the resource
 // at the origin has not changed compared to the cached version.
 var ErrNotModified = errors.New("daramjwee: resource not modified")
