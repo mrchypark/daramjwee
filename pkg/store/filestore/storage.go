@@ -35,11 +35,12 @@ type FileStore struct {
 	generationSeq atomic.Uint64
 
 	// Policy-related fields
-	mu          sync.RWMutex
-	capacity    int64 // Capacity in bytes (0 means unlimited)
-	currentSize int64 // Current total size of stored files in bytes
-	policy      daramjwee.EvictionPolicy
-	fileSizes   map[string]int64 // Track file sizes for eviction
+	mu                  sync.RWMutex
+	capacity            int64 // Capacity in bytes (0 means unlimited)
+	currentSize         int64 // Current total size of stored files in bytes
+	policy              daramjwee.EvictionPolicy
+	fileSizes           map[string]int64  // Track file sizes for eviction
+	residentGenerations map[string]uint64 // Guarded by mu, retained only for resident keys.
 }
 
 var (
@@ -120,6 +121,7 @@ func WithCopyWrite() Option {
 
 // WithCapacity sets the maximum capacity of the store in bytes.
 // When capacity is exceeded, the eviction policy will be used to remove files.
+// Concurrent replacements and eviction failures can leave the store over capacity until a later write.
 // If capacity is 0 or less, the store has no limit.
 func WithCapacity(capacity int64) Option {
 	return func(fs *FileStore) {
@@ -143,12 +145,13 @@ func New(dir string, logger log.Logger, opts ...Option) (*FileStore, error) {
 		return nil, fmt.Errorf("failed to create base directory %s: %w", dir, err)
 	}
 	fs := &FileStore{
-		baseDir:       dir,
-		logger:        logger,
-		lockManager:   NewFileLockManager(2048),
-		generations:   make(map[string]uint64),
-		activeWriters: make(map[string]int),
-		fileSizes:     make(map[string]int64),
+		baseDir:             dir,
+		logger:              logger,
+		lockManager:         NewFileLockManager(2048),
+		generations:         make(map[string]uint64),
+		activeWriters:       make(map[string]int),
+		fileSizes:           make(map[string]int64),
+		residentGenerations: make(map[string]uint64),
 	}
 	if now := time.Now().UnixNano(); now != 0 {
 		fs.generationSeq.Store(uint64(now))
@@ -303,7 +306,12 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 			return fmt.Errorf("filestore: commit: %w", err)
 		}
 
-		locked := fs.lockPaths([]string{path}, nil)
+		fileInfo, err := os.Stat(tmpFile.Name())
+		if err != nil {
+			return fmt.Errorf("filestore: stat staged file: %w", err)
+		}
+
+		locked := fs.lockPaths([]string{path})
 		defer func() {
 			fs.unlockPaths(locked)
 		}()
@@ -329,15 +337,23 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 		}
 
 		// Update policy and size tracking after successful write
-		if err := fs.updateAfterSet(key, path); err != nil {
-			_ = level.Warn(fs.logger).Log("msg", "failed to update policy after set", "key", key, "err", err)
-		}
+		victims := fs.updateAfterSet(key, fileInfo.Size(), generation)
 		fs.setGenerationFloor(key, generation)
 
-		// Release the encoded-path publish lock before best-effort legacy cleanup.
+		// Release the publish stripe before acquiring any victim or legacy stripes.
 		fs.unlockPaths(locked)
 		locked = nil
-		if err := fs.removeLegacyPathOnly(key, nil); err != nil {
+		for _, victim := range victims {
+			if err := fs.evictKey(victim); err != nil {
+				_ = level.Warn(fs.logger).Log("msg", "failed to evict file", "key", victim.key, "err", err)
+				fs.mu.Lock()
+				if size, exists := fs.fileSizes[victim.key]; exists {
+					fs.policy.Add(victim.key, size)
+				}
+				fs.mu.Unlock()
+			}
+		}
+		if err := fs.removeLegacyPathOnly(key); err != nil {
 			_ = level.Warn(fs.logger).Log("msg", "failed to remove legacy path after set", "key", key, "err", err)
 		}
 
@@ -353,7 +369,7 @@ func (fs *FileStore) beginStagedSet(key string, metadata *daramjwee.Metadata) (*
 func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	candidates := fs.dataPathCandidates(key)
 	paths := candidatePaths(candidates)
-	locked := fs.lockPaths(paths, nil)
+	locked := fs.lockPaths(paths)
 	defer fs.unlockPaths(locked)
 	generation := fs.nextGeneration()
 
@@ -369,6 +385,7 @@ func (fs *FileStore) Delete(ctx context.Context, key string) error {
 	if fileSize, exists := fs.fileSizes[key]; exists {
 		fs.currentSize -= fileSize
 		delete(fs.fileSizes, key)
+		delete(fs.residentGenerations, key)
 	}
 	fs.policy.Remove(key)
 	fs.mu.Unlock()
@@ -533,7 +550,8 @@ func (fs *FileStore) readStoredKeyForCandidate(path string) (string, bool, error
 	return storedKey, storedKeyPresent, nil
 }
 
-func (fs *FileStore) lockPaths(paths []string, heldSlots map[uint64]struct{}) []string {
+// lockPaths acquires stripes in global order; callers must hold no path locks.
+func (fs *FileStore) lockPaths(paths []string) []string {
 	type slotPath struct {
 		slot uint64
 		path string
@@ -542,9 +560,6 @@ func (fs *FileStore) lockPaths(paths []string, heldSlots map[uint64]struct{}) []
 	bySlot := make(map[uint64]string, len(paths))
 	for _, path := range paths {
 		slot := fs.lockManager.getSlot(path)
-		if _, skip := heldSlots[slot]; skip {
-			continue
-		}
 		if existing, ok := bySlot[slot]; !ok || path < existing {
 			bySlot[slot] = path
 		}
@@ -963,16 +978,13 @@ func (fs *FileStore) storedKeyForPath(path, relPath string) (string, error) {
 	return relPath, nil
 }
 
-// updateAfterSet updates the policy and size tracking after a successful file write.
-func (fs *FileStore) updateAfterSet(key, path string) error {
-	// Get the file size
-	fileInfo, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("failed to stat file after write: %w", err)
-	}
+type evictionVictim struct {
+	key        string
+	generation uint64
+}
 
-	newFileSize := fileInfo.Size()
-
+// updateAfterSet runs under the publish stripe; victims must be evicted after unlocking it.
+func (fs *FileStore) updateAfterSet(key string, newFileSize int64, generation uint64) []evictionVictim {
 	fs.mu.Lock()
 
 	// If the file already existed, subtract its old size
@@ -982,11 +994,12 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 
 	// Add the new file size
 	fs.fileSizes[key] = newFileSize
+	fs.residentGenerations[key] = generation
 	fs.currentSize += newFileSize
 	fs.policy.Add(key, newFileSize)
 
 	// Collect keys to evict while holding the lock
-	var keysToEvict []string
+	var victims []evictionVictim
 	projectedSize := fs.currentSize
 	scheduled := make(map[string]struct{})
 	if fs.capacity > 0 {
@@ -995,7 +1008,7 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 			if len(candidates) == 0 {
 				break
 			}
-			// Filter out the current key to avoid deadlock
+			// Keep the entry that this commit just published.
 			var filteredCandidates []string
 			for _, candidate := range candidates {
 				if candidate != key {
@@ -1013,11 +1026,10 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 				break
 			}
 
-			keysToEvict = append(keysToEvict, filteredCandidates...)
-
 			for _, keyToEvict := range filteredCandidates {
 				scheduled[keyToEvict] = struct{}{}
 				if size, exists := fs.fileSizes[keyToEvict]; exists {
+					victims = append(victims, evictionVictim{key: keyToEvict, generation: fs.residentGenerations[keyToEvict]})
 					projectedSize -= size
 				}
 			}
@@ -1026,31 +1038,23 @@ func (fs *FileStore) updateAfterSet(key, path string) error {
 
 	fs.mu.Unlock()
 
-	// Perform actual file deletions without holding the mutex
-	heldSlots := map[uint64]struct{}{
-		fs.lockManager.getSlot(path): {},
-	}
-	for _, keyToEvict := range keysToEvict {
-		if err := fs.evictKey(keyToEvict, heldSlots); err != nil {
-			_ = level.Warn(fs.logger).Log("msg", "failed to evict file", "key", keyToEvict, "err", err)
-			fs.mu.Lock()
-			if size, exists := fs.fileSizes[keyToEvict]; exists {
-				fs.policy.Add(keyToEvict, size)
-			}
-			fs.mu.Unlock()
-		} else {
-			_ = level.Debug(fs.logger).Log("msg", "file evicted", "key", keyToEvict)
-		}
-	}
-
-	return nil
+	return victims
 }
 
-func (fs *FileStore) evictKey(key string, heldSlots map[uint64]struct{}) error {
+func (fs *FileStore) evictKey(victim evictionVictim) error {
+	key := victim.key
 	candidates := fs.dataPathCandidates(key)
 	paths := candidatePaths(candidates)
-	locked := fs.lockPaths(paths, heldSlots)
+	locked := fs.lockPaths(paths)
 	defer fs.unlockPaths(locked)
+
+	fs.mu.RLock()
+	_, resident := fs.fileSizes[key]
+	currentGeneration := fs.residentGenerations[key]
+	fs.mu.RUnlock()
+	if !resident || currentGeneration != victim.generation {
+		return nil
+	}
 
 	removablePaths, err := fs.deletablePaths(candidates, key)
 	if err != nil {
@@ -1064,14 +1068,16 @@ func (fs *FileStore) evictKey(key string, heldSlots map[uint64]struct{}) error {
 	if size, exists := fs.fileSizes[key]; exists {
 		fs.currentSize -= size
 		delete(fs.fileSizes, key)
+		delete(fs.residentGenerations, key)
 	}
 	fs.policy.Remove(key)
 	fs.mu.Unlock()
+	_ = level.Debug(fs.logger).Log("msg", "file evicted", "key", key)
 
 	return nil
 }
 
-func (fs *FileStore) removeLegacyPathOnly(key string, heldSlots map[uint64]struct{}) error {
+func (fs *FileStore) removeLegacyPathOnly(key string) error {
 	legacyPath := fs.legacyDataPath(key)
 	currentPath := fs.toDataPath(key)
 	if legacyPath == currentPath {
@@ -1084,7 +1090,7 @@ func (fs *FileStore) removeLegacyPathOnly(key string, heldSlots map[uint64]struc
 		ambiguous: fs.isAmbiguousLegacyPath(legacyPath),
 	}
 
-	locked := fs.lockPaths([]string{candidate.path}, heldSlots)
+	locked := fs.lockPaths([]string{candidate.path})
 	defer fs.unlockPaths(locked)
 
 	if candidate.ambiguous {
